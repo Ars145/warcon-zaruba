@@ -137,9 +137,10 @@ const ACTION_TITLES: Record<string, string> = {
 	'player.note': 'Player note',
 	'player.watch': 'Watchlist',
 	'list.add': 'Org list · added',
+	'list.update': 'Org list · expiry changed',
 	'list.remove': 'Org list · removed',
 	'list.import': 'Org list · imported from a server',
-	'list.expire': 'Org list · ban expired',
+	'list.expire': 'Org list · entry expired',
 	'lists.sync': 'Org list · sync',
 	login: 'Sign-in',
 	'login.failed': 'Sign-in failed'

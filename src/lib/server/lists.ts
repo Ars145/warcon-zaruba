@@ -446,6 +446,55 @@ export async function addEntry(
 	return { entry, sync };
 }
 
+/**
+ * Changes when an entry lifts itself. `expiresAt` must be present in the body: null makes the
+ * entry permanent, a timestamp moves the expiry. Re-syncs afterwards because an entry whose
+ * expiry had already passed is off the servers until the new date puts it back in the desired set.
+ */
+export async function updateEntry(
+	env: Env,
+	req: Request,
+	actor: SessionUser,
+	org: OrgRow,
+	kind: Kind,
+	steamIdIn: unknown,
+	body: Record<string, unknown>
+): Promise<{ entry: ListEntryView; sync: ListSyncSummary }> {
+	if (!('expiresAt' in body))
+		throw new ApiError(400, 'expiresAt is required; send null for permanent.', 'bad_request');
+	const steamId = requireSteamId(steamIdIn);
+	const expiresAt = parseExpiry(body.expiresAt);
+	const list = await listOf(env, org.id, kind);
+	const [row] = await env.db
+		.update(listEntries)
+		.set({ expiresAt })
+		.where(
+			and(
+				eq(listEntries.listId, list.id),
+				eq(listEntries.steamId, steamId),
+				isNull(listEntries.removedAt)
+			)
+		)
+		.returning({ id: listEntries.id });
+	if (!row) throw new ApiError(404, `${steamId} is not on the ${KIND_LABEL[kind]}.`, 'not_found');
+	await touch(env.db, list.id);
+	await writeAudit(env, req, {
+		actor,
+		orgId: org.id,
+		category: 'org',
+		action: 'list.update',
+		target: steamId,
+		outcome: 'ok',
+		message:
+			`${kind === 'ban' ? 'Ban' : 'Reserved slot'} across ${org.name} ` +
+			(expiresAt ? `now runs until ${expiresAt.toISOString()}` : 'is now permanent'),
+		detail: { orgId: org.id, org: org.name, kind, listId: list.id, expiresAt: iso(expiresAt) }
+	});
+	const sync = await gateway().syncOrg(env, org);
+	const entry = (await entriesView(env, org, kind)).find((e) => e.id === row.id)!;
+	return { entry, sync };
+}
+
 export async function removeEntry(
 	env: Env,
 	req: Request,

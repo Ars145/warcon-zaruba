@@ -272,6 +272,14 @@ check expiry-applied '76561198100000701' "$(req $J1 GET /api/servers/$SID/rcon/b
 ER="{\"steamId\":\"76561198100000702\",\"reason\":\"donor\",\"expiresAt\":\"$EXP\"}"
 check reserve-expiry-add '"expiresAt"' "$(req $J1 POST /api/orgs/$ORG/lists/reserve/entries "$ER")"
 check reserve-expiry-applied '76561198100000702' "$(req $J1 GET /api/servers/$SID/rcon/reserved)"
+# PATCH: a slot given out permanently can be put on a term afterwards (and back)
+req $J1 POST /api/orgs/$ORG/lists/reserve/entries '{"steamId":"76561198100000703","reason":"donor"}' >/dev/null
+check patch-no-field 'expiresAt is required' "$(req $J1 PATCH /api/orgs/$ORG/lists/reserve/entries/76561198100000703 '{}')"
+check patch-past 'future' "$(req $J1 PATCH /api/orgs/$ORG/lists/reserve/entries/76561198100000703 '{"expiresAt":"2020-01-01T00:00:00Z"}')"
+check patch-unknown 'not on the' "$(req $J1 PATCH /api/orgs/$ORG/lists/reserve/entries/76561198100000704 "{\"expiresAt\":\"$EXP\"}")"
+check patch-set "${EXP%Z}" "$(req $J1 PATCH /api/orgs/$ORG/lists/reserve/entries/76561198100000703 "{\"expiresAt\":\"$EXP\"}")"
+check patch-permanent '"expiresAt":null' "$(req $J1 PATCH /api/orgs/$ORG/lists/reserve/entries/76561198100000703 '{"expiresAt":null}')"
+check patch-reset "${EXP%Z}" "$(req $J1 PATCH /api/orgs/$ORG/lists/reserve/entries/76561198100000703 "{\"expiresAt\":\"$EXP\"}")"
 check steam-badid '400' "$(form $J1 '/account?/steam' 'steamId=abc')"
 check steam-set '200' "$(form $J1 '/account?/steam' 'steamId=76561198100000801')"
 check steam-dup-carol '409' "$(form $J5 '/account?/steam' 'steamId=76561198100000801')"
@@ -286,6 +294,8 @@ check expiry-lifted '0' "$(echo "$R" | grep -c 76561198100000701)"
 check expiry-row '"removal":"expired"' "$(req $J1 GET "/api/orgs/$ORG/lists/ban/entries?includeRemoved=1")"
 for i in $(seq 1 12); do RR=$(req $J1 GET /api/servers/$SID/rcon/reserved); [[ "$RR" != *76561198100000702* ]] && break; sleep 3; done
 check reserve-expiry-lifted '0' "$(echo "$RR" | grep -c 76561198100000702)"
+check patch-expiry-lifted '0' "$(req $J1 GET /api/servers/$SID/rcon/reserved | grep -c 76561198100000703)"
+check patch-audit '"action":"list.update"' "$(req $J1 GET '/api/audit?action=list.update')"
 check reserve-expiry-row '"removal":"expired"' "$(req $J1 GET "/api/orgs/$ORG/lists/reserve/entries?includeRemoved=1")"
 check audit-expire '"action":"list.expire"' "$(req $J1 GET '/api/audit?action=list.expire')"
 
