@@ -9,7 +9,13 @@
 	import { fmtTime } from '$lib/format';
 	import { toast } from '$lib/toast.svelte';
 	import { confirmDialog } from '$lib/confirm.svelte';
-	import { describeSync, STATE_TEXT, STATE_TONE } from '$lib/lists';
+	import {
+		describeSync,
+		expiryIso,
+		RESERVE_EXPIRY_OPTIONS,
+		STATE_TEXT,
+		STATE_TONE
+	} from '$lib/lists';
 	import { isSteamId, steamProfiles, type SteamProfile } from '$lib/steam-profiles';
 	import Badge from '$lib/components/Badge.svelte';
 	import SteamName from '$lib/components/SteamName.svelte';
@@ -37,6 +43,10 @@
 	let busy = $state(false);
 	let newId = $state('');
 	let newReason = $state('');
+	/** how long the new slot lasts: a value from RESERVE_EXPIRY_OPTIONS ('0' = permanent) */
+	let newExpiry = $state('0');
+	/** the datetime-local value behind the 'custom' choice */
+	let newExpiryCustom = $state('');
 	/** Steam personas, for the avatar beside a name */
 	let steam = $state<Record<string, SteamProfile | null>>({});
 	/** the persona for the id being typed into the reserve form: undefined while unknown */
@@ -102,6 +112,7 @@
 		steamId: { by: (r) => r.e.steamId },
 		source: { by: (r) => (r.e.member ? 'member' : 'list') },
 		note: { by: (r) => r.e.reason },
+		expires: { by: (r) => r.e.expiresAt ?? '￿' },
 		added: { by: (r) => (r.e.member ? null : r.e.addedAt), dir: 'desc' },
 		servers: { by: (r) => r.e.servers.filter((s) => s.state === 'applied').length, dir: 'desc' }
 	});
@@ -151,13 +162,26 @@
 		}
 		busy = true;
 		try {
+			const expiresAt = expiryIso(newExpiry, newExpiryCustom);
 			const res = await api<{ sync: ListSyncSummary }>('POST', path, {
 				steamId,
-				reason: newReason.trim()
+				reason: newReason.trim(),
+				expiresAt
 			});
-			toast(describeSync(res.sync, `Reserved a slot for ${steamId}.`), 'ok', 8000);
+			toast(
+				describeSync(
+					res.sync,
+					expiresAt
+						? `Reserved a slot for ${steamId} until ${fmtTime(expiresAt)}.`
+						: `Reserved a slot for ${steamId}.`
+				),
+				'ok',
+				8000
+			);
 			newId = '';
 			newReason = '';
+			newExpiry = '0';
+			newExpiryCustom = '';
 			await invalidateAll();
 		} catch (err) {
 			toast(errorMessage(err), 'err');
@@ -319,10 +343,30 @@
 				placeholder="Note, e.g. donor, clan member (optional)"
 				bind:value={newReason}
 			/>
+			<div class="flex flex-wrap gap-3">
+				<label class="block sm:w-40"
+					><span class="field-label">Expires</span><select class="input" bind:value={newExpiry}>
+						{#each RESERVE_EXPIRY_OPTIONS as [value, label] (value)}
+							<option {value}>{label}</option>
+						{/each}
+					</select></label
+				>
+				{#if newExpiry === 'custom'}
+					<label class="block sm:flex-1"
+						><span class="field-label">Until (local time)</span><input
+							class="input"
+							type="datetime-local"
+							bind:value={newExpiryCustom}
+							required
+						/></label
+					>
+				{/if}
+			</div>
 		</form>
 		<p class="note">
-			Handed out on every server in {org.name}, now and when one is added later. To reserve a slot
-			on one server only, use that server's Reserved slots tab.
+			Handed out on every server in {org.name}, now and when one is added later. A slot with an
+			expiry is withdrawn everywhere on its own when the date passes. To reserve a slot on one
+			server only, use that server's Reserved slots tab.
 		</p>
 		{#if owner}
 			<label class="mt-3 flex items-start gap-2 border-t border-white/8 pt-3 text-[13px]">
@@ -371,6 +415,7 @@
 						<SortHeader {sort} key="steamId">SteamID64</SortHeader>
 						<SortHeader {sort} key="source">Source</SortHeader>
 						<SortHeader {sort} key="note">Note</SortHeader>
+						<SortHeader {sort} key="expires">Expires</SortHeader>
 						<SortHeader {sort} key="added">Added</SortHeader>
 						<SortHeader {sort} key="servers">Servers</SortHeader>
 						<th></th>
@@ -379,7 +424,7 @@
 				<tbody>
 					{#each rows as r (r.e.id)}
 						{@const e = r.e}
-						<tr>
+						<tr class={e.expired ? 'text-mist-400' : ''}>
 							<td>
 								<span class="inline-flex min-w-0 items-center gap-2.5">
 									<span
@@ -428,6 +473,17 @@
 							</td>
 							<td class="text-[12.5px] whitespace-nowrap">
 								{#if e.member}
+									<span class="text-mist-600">—</span>
+								{:else if !e.expiresAt}
+									<span class="text-mist-400">Permanent</span>
+								{:else if e.expired}
+									<Badge tone="warn">expired, lifting</Badge>
+								{:else}
+									{fmtTime(e.expiresAt)}
+								{/if}
+							</td>
+							<td class="text-[12.5px] whitespace-nowrap">
+								{#if e.member}
 									<span class="text-mist-400">by membership</span>
 								{:else}
 									<div>{e.addedByName || '—'}</div>
@@ -460,7 +516,7 @@
 						</tr>
 					{:else}
 						<tr
-							><td colspan="7" class="py-6 text-center text-mist-600"
+							><td colspan="8" class="py-6 text-center text-mist-600"
 								>Nobody matches that filter.</td
 							></tr
 						>

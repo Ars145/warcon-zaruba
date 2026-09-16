@@ -20,9 +20,9 @@ check root-redirects-setup '/setup' "$(curl -s -o /dev/null -w '%{redirect_url}'
 check signin-redirects-setup '/setup' "$(curl -s -o /dev/null -w '%{redirect_url}' $B/sign-in)"
 check api-unauth 'Sign in required' "$(req $J2 GET /api/servers)"
 check csrf-blocked 'X-Requested-With' "$(curl -s -X POST -H 'Content-Type: application/json' -d '{}' $B/api/servers)"
-check setup-weak-pw '400' "$(form $J1 /setup 'username=james&password=short')"
-check setup-ok "303 $B/" "$(form $J1 /setup 'username=james&password=correct-horse-battery&displayName=James')"
-check setup-twice '303' "$(form $J2 /setup 'username=x&password=correct-horse-battery')"
+check setup-weak-pw '400' "$(form $J1 '/setup?/password' 'username=james&password=short')"
+check setup-ok "303 $B/" "$(form $J1 '/setup?/password' 'username=james&password=correct-horse-battery&displayName=James')"
+check setup-twice '303' "$(form $J2 '/setup?/password' 'username=x&password=correct-horse-battery')"
 check me-owner 'role:"owner"' "$(curl -s -b $J1 $B/ | grep -o 'role:"owner"' | head -1)"
 
 echo "== sign-in"
@@ -268,6 +268,10 @@ EXP=$(date -u -v+12S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+12 seconds'
 EB="{\"steamId\":\"76561198100000701\",\"expiresAt\":\"$EXP\"}"
 check expiry-add '"expiresAt"' "$(req $J1 POST /api/orgs/$ORG/lists/ban/entries "$EB")"
 check expiry-applied '76561198100000701' "$(req $J1 GET /api/servers/$SID/rcon/bans)"
+# a reserved slot handed out for a fixed term lifts itself the same way
+ER="{\"steamId\":\"76561198100000702\",\"reason\":\"donor\",\"expiresAt\":\"$EXP\"}"
+check reserve-expiry-add '"expiresAt"' "$(req $J1 POST /api/orgs/$ORG/lists/reserve/entries "$ER")"
+check reserve-expiry-applied '76561198100000702' "$(req $J1 GET /api/servers/$SID/rcon/reserved)"
 check steam-badid '400' "$(form $J1 '/account?/steam' 'steamId=abc')"
 check steam-set '200' "$(form $J1 '/account?/steam' 'steamId=76561198100000801')"
 check steam-dup-carol '409' "$(form $J5 '/account?/steam' 'steamId=76561198100000801')"
@@ -280,6 +284,9 @@ check member-slot-gone '0' "$(req $J1 GET /api/servers/$SID/rcon/reserved | grep
 for i in $(seq 1 12); do R=$(req $J1 GET /api/servers/$SID/rcon/bans); [[ "$R" != *76561198100000701* ]] && break; sleep 3; done
 check expiry-lifted '0' "$(echo "$R" | grep -c 76561198100000701)"
 check expiry-row '"removal":"expired"' "$(req $J1 GET "/api/orgs/$ORG/lists/ban/entries?includeRemoved=1")"
+for i in $(seq 1 12); do RR=$(req $J1 GET /api/servers/$SID/rcon/reserved); [[ "$RR" != *76561198100000702* ]] && break; sleep 3; done
+check reserve-expiry-lifted '0' "$(echo "$RR" | grep -c 76561198100000702)"
+check reserve-expiry-row '"removal":"expired"' "$(req $J1 GET "/api/orgs/$ORG/lists/reserve/entries?includeRemoved=1")"
 check audit-expire '"action":"list.expire"' "$(req $J1 GET '/api/audit?action=list.expire')"
 
 echo "== analytics"

@@ -110,7 +110,8 @@
 		player: { by: (s) => s.name },
 		steamId: { by: (s) => s.steamId },
 		source: { by: (s) => s.rank },
-		note: { by: (s) => s.src?.note }
+		note: { by: (s) => s.src?.note },
+		expires: { by: (s) => s.src?.expiresAt ?? '￿' }
 	});
 	let rows = $derived(
 		sort.sorted(slots.filter((s) => matches(search, s.steamId, s.name, s.src?.note)))
@@ -375,6 +376,7 @@
 						<SortHeader {sort} key="steamId">SteamID64</SortHeader>
 						<SortHeader {sort} key="source">Source</SortHeader>
 						<SortHeader {sort} key="note">Note</SortHeader>
+						<SortHeader {sort} key="expires">Expires</SortHeader>
 						<th></th>
 					</tr>
 				</thead>
@@ -436,6 +438,13 @@
 							<td
 								>{#if s.src?.note}{s.src.note}{:else}<span class="text-mist-600">—</span>{/if}</td
 							>
+							<td class="text-[12.5px] whitespace-nowrap">
+								{#if s.src?.expiresAt}
+									{fmtTime(s.src.expiresAt)}
+								{:else}
+									<span class="text-mist-600">—</span>
+								{/if}
+							</td>
 							<td class="text-right">
 								{#if canReserve && (s.here || s.pending === 'arrives') && s.pending !== 'leaves'}
 									<button
@@ -449,7 +458,7 @@
 						</tr>
 					{:else}
 						<tr
-							><td colspan="5" class="py-6 text-center text-mist-600"
+							><td colspan="6" class="py-6 text-center text-mist-600"
 								>Nobody matches that filter.</td
 							></tr
 						>

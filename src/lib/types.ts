@@ -537,6 +537,8 @@ export interface ReservedSlotState {
 	name: string | null;
 	/** the note on the org list entry, if any */
 	note: string;
+	/** when the org list entry lifts itself, null for a permanent slot */
+	expiresAt: string | null;
 	/** a slot the org hands its members, not an entry someone added */
 	member: boolean;
 }

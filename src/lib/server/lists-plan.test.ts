@@ -157,6 +157,27 @@ describe('planSync', () => {
 		expect(p.local).toEqual([{ kind: 'reserve', steamId: 'b' }]);
 	});
 
+	test('a reserved slot past its expiry leaves the desired set and comes off the server', () => {
+		const entries = [
+			{ steamId: 'donor', removedAt: null, expiresAt: ago(1) },
+			{ steamId: 'lifer', removedAt: null, expiresAt: null }
+		];
+		const live = activeEntries(entries, now);
+		expect(live.map((e) => e.steamId)).toEqual(['lifer']);
+		const p = planSync(
+			input({
+				desired: { bans: [], reserved: live.map((e) => slot(e.steamId)) },
+				observed: { bans: [], reserved: ['donor', 'lifer'] },
+				state: [
+					state({ kind: 'reserve', steamId: 'donor' }),
+					state({ kind: 'reserve', steamId: 'lifer' })
+				]
+			})
+		);
+		expect(p.removes).toEqual([{ kind: 'reserve', steamId: 'donor' }]);
+		expect(p.adds).toEqual([]);
+	});
+
 	test('a managed reserved slot no longer wanted is removed; a local one is left alone', () => {
 		const p = planSync(
 			input({
