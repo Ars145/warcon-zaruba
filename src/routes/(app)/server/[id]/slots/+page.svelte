@@ -15,8 +15,9 @@
 	import SortHeader from '$lib/components/SortHeader.svelte';
 	import { TableSort, matches } from '$lib/table.svelte';
 	import { isSteamId, steamProfiles, type SteamProfile } from '$lib/steam-profiles';
-	import { describeSync, STATE_TONE } from '$lib/lists';
-	import type { ListSyncServer, ServerListsState } from '$lib/types';
+	import ExpiryDialog from '$lib/components/ExpiryDialog.svelte';
+	import { describeSync, expiryIso, RESERVE_EXPIRY_OPTIONS, STATE_TONE } from '$lib/lists';
+	import type { ListSyncServer, ListSyncSummary, ServerListsState } from '$lib/types';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -41,6 +42,13 @@
 	 */
 	let document = $state<string[] | null>(null);
 	let reservedId = $state('');
+	/** how long the new slot lasts; anything but '0' goes through the org list, see addSlot */
+	let newExpiry = $state('0');
+	let newExpiryCustom = $state('');
+	/** the org entry whose expiry is being edited, null when the dialog is closed */
+	let editing = $state<{ steamId: string; name: string | null; expiresAt: string | null } | null>(
+		null
+	);
 	let search = $state('');
 	let busy = $state(false);
 	/** who is on the server right now, by SteamID, with the name they are playing under */
@@ -213,17 +221,51 @@
 			busy = false;
 		}
 	}
-	const addSlot = () =>
-		act(
-			'reservedAdd',
-			{ steamId: reservedId.trim(), viaConfig },
-			{
-				after: async () => {
-					reservedId = '';
-					await refreshReserved();
+	/**
+	 * Hand out a slot. A permanent one is written straight to this server, which is what the
+	 * reserved-slot routes and the config document can hold. A slot with a term has to be an
+	 * organisation entry instead: only the panel keeps records, so only a panel record can expire
+	 * — and an org entry covers every server the organisation runs, this one included.
+	 */
+	async function addSlot() {
+		const steamId = reservedId.trim();
+		const expiresAt = expiryIso(newExpiry, newExpiryCustom);
+		if (!expiresAt) {
+			await act(
+				'reservedAdd',
+				{ steamId, viaConfig },
+				{
+					after: async () => {
+						reservedId = '';
+						await refreshReserved();
+					}
 				}
-			}
-		);
+			);
+			return;
+		}
+		busy = true;
+		try {
+			const res = await api<{ sync: ListSyncSummary }>(
+				'POST',
+				`/api/orgs/${encodeURIComponent(data.server.orgId)}/lists/reserve/entries`,
+				{ steamId, reason: '', expiresAt }
+			);
+			toast(
+				describeSync(res.sync, `Reserved a slot for ${steamId} until ${fmtTime(expiresAt)}.`),
+				'ok',
+				8000
+			);
+			reservedId = '';
+			newExpiry = '0';
+			newExpiryCustom = '';
+			await invalidateAll();
+			await refreshReserved();
+		} catch (err) {
+			toast(errorMessage(err), 'err');
+		} finally {
+			busy = false;
+		}
+	}
 	async function removeSlot(steamId: string, name: string | null) {
 		const src = slotSource(steamId);
 		const who = name ? `${name} (${steamId})` : steamId;
@@ -323,10 +365,34 @@
 				disabled={!canReserve}
 				bind:value={reservedId}
 			/>
-			<button type="submit" class="btn btn-primary" disabled={!canReserve || !reservedId.trim()}
+			<button
+				type="submit"
+				class="btn btn-primary"
+				disabled={busy || !reservedId.trim() || (newExpiry === '0' ? !canReserve : !listsEdit)}
 				>Reserve</button
 			>
 		</form>
+		{#if listsEdit}
+			<div class="mt-2 flex flex-wrap gap-3">
+				<label class="block sm:w-40"
+					><span class="field-label">Expires</span><select class="input" bind:value={newExpiry}>
+						{#each RESERVE_EXPIRY_OPTIONS as [value, text] (value)}
+							<option {value}>{text}</option>
+						{/each}
+					</select></label
+				>
+				{#if newExpiry === 'custom'}
+					<label class="block sm:flex-1"
+						><span class="field-label">Until (local time)</span><input
+							class="input"
+							type="datetime-local"
+							bind:value={newExpiryCustom}
+							required
+						/></label
+					>
+				{/if}
+			</div>
+		{/if}
 		{#if previewId && preview}
 			<div class="mt-1.5 text-[12.5px]"><SteamName profile={preview} /></div>
 		{:else if previewId && preview === null}
@@ -334,15 +400,19 @@
 		{/if}
 		<p class="note">
 			{#if viaConfig}
-				This server build has no live reserved-slot routes, so slots are written to
-				+DefaultReservedPlayerIds in its config document (permanent only).
-				{#if listState?.canEditOrg}To reserve a slot on every server, use the organisation list.{/if}
+				This server build has no live reserved-slot routes, so a permanent slot is written to
+				+DefaultReservedPlayerIds in its config document, and the server takes it up at its next
+				restart.
+				{#if listState?.canEditOrg}A slot with an expiry is kept by the panel as an organisation
+					entry instead — it covers every server in the organisation and is withdrawn on its own
+					when the date passes.{/if}
 			{:else if !data.features.reservedSlots}
 				This server build has no live reserved-slot routes and no writable config document, so
 				nothing can be reserved from here.
 			{:else if listState?.canEditOrg}
-				Written to this server's ServerSettings.ini only. To reserve a slot on every server, use the
-				organisation list.
+				A permanent slot is written to this server's ServerSettings.ini only. A slot with an expiry
+				is kept by the panel as an organisation entry instead — it covers every server in the
+				organisation and is withdrawn on its own when the date passes.
 			{:else}
 				Written to this server's ServerSettings.ini only.
 			{/if}
@@ -446,6 +516,19 @@
 								{/if}
 							</td>
 							<td class="text-right">
+								{#if listsEdit && s.src?.managed && !s.src.member}
+									<button
+										type="button"
+										class="btn btn-sm btn-ghost"
+										title="Set or clear when this slot runs out"
+										onclick={() =>
+											(editing = {
+												steamId: s.steamId,
+												name: s.name,
+												expiresAt: s.src?.expiresAt ?? null
+											})}>Expiry</button
+									>
+								{/if}
 								{#if canReserve && (s.here || s.pending === 'arrives') && s.pending !== 'leaves'}
 									<button
 										type="button"
@@ -484,3 +567,19 @@
 		</div>
 	{/if}
 </div>
+
+{#if editing && listState}
+	{@const e = editing}
+	<ExpiryDialog
+		orgId={listState.orgId}
+		kind="reserve"
+		steamId={e.steamId}
+		name={e.name}
+		expiresAt={e.expiresAt}
+		onclose={() => (editing = null)}
+		onsaved={async () => {
+			await invalidateAll();
+			await refreshReserved();
+		}}
+	/>
+{/if}

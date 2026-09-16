@@ -19,6 +19,7 @@
 	import { isSteamId, steamProfiles, type SteamProfile } from '$lib/steam-profiles';
 	import Badge from '$lib/components/Badge.svelte';
 	import SteamName from '$lib/components/SteamName.svelte';
+	import ExpiryDialog from '$lib/components/ExpiryDialog.svelte';
 	import ImportCandidates from './ImportCandidates.svelte';
 	import SortHeader from '$lib/components/SortHeader.svelte';
 	import { TableSort, matches } from '$lib/table.svelte';
@@ -47,6 +48,10 @@
 	let newExpiry = $state('0');
 	/** the datetime-local value behind the 'custom' choice */
 	let newExpiryCustom = $state('');
+	/** the entry whose expiry is being edited, null when the dialog is closed */
+	let editing = $state<{ steamId: string; name: string | null; expiresAt: string | null } | null>(
+		null
+	);
 	/** Steam personas, for the avatar beside a name */
 	let steam = $state<Record<string, SteamProfile | null>>({});
 	/** the persona for the id being typed into the reserve form: undefined while unknown */
@@ -507,6 +512,18 @@
 									<button
 										type="button"
 										class="btn btn-sm btn-ghost"
+										title="Set or clear when this slot runs out"
+										disabled={busy}
+										onclick={() =>
+											(editing = {
+												steamId: e.steamId,
+												name: r.name,
+												expiresAt: e.expiresAt
+											})}>Expiry</button
+									>
+									<button
+										type="button"
+										class="btn btn-sm btn-ghost"
 										title="Withdraw this slot on every server"
 										disabled={busy}
 										onclick={() => remove(e, r.name)}>Withdraw</button
@@ -542,3 +559,16 @@
 		</div>
 	{/if}
 </div>
+
+{#if editing}
+	{@const e = editing}
+	<ExpiryDialog
+		orgId={org.id}
+		kind="reserve"
+		steamId={e.steamId}
+		name={e.name}
+		expiresAt={e.expiresAt}
+		onclose={() => (editing = null)}
+		onsaved={invalidateAll}
+	/>
+{/if}
