@@ -12,7 +12,6 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
 
 concurrency:
   group: sync-upstream
@@ -65,22 +64,17 @@ jobs:
           # resolved in a pull request. main is left exactly as it was.
           git push --force origin upstream/main:refs/heads/sync/upstream
 
-      # Forks have Issues switched off, so a conflict is reported as a pull
-      # request from the parked branch instead. It cannot be merged as it
-      # stands — it is the place to resolve the conflict, by hand or in the
-      # web editor.
-      - name: Open a pull request for the conflict
+      # Issues are off on a fork and Actions is deliberately not allowed to open
+      # pull requests here, so a conflict is reported by failing the run: it goes
+      # red in the Actions tab and GitHub emails the owner. Upstream's tip is
+      # already parked on sync/upstream to resolve from.
+      - name: Fail on a conflict
         if: steps.merge.outputs.merged == 'false'
         env:
-          GH_TOKEN: ${{ github.token }}
           BEHIND: ${{ steps.merge.outputs.behind }}
           CONFLICTS: ${{ steps.merge.outputs.conflicts }}
         run: |
-          TITLE="Upstream merge needs hands ($BEHIND commit(s) behind)"
-          BODY=$(printf 'The scheduled merge of upstream/main stopped on conflicts, so main was left alone.\n\nConflicting files:\n```\n%s\n```\n\nResolve locally:\n```\ngit fetch upstream\ngit merge upstream/main\n```\n' "$CONFLICTS")
-          EXISTING=$(gh pr list --head sync/upstream --state open --json number --jq '.[0].number')
-          if [ -n "$EXISTING" ]; then
-            gh pr edit "$EXISTING" --title "$TITLE" --body "$BODY"
-          else
-            gh pr create --base main --head sync/upstream --title "$TITLE" --body "$BODY"
-          fi
+          echo "::error title=Upstream merge needs hands::$BEHIND commit(s) behind; conflicts in: $(echo "$CONFLICTS" | tr '\n' ' ')"
+          echo "main was left untouched. Upstream's tip is on the sync/upstream branch."
+          echo "Resolve with: git fetch upstream && git merge upstream/main"
+          exit 1
