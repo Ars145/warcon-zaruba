@@ -2,21 +2,25 @@
 // built on what the worker already sees (joins, player counts, empty stretches) plus the Steam cache:
 //   welcome      whisper a message to players as they join (or once they have picked a faction)
 //   faction_change  whisper a message to players who switch from one faction to another
-//   broadcast    rotate through messages every N minutes while enough people are on
+//   broadcast    rotate through messages every N minutes while the player count is in its band
 //   empty_reset  send an empty server back to a chosen map after N minutes
 //   risk_kick    kick joiners who match Steam / ban-list rules (see risk.ts)
+//   team_kill    whisper or kick a player over team kills the kill feed reports (feed-events.ts)
+//   seed_reward  hand players who stay through a low population a reserved slot on the org list
 // The worker evaluates them on every observation and writes the actions they want to the outbox
 // (outbox.ts delivers, and every delivery lands in the audit trail as category "trigger"). A dry
 // run replays the last 24 hours from the samples and sessions tables so a rule can be checked
 // before it touches anyone.
-import { and, asc, desc, eq, gte, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNotNull, or, sql } from 'drizzle-orm';
 import type { Env } from './env';
 import { ApiError, int, newId, str } from './http';
 import { writeAudit } from './audit';
 import {
+	kills,
 	playerSessions,
 	samples,
 	serverLive,
+	servers,
 	triggers,
 	type ServerRow,
 	type SteamProfileRow,
@@ -26,14 +30,18 @@ import { getProfiles, steamEnabled } from './steam';
 import { localSignals, orgServers, type LocalSignals } from './players';
 import { gateway } from './gateway';
 import type { SessionUser } from './access';
+import type { ServerAccess } from './access-resolve';
+import { CAPABILITY_INFO } from '$lib/capabilities';
 import type { DryRunResult, Player, Status, TriggerKind, TriggerView } from '$lib/types';
 import {
+	broadcastWanted,
 	factionChangeTargets,
 	isTriggerKind,
 	onTarget,
 	renderTemplate,
 	restartNoticeStage,
 	riskKickVerdict,
+	teamKillStage,
 	TRIGGER_LABELS,
 	validateConfig,
 	welcomeTargets,
@@ -43,10 +51,21 @@ import {
 	type FactionPick,
 	type RestartNoticeConfig,
 	type RestartNoticeState,
+	fullMoments,
+	lowStretches,
+	matchBroadcastMessages,
+	matchReplay,
+	seedReplay,
+	type MatchBroadcastConfig,
+	type MatchEnd,
 	type RiskKickConfig,
+	type SeedRewardConfig,
+	type TeamKillConfig,
 	type WelcomeConfig
 } from './trigger-rules';
 import { fmtUptime, RESTART_AFTER_HOURS, restartWindow } from '$lib/uptime';
+import { DEFAULT_SCORE_CAP, scoreCapOf } from '$lib/match';
+import { settings } from './settings';
 
 export * from './trigger-rules';
 
@@ -85,17 +104,46 @@ async function triggerOf(env: Env, serverId: string, id: string): Promise<Trigge
 	return row;
 }
 
+/**
+ * A rule that writes outside the server needs the capability an admin would need to do it by
+ * hand: the Seeding reward puts players on the organisation's reserved list.
+ */
+function requireRuleCaps(kind: TriggerKind, server: ServerRow, access: ServerAccess): void {
+	if (kind !== 'seed_reward' || access.caps.has('lists.edit')) return;
+	throw new ApiError(
+		403,
+		`A ${TRIGGER_LABELS[kind]} rule edits the organisation's reserved-slot list, which needs '${CAPABILITY_INFO['lists.edit'].label}' on ${server.name}; your role '${access.roleName}' does not include it.`,
+		'forbidden'
+	);
+}
+
 export async function createTrigger(
 	env: Env,
 	req: Request,
 	user: SessionUser,
 	server: ServerRow,
+	access: ServerAccess,
 	body: Record<string, unknown>
 ): Promise<TriggerView> {
 	if (!isTriggerKind(body.kind)) throw new ApiError(400, 'Unknown trigger kind.');
 	const kind = body.kind;
+	requireRuleCaps(kind, server, access);
 	const config = validateConfig(kind, body.config);
 	const name = str(body.name, 60) || TRIGGER_LABELS[kind];
+	// Seed time is one count per server, taken against one threshold, so one rule holds it.
+	if (kind === 'seed_reward') {
+		const [other] = await env.db
+			.select({ name: triggers.name })
+			.from(triggers)
+			.where(and(eq(triggers.serverId, server.id), eq(triggers.kind, 'seed_reward')))
+			.limit(1);
+		if (other)
+			throw new ApiError(
+				409,
+				`This server already has a ${TRIGGER_LABELS[kind]} rule ("${other.name}"); edit that one instead.`,
+				'duplicate'
+			);
+	}
 	const [row] = await env.db
 		.insert(triggers)
 		.values({
@@ -128,10 +176,12 @@ export async function updateTrigger(
 	req: Request,
 	user: SessionUser,
 	server: ServerRow,
+	access: ServerAccess,
 	id: string,
 	body: Record<string, unknown>
 ): Promise<TriggerView> {
 	const row = await triggerOf(env, server.id, id);
+	requireRuleCaps(row.kind, server, access);
 	const set: Partial<typeof triggers.$inferInsert> = {};
 	if (body.name !== undefined) set.name = str(body.name, 60) || row.name;
 	if (body.enabled !== undefined) set.enabled = !!body.enabled;
@@ -197,11 +247,17 @@ export interface TickContext {
 	firstVisit: Set<string>;
 	/** SteamIDs with a reserved slot */
 	reserved: Set<string>;
+	/** false until the worker has read the server's reserved list since it started */
+	reservedLoaded: boolean;
+	/** seed time so far of the open sessions, by SteamID (empty while no seeding rule is on) */
+	seedMs: Map<string, number>;
 	/** pre-fetched for risk rules: the panel's own signals and Steam profiles of the joiners */
 	signals: Map<string, LocalSignals>;
 	profiles: Map<string, SteamProfileRow>;
 	/** when the game process started (ms), from GET /v1/health; 0 while unknown */
 	startedAt: number;
+	/** the match that ended between the previous look and this one, or null */
+	matchEnd: MatchEnd | null;
 	ts: Date;
 }
 
@@ -238,7 +294,8 @@ const vars = (ctx: TickContext, p?: Player, previous = '') => ({
 	server: ctx.status.serverName || ctx.server.name,
 	map: ctx.status.map,
 	players: ctx.status.playerCount,
-	max: ctx.status.maxPlayers
+	max: ctx.status.maxPlayers,
+	cap: scoreCapOf(ctx.status)
 });
 
 // Enabled triggers per server, cached briefly: the worker asks on every observation.
@@ -295,6 +352,15 @@ export async function evaluateTriggers(
 					break;
 				case 'restart_notice':
 					evalRestartNotice(ctx, row, row.config as RestartNoticeConfig, out);
+					break;
+				case 'team_kill':
+					// Acted on as kills arrive (feed-events.ts), not per observation.
+					break;
+				case 'seed_reward':
+					await evalSeedReward(env, ctx, row, row.config as SeedRewardConfig, out);
+					break;
+				case 'match_broadcast':
+					evalMatchBroadcast(ctx, row, row.config as MatchBroadcastConfig, out);
 					break;
 			}
 		} catch (err) {
@@ -366,7 +432,7 @@ function evalFactionChange(
 }
 
 function evalBroadcast(ctx: TickContext, row: TriggerRow, cfg: BroadcastConfig, out: Evaluation) {
-	if (ctx.status.playerCount < cfg.minPlayers) return;
+	if (!broadcastWanted(cfg, ctx.status.playerCount)) return;
 	const due =
 		!row.lastFiredAt || ctx.ts.getTime() - row.lastFiredAt.getTime() >= cfg.everyMinutes * 60_000;
 	if (!due) return;
@@ -466,6 +532,7 @@ function evalRiskKick(
 			steamEnabled: steamEnabled(env),
 			bannedOn: l?.bannedOn ?? [],
 			watched: l?.watched ?? null,
+			resembles: l?.resembles ?? [],
 			reserved: ctx.reserved.has(p.steamId),
 			now: ctx.ts
 		});
@@ -527,6 +594,143 @@ function evalRestartNotice(
 		lastResult: `Sending: ${message}`,
 		state: hit.state
 	});
+}
+
+// A match boundary is one tick, so the rule keeps no state: the end message then the start
+// message, each an outbox row keyed on the tick.
+function evalMatchBroadcast(
+	ctx: TickContext,
+	row: TriggerRow,
+	cfg: MatchBroadcastConfig,
+	out: Evaluation
+) {
+	if (!ctx.matchEnd) return;
+	const sends = matchBroadcastMessages(cfg, ctx.matchEnd, ctx.status.playerCount, vars(ctx));
+	if (!sends.length) return;
+	for (const { stage, message } of sends)
+		out.intents.push({
+			trigger: row,
+			action: 'broadcast',
+			params: { message },
+			target: message,
+			okMessage: 'Broadcast sent.',
+			detail: {
+				stage,
+				map: ctx.matchEnd.map,
+				winner: ctx.matchEnd.winner,
+				scores: ctx.matchEnd.scores
+			},
+			steamId: null,
+			dedupeKey: key(row, stage, ctx.ts.getTime())
+		});
+	row.lastFiredAt = ctx.ts;
+	out.updates.push({
+		id: row.id,
+		lastFiredAt: ctx.ts,
+		lastResult: `Sending: ${sends.map((s) => s.message).join(' / ')}`.slice(0, 300)
+	});
+}
+
+// A seeding rule adds up seed time once a minute per server while the server is low, not per
+// observation: the open sessions from memory, the closed ones in the window from the database.
+// Above the threshold nobody is earning, so nothing is checked; the fleet's busy servers cost
+// nothing here.
+const SEED_CHECK_MS = 60_000;
+const seedState = new Map<string, { checkedAt: number; low: boolean; full: boolean }>();
+
+const dateOf = (d: Date) => d.toISOString().slice(0, 10);
+
+async function evalSeedReward(
+	env: Env,
+	ctx: TickContext,
+	row: TriggerRow,
+	cfg: SeedRewardConfig,
+	out: Evaluation
+) {
+	// Not before the reserved list is known: a player reserved on this server alone must not be
+	// handed an org-wide entry because the worker has not read the list yet.
+	if (!ctx.reservedLoaded) return;
+	const now = ctx.ts.getTime();
+	const state = seedState.get(row.id) ?? { checkedAt: 0, low: false, full: false };
+	const low = ctx.players.length <= cfg.lowAt;
+	const full = ctx.players.length >= (cfg.fullAt ?? ctx.status.maxPlayers);
+	// Every minute while low (returning players may already hold enough banked time); once when
+	// the seed time banks, which is the moment the server fills, or, when every low minute
+	// counts, as the count climbs out of the band; and not at all otherwise.
+	const due = low
+		? now - state.checkedAt >= SEED_CHECK_MS
+		: cfg.untilFull
+			? full && !state.full
+			: state.low;
+	seedState.set(row.id, { checkedAt: due ? now : state.checkedAt, low, full });
+	if (!due) return;
+	const candidates = ctx.players.filter((p) => !ctx.reserved.has(p.steamId));
+	if (!candidates.length) return;
+	const from = new Date(now - cfg.windowDays * 86400_000);
+	const closed = await env.db
+		.select({ steamId: playerSessions.steamId, seconds: sql<number>`SUM(seed_seconds)::int` })
+		.from(playerSessions)
+		.where(
+			and(
+				eq(playerSessions.serverId, ctx.server.id),
+				inArray(
+					playerSessions.steamId,
+					candidates.map((p) => p.steamId)
+				),
+				isNotNull(playerSessions.leftAt),
+				gte(playerSessions.lastSeen, from)
+			)
+		)
+		.groupBy(playerSessions.steamId);
+	const earlier = new Map(closed.map((r) => [r.steamId, r.seconds]));
+	// The whisper names this date; the entry's own expiry is set when the grant is delivered.
+	const expiresAt = new Date(now + cfg.slotDays * 86400_000);
+	let n = 0;
+	let last = '';
+	for (const p of candidates) {
+		const seconds =
+			(earlier.get(p.steamId) ?? 0) + Math.floor((ctx.seedMs.get(p.steamId) ?? 0) / 1000);
+		if (seconds < cfg.minutes * 60) continue;
+		const minutes = Math.floor(seconds / 60);
+		const reason = `Seeded ${ctx.server.name}: ${minutes} min with ${cfg.lowAt} or fewer on`;
+		out.intents.push({
+			trigger: row,
+			action: 'seed_reward',
+			params: { steamId: p.steamId, name: p.name, reason, slotDays: cfg.slotDays },
+			target: p.steamId,
+			okMessage: `Reserved a slot for ${p.name}.`,
+			detail: { name: p.name, minutes, slotDays: cfg.slotDays },
+			// The slot was earned; it is granted even if the player leaves before delivery.
+			steamId: null,
+			dedupeKey: key(row, p.steamId, now)
+		});
+		if (cfg.message) {
+			const message = renderTemplate(cfg.message, {
+				...vars(ctx, p),
+				minutes,
+				until: dateOf(expiresAt),
+				days: cfg.slotDays
+			});
+			out.intents.push({
+				trigger: row,
+				action: 'whisper',
+				params: { steamId: p.steamId, message },
+				target: p.steamId,
+				okMessage: `Whispered ${p.name}.`,
+				detail: { name: p.name },
+				steamId: p.steamId,
+				dedupeKey: key(row, p.steamId, 'whisper', now)
+			});
+		}
+		n++;
+		last = p.name;
+	}
+	if (n)
+		out.updates.push({
+			id: row.id,
+			lastFiredAt: ctx.ts,
+			lastResult: `Reserving a slot for ${n === 1 ? last : `${n} players`}`
+		});
 }
 
 /** The risk inputs a risk_kick rule needs for these joiners (DB and Steam; call before the transaction). */
@@ -691,6 +895,7 @@ export async function dryRun(
 				steamEnabled: steamEnabled(env),
 				bannedOn: l?.bannedOn ?? [],
 				watched: l?.watched ?? null,
+				resembles: l?.resembles ?? [],
 				reserved: reserved.has(p.steamId),
 				now: to
 			});
@@ -702,6 +907,58 @@ export async function dryRun(
 			);
 		result.notes.push(
 			`${players.length} distinct player${players.length === 1 ? '' : 's'} joined in the window.`
+		);
+		return result;
+	}
+	if (kind === 'team_kill') {
+		const c = cfg as TeamKillConfig;
+		// Each team kill in the window, with the killer's running count since their session began
+		// (the session open at the time, else the hour before).
+		const rows = await env.db.execute<{
+			ts: Date;
+			killerName: string;
+			killerSteamId: string;
+			victimName: string;
+			n: string;
+		}>(sql`
+			SELECT k.ts, k.killer_name AS "killerName", k.killer_steam_id AS "killerSteamId",
+			       k.victim_name AS "victimName",
+			       (SELECT COUNT(*) FROM kills k2
+			         WHERE k2.server_id = k.server_id AND k2.killer_steam_id = k.killer_steam_id
+			           AND k2.team_kill AND k2.ts <= k.ts
+			           AND k2.ts >= COALESCE((SELECT MAX(s.joined_at) FROM player_sessions s
+			                                    WHERE s.server_id = k.server_id AND s.steam_id = k.killer_steam_id
+			                                      AND s.joined_at <= k.ts), k.ts - interval '1 hour')) AS n
+			  FROM kills k
+			 WHERE k.server_id = ${server.id} AND k.team_kill AND k.killer_steam_id IS NOT NULL
+			   AND k.ts >= ${from}
+			 ORDER BY k.ts ASC LIMIT 500`);
+		for (const r of rows) {
+			const stage = teamKillStage(c, Number(r.n));
+			if (!stage) continue;
+			const v = {
+				name: r.killerName,
+				victim: r.victimName,
+				count: Number(r.n),
+				server: server.name
+			};
+			push(
+				new Date(r.ts),
+				stage === 'kick'
+					? `kick ${r.killerName} (${r.killerSteamId}): ${renderTemplate(c.kickReason, v)}`
+					: `whisper ${r.killerName}: ${renderTemplate(c.warnMessage, v)}`
+			);
+		}
+		const [feed] = await env.db
+			.select({ configured: sql<boolean>`feed_token_hash IS NOT NULL` })
+			.from(servers)
+			.where(eq(servers.id, server.id));
+		if (!feed?.configured)
+			result.notes.push(
+				'This server has no kill feed set up (Configuration tab), so the rule cannot see any team kills.'
+			);
+		result.notes.push(
+			`${rows.length} team kill${rows.length === 1 ? '' : 's'} in the window, counted per killer within their session.`
 		);
 		return result;
 	}
@@ -750,8 +1007,10 @@ export async function dryRun(
 			ts: samples.ts,
 			ok: samples.ok,
 			count: samples.playerCount,
+			max: samples.maxPlayers,
 			map: samples.map,
-			experiences: samples.experiences
+			experiences: samples.experiences,
+			scores: samples.scores
 		})
 		.from(samples)
 		.where(and(eq(samples.serverId, server.id), gte(samples.ts, from)))
@@ -760,12 +1019,114 @@ export async function dryRun(
 		result.notes.push('No samples in the last 24 hours; the poller may be off or the server new.');
 		return result;
 	}
+	if (kind === 'seed_reward') {
+		const c = cfg as SeedRewardConfig;
+		// A sample is written at least every sampleMs while the worker is up; a longer gap is
+		// time nobody was watching, and the live rule would not have credited it either.
+		const stretches = lowStretches(
+			rows.map((r) => ({ ts: r.ts.getTime(), ok: r.ok, count: r.count ?? 0 })),
+			c.lowAt,
+			to.getTime(),
+			2 * settings().sampleMs + 1000
+		);
+		const sessions = await env.db
+			.select({
+				steamId: playerSessions.steamId,
+				name: playerSessions.name,
+				joinedAt: playerSessions.joinedAt,
+				leftAt: playerSessions.leftAt
+			})
+			.from(playerSessions)
+			.where(and(eq(playerSessions.serverId, server.id), gte(playerSessions.lastSeen, from)))
+			.orderBy(asc(playerSessions.joinedAt))
+			.limit(5000);
+		if (sessions.length === 5000)
+			result.notes.push(
+				'Only the first 5000 sessions of the window were replayed; later ones are not shown.'
+			);
+		const fulls = fullMoments(
+			rows.map((r) => ({ ts: r.ts.getTime(), ok: r.ok, count: r.count ?? 0, max: r.max ?? 0 })),
+			c.fullAt
+		);
+		const totals = seedReplay(
+			stretches,
+			fulls,
+			sessions.map((s) => ({
+				steamId: s.steamId,
+				joinedAt: s.joinedAt.getTime(),
+				leftAt: s.leftAt ? s.leftAt.getTime() : null
+			})),
+			c.minutes * 60,
+			to.getTime(),
+			c.untilFull
+		);
+		let reserved = new Set<string>();
+		if (readReserved) {
+			try {
+				reserved = new Set(await readReserved());
+			} catch {
+				result.notes.push('Could not read the reserved slots; nobody was skipped for one.');
+			}
+		}
+		const names = new Map(sessions.map((s) => [s.steamId, s.name]));
+		const crossed = [...totals]
+			.filter(([, t]) => t.crossedAt !== null)
+			.sort((a, b) => a[1].crossedAt! - b[1].crossedAt!);
+		let held = 0;
+		for (const [steamId, t] of crossed) {
+			if (reserved.has(steamId)) {
+				held++;
+				continue;
+			}
+			const at = new Date(t.crossedAt!);
+			push(
+				at,
+				`reserve ${names.get(steamId)} (${steamId}) until ${dateOf(new Date(at.getTime() + c.slotDays * 86400_000))}: ${Math.floor(t.seconds / 60)} min with ${c.lowAt} or fewer on`
+			);
+		}
+		const lowMinutes = Math.round(stretches.reduce((n, l) => n + (l.to - l.from), 0) / 60_000);
+		result.notes.push(
+			`The server was at or under ${c.lowAt} players for ${lowMinutes} min of the window; ${totals.size} player${totals.size === 1 ? '' : 's'} earned seed time${held ? `, ${held} of those who reached ${c.minutes} min already hold a reserved slot and would be skipped` : ''}.`
+		);
+		result.notes.push(
+			`Replayed over the last 24 hours only; the live rule adds up seed time over ${c.windowDays} day${c.windowDays === 1 ? '' : 's'}, so it can also fire for players this replay does not show.`
+		);
+		return result;
+	}
+	if (kind === 'match_broadcast') {
+		const c = cfg as MatchBroadcastConfig;
+		const ends = matchReplay(
+			rows.map((r) => ({
+				ts: r.ts.getTime(),
+				ok: r.ok,
+				map: r.map || '',
+				scores: Array.isArray(r.scores) ? (r.scores as { name: string; score: number }[]) : [],
+				count: r.count ?? 0
+			})),
+			2 * settings().sampleMs + 1000
+		);
+		for (const e of ends)
+			for (const { message } of matchBroadcastMessages(c, e.end, e.count, {
+				server: server.name,
+				map: e.map,
+				players: e.count,
+				max: '…',
+				cap: DEFAULT_SCORE_CAP
+			}))
+				push(new Date(e.ts), `broadcast (${e.count} on): ${message}`);
+		result.notes.push(
+			ends.length
+				? `${ends.length} match${ends.length === 1 ? '' : 'es'} ended in the window. Times shown are the sample that first saw the reset; live, the rule fires one poll after the round ends.`
+				: 'No match ended in the window: the map never changed and the scores never fell back.'
+		);
+		return result;
+	}
 	if (kind === 'broadcast') {
 		const c = cfg as BroadcastConfig;
 		let last: Date | null = null;
 		let index = 0;
 		for (const r of rows) {
-			if (!r.ok || (r.count ?? 0) < c.minPlayers) continue;
+			if (!r.ok || !broadcastWanted(c, r.count ?? 0)) continue;
 			if (last && r.ts.getTime() - last.getTime() < c.everyMinutes * 60_000) continue;
 			last = r.ts;
 			push(r.ts, `broadcast (${r.count} on): ${c.messages[index++ % c.messages.length]}`);

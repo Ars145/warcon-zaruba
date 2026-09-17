@@ -168,10 +168,9 @@ export async function memberSlots(
 }
 
 /**
- * Lifts entries whose expiry has passed, on either list: the row is marked removed (so history
- * keeps it) and the next reconcile takes it off every server the panel applied it to. The poller
- * runs this every tick and fanOut before pushing, so an install without a poller still catches up
- * on edit.
+ * Lifts bans and reserved slots whose expiry has passed: the row is marked removed (so history
+ * keeps it) and the next reconcile takes it off every server the panel applied it to. The poller runs this every
+ * tick and fanOut before pushing, so an install without a poller still catches up on edit.
  */
 export async function expireEntries(env: Env): Promise<{ lifted: number; orgIds: string[] }> {
 	const now = new Date();
@@ -189,19 +188,13 @@ export async function expireEntries(env: Env): Promise<{ lifted: number; orgIds:
 	if (!rows.length) return { lifted: 0, orgIds: [] };
 	const listIds = [...new Set(rows.map((r) => r.listId))];
 	const owners = await env.db
-		.select({
-			listId: lists.id,
-			kind: lists.kind,
-			orgId: lists.orgId,
-			orgName: organizations.name
-		})
+		.select({ listId: lists.id, kind: lists.kind, orgId: lists.orgId, orgName: organizations.name })
 		.from(lists)
 		.innerJoin(organizations, eq(organizations.id, lists.orgId))
 		.where(inArray(lists.id, listIds));
 	await env.db.update(lists).set({ updatedAt: now }).where(inArray(lists.id, listIds));
 	for (const o of owners) {
 		const ids = rows.filter((r) => r.listId === o.listId).map((r) => r.steamId);
-		const noun = o.kind === 'ban' ? 'ban' : 'reserved slot';
 		await writeAudit(env, null, {
 			actorName: 'list sync',
 			orgId: o.orgId,
@@ -209,8 +202,8 @@ export async function expireEntries(env: Env): Promise<{ lifted: number; orgIds:
 			action: 'list.expire',
 			target: ids.join(', '),
 			outcome: 'ok',
-			message: `${ids.length} ${noun}${ids.length === 1 ? '' : 's'} expired in ${o.orgName}`,
-			detail: { orgId: o.orgId, org: o.orgName, kind: o.kind, steamIds: ids }
+			message: `${ids.length} ${o.kind === 'ban' ? 'ban' : 'reserved slot'}${ids.length === 1 ? '' : 's'} expired in ${o.orgName}`,
+			detail: { orgId: o.orgId, org: o.orgName, steamIds: ids }
 		}).catch((err) => console.error('[warcon] list.expire audit', err));
 	}
 	return { lifted: rows.length, orgIds: [...new Set(owners.map((o) => o.orgId))] };

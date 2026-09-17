@@ -11,6 +11,22 @@ A self-hostable, multi-server RCON panel for **WARDOGS** dedicated servers. Bun,
 Postgres/TimescaleDB, deployed with Docker Compose. Run it beside your game server, on any VPS, or
 on a container host, with the database wherever you like.
 
+It is for anyone who runs a WARDOGS server: a clan with one box, a community with a dozen, or a
+host with hundreds. Everybody on the team gets their own login instead of the RCON password, the
+panel keeps the history the game throws away, and the worker can act on what it sees. Pick your
+way in:
+
+- **Just want to run it?** [docs/getting-started.md](docs/getting-started.md) is the plain-language
+  walkthrough: Docker, one `.env` file, done. [Deploy with Docker](#deploy-with-docker) below has
+  the detail.
+- **Want a look first?** Every install comes with a built-in demo server, so you can click around
+  the whole panel before pointing it at a real one.
+- **Want to hack on it?** [Local development](#local-development) gets you running in a few
+  minutes and [Contributing](#contributing) says what a change needs. Questions and half-formed
+  ideas are welcome in the issues.
+
+What is in the box:
+
 - **Multiple servers** in one panel, each with its own encrypted RCON password.
 - **Organisations and invite links**: each clan or community is an organisation with its own
   servers, owners and members. An owner pastes an invite link into their Discord; whoever opens it
@@ -319,7 +335,7 @@ the list has been applied on each server, and the form that hands out a slot eve
 Players tab or a dossier and choose _every server in the organisation_ (the default, when you may
 edit the org list) or _this server only_. Org owners and
 anyone whose role on one of the org's servers includes _Org lists_ can edit the lists; a ban can carry a reason and
-an expiry, a reserved slot a note.
+an expiry, a reserved slot a note and an expiry.
 
 Each entry shows where it stands on every server: **applied** by the panel, **pending** the next
 sync, **failed** (hover for the server's answer), or **local**. Local means the player was already
@@ -334,11 +350,14 @@ promoted the same way (owners), or added to the org list while this server's own
 (list editors). Every dossier shows the player's standing on the org lists and lets an editor ban
 or unban org-wide, or hand out and withdraw a reserved slot, without leaving the page.
 
-A ban with an **expiry** is lifted by the panel when the time comes: the entry moves to the list's
-history as expired and the next sync removes it from every server the panel applied it to. With
+A ban or reserved slot with an **expiry** is lifted by the panel when the time comes: the entry
+moves to the list's history as expired and the next sync removes it from every server the panel
+applied it to. With
 **Members get a reserved slot** on (an owner's switch on the Reserved slots tab), every member of
 the organisation who linked a SteamID on their Account page is reserved a slot on all its servers,
-skipped while the org has them banned.
+skipped while the org has them banned. A **Seeding reward** rule (see [Automation](#automation-triggers))
+hands out expiring entries the same way, to players who stayed while a server was low; the entry
+names the rule that added it.
 
 Sync happens twice over: right away when a list is edited (the toast says on how many servers the
 change landed, and which are unreachable and will be retried), and on every poll, where the
@@ -358,12 +377,15 @@ The **Automation** tab on each server holds rules the poller evaluates on every 
 create them; every action they take is in the audit trail under the `trigger` category with the
 rule that fired, and can be mirrored to Discord.
 
-| Trigger                | Does                                                                                                                                                                                                                  |
-| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Welcome whisper        | Whispers a message to each joiner (optionally only on their first visit). Placeholders `{name}` `{server}` `{map}` `{players}` `{max}`.                                                                               |
-| Scheduled broadcast    | Rotates through a list of messages every N minutes while at least M players are on.                                                                                                                                   |
-| Empty-server map reset | After the server has been empty for N minutes on a different map or mode, sets the chosen map as next and ends the match (or requests it directly when there is no rotation).                                         |
-| Kick on connect risk   | Kicks joiners who match rules: VAC ban, game ban, Steam account younger than N days (optionally private profiles too), banned on another server in the org, or on the watchlist. Reserved-slot players can be spared. |
+| Trigger                | Does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Welcome whisper        | Whispers a message to each joiner (optionally only on their first visit). Placeholders `{name}` `{server}` `{map}` `{players}` `{max}`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| Scheduled broadcast    | Rotates through a list of messages every N minutes while at least M players are on, and optionally only until a ceiling, so a fill-the-server message stops once it has.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Empty-server map reset | After the server has been empty for N minutes on a different map or mode, sets the chosen map as next and ends the match (or requests it directly when there is no rotation).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Kick on connect risk   | Kicks joiners who match rules: VAC ban, game ban, Steam account younger than N days (optionally private profiles too), banned on another server in the org, or on the watchlist; or whose advisory risk score is high (or medium or worse), as the players table shows it. Reserved-slot players can be spared.                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Team kill limit        | Whispers a player from N team kills in their current session, and kicks them at M. Needs the [kill feed](#kill-feed); acted on as each kill arrives, not per poll.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Match broadcast        | Announces the result when a match ends and the map as the next one starts, either message optional, with at least N players on. A match ends when the map changes or the faction scores fall back to zero (a faction reached the cap, or an admin ended the round; live builds send no score cap or match clock, so Warcon assumes the game's default of 100), so `{faction}` is whoever led at that moment, tied factions named together. Placeholders `{faction}` `{score}` `{scores}` `{cap}` `{previous}` `{map}` `{server}` `{players}` `{max}`. Sent one poll after the round ends.                                                                                                                                                                                                   |
+| Seeding reward         | Time a player spends on with at most N players counts as seed time, by default banked only once the server has filled (a count the rule sets, else the limit the server reports) with the player still on, so staying until the threshold and leaving, or a few minutes on an empty server, earns nothing (a switch on the rule counts every low minute instead); M minutes of it over the sessions that ended in the last D days puts them on the organisation's reserved-slot list for E days, with an optional whisper. The seeded server applies it at once and the other org servers at their next sync; it lapses on its own and can be earned again; players who already hold a slot are skipped. Seed time is kept on each session, so the dossier history and the dry run show it. |
 
 **Dry run** replays the last 24 hours of the server's own history (joins, player counts, empty
 stretches, cached Steam data) against a rule and lists what it would have done, so you can tune a
@@ -373,18 +395,49 @@ choose a side after joining, so a whisper on join can land while they are still 
 first poll after a restart or an outage never fires join rules, since everyone present looks like a
 joiner then.
 
+### Kill feed
+
+WARDOGS can push every kill to an HTTP endpoint: with `[WDServerFeed] Url` and `Token` set in
+`ServerSettings.ini`, the game process POSTs each kill (killer, victim, weapon or vehicle,
+distance, headshot and other context) a second or two after it happens. Warcon is that endpoint.
+On the server's **Configuration** tab an org owner clicks **Configure**: Warcon mints a token,
+writes both keys into the config document and applies; the game reads them at its next restart
+(its own twelve-hour one, or a manual restart). `Url` is the panel's origin alone: the game
+appends `/api/ingest/events` to it by itself. The card shows when the last batch arrived, so a
+config that did not take is visible.
+
+What the feed adds: a live kill feed on the server's Overview tab, a **Kills** tab with the whole
+history (filter by killer, victim, either side, weapon or vehicle, kind of kill and minimum
+distance, with a count, older pages and new kills arriving live; the filter lives in the URL, so a
+view can be shared), a **Combat** section on Analytics (kills per bucket, weapons, longest kills,
+top killers with headshot share and team kills), a Combat card on every player dossier (weapons,
+most-killed, nemeses, recent kills and deaths), and the team-kill trigger. Team kills are
+inferred: the feed carries no factions, so Warcon uses the factions it observed for both players
+at that moment. Kills are history and are
+never pruned (a TimescaleDB hypertable with compression where the extension is installed). The
+demo server feeds itself once its feed is turned on.
+
+The feed identifies its server by the token alone (the body's `serverId` changes with every
+reboot), so each server has its own. The token is stored encrypted, like the RCON password, and
+shown to org owners only. `POST /api/ingest/events` is the one `/api` route that takes neither a
+session nor an API key, and it is exempt from the CSRF header for the same reason a bearer is.
+Configs written by earlier versions hold `Url=<origin>/api/feed/events`; the game's posts to that
+path plus its own suffix are served by the same handler, so they keep working unchanged.
+
 ### Discord webhooks
 
-On the organisation's overview an owner can add Discord channel webhooks (in Discord: channel settings →
-Integrations → Webhooks → copy URL) and choose what to mirror: bans (including org list changes), other game commands, trigger
-actions, player notes and watchlist changes, management changes, sign-ins; for every server or a
-subset. Events are batched into one message per burst, IP addresses are never sent, and the URL
+A webhook is one Discord channel, and each one carries what is ticked for it. On the
+organisation's overview an owner adds channel webhooks (in Discord: channel settings →
+Integrations → Webhooks → copy URL) and chooses what to mirror: bans (including org list changes), other game commands, trigger
+actions, player notes and watchlist changes, management changes, sign-ins, team kills from the
+[kill feed](#kill-feed); for every server or a subset. A separate team-kill channel is a second
+webhook with only that box ticked; the server's **Discord** tab connects one in a click. Events are batched into one message per burst, IP addresses are never sent, and the URL
 (which lets anyone post to the channel) is stored encrypted with `ENCRYPTION_KEY` and never shown
 again. **Test** posts a message right away; delivery failures show on the org page.
 
 A webhook can also keep a **live status card** for each server it covers (tick _Keep status
-cards in the channel_ on the org page, or open the server's **Discord** tab and paste a webhook
-there; pin what it posts). Three card styles: **banner** (the default) with the wide map art and a
+cards in the channel_ on the org page, or open the server's **Discord** tab, paste a webhook and
+tick the card, team kills, or both; pin what it posts). Three card styles: **banner** (the default) with the wide map art and a
 column of players per faction, **compact** with a map thumbnail, faction counts and the top
 three, and **scoreboard** with one ranked table across the factions. The worker edits each card
 in place; the banner shows: players online out of the slots
@@ -522,6 +575,44 @@ it, run `bun run db:generate` to write a new migration into `drizzle/`; the app 
 migrations at startup. Add a server with host `demo`, port `1`, password `demo` to use the mock game
 server.
 
+## Contributing
+
+Issues, questions and pull requests are all welcome, and none of them needs to be polished. A
+report that says "this looked wrong on my server" with a screenshot is useful.
+
+**Contributing right now.** Warcon is early and moving fast: whole areas get rewritten in a week,
+and features are pulled when they turn out to be the wrong idea. That makes it a good time to shape
+it and a bad time to sit on a large branch. Feature ideas are wanted, and an issue that says what
+you run and what you wish the panel did is as valuable as code. Bug reports, small fixes and tests
+land quickly and survive rewrites. For anything bigger, open an issue first so it can be matched
+against what is already in flight. What will not happen while this is true is a rewrite held back
+to keep a pull request mergeable, so a change that lands before the code around it moves may be
+reworked afterwards. That is not a judgement on the work.
+
+What a change needs before it is merged:
+
+- It works, and where the code is testable it has a test. Tests sit next to the code as
+  `*.test.ts` and run with `bun test`.
+- CI passes: `bun run lint` (Prettier), `bun run check` (svelte-check), `bun test` and
+  `bun run build`, the same four steps [ci.yml](.github/workflows/ci.yml) runs.
+- The commit message says what behaviour changed, in plain words. Small whole commits are easier
+  to review than one large one.
+- It keeps data: analytics roll up rather than get pruned, and history stays.
+- It considers per-server cost. A hosted install runs hundreds of servers on one worker, so a query
+  per server per observation is hundreds of queries a second; servers a feature does not apply to
+  should cost nothing.
+
+Use whatever tools help you write it, including AI assistants; you do not need to declare which.
+The change is what gets reviewed: does it work, is it tested, does the message say what it does.
+You are the author of what you submit, so understand it and be ready to answer questions about it.
+Warcon takes the same position the Linux kernel does, put plainly by Linus Torvalds in
+[July 2026](https://lore.kernel.org/linux-media/CAHk-=wi4zC+Ze8e+p3tMv8TtG_80KzsZ1syL9anBtmEh5Z40vg@mail.gmail.com/):
+AI is a tool like any other, contributions are judged on technical merit, and arguing against
+other people using it is not a conversation this project will have.
+
+The protocol notes in [docs/wardogs-api.md](docs/wardogs-api.md) describe what the game server
+exposes; anything not in there is unknown to Warcon as well.
+
 ## Layout
 
 ```
@@ -550,6 +641,9 @@ src/lib/server/rcon.ts         WardogsClient (Bearer auth, JSON/text calls, demo
 src/lib/server/transport.ts    fetch to the game server
 src/lib/server/poller.ts       the worker's scheduler: tiers, phases, concurrency budget, roster, housekeeping, stats
 src/lib/server/poller-schedule.ts  the scheduler's maths (phase per server, next due, budget) — pure
+src/lib/server/feed-core.ts    the kill feed's batch format and parsing — pure
+src/lib/server/feed.ts         feed tokens, batch ingest into `kills` (open match and factions attached), the stored feed
+src/lib/server/feed-events.ts  what the worker does with a batch: publish to browsers, run the team-kill rules, the demo's own feed
 src/lib/server/observe.ts      one observation: status/players, session diff, trigger evaluation, one fenced transaction, live snapshot, samples
 src/lib/server/sessions.ts     player presence in memory, batched session writes (join, leave, heartbeat)
 src/lib/server/outbox.ts       trigger delivery loop: claim with a lease, send through the lane, record the outcome
@@ -595,7 +689,11 @@ GET/POST /api/users  PATCH/DELETE /api/users/:id  PUT /api/users/:id/grants {gra
 GET/POST /api/servers {orgId,...}  PATCH/DELETE /api/servers/:id  POST /api/servers/:id/test
 GET/PUT /api/servers/:id/grants {grants:[{userId,roleId}]}   GET /api/servers/:id/summary
 GET|POST /api/servers/:id/rcon/:action   (GET for reads with query params, POST JSON for mutations)
-GET  /api/servers/:id/analytics?range=24h|7d|30d
+GET  /api/servers/:id/analytics?range=24h|7d|30d       includes `combat` from the kill feed when the server has one
+GET  /api/servers/:id/kills?before=<iso>&beforeTime=<s>&limit=50&count=1   the stored kill feed, newest first; `count=1` adds the total; `kills` frames on /api/live/events carry new ones
+     &killer=&victim=&player=&cause=&kind=&minM=            filters: a SteamID exactly, else part of a name; the raw cause tag; kind headshot|teamKill|suicide|vehicle|environment; metres at least
+GET/POST/DELETE /api/servers/:id/feed                   the kill feed setup: token and URL (POST mints or replaces, owners only)
+POST /api/ingest/events                                 where the game posts: [WDServerFeed] Url is the origin, the game adds this path (Authorization: Bearer wkf_…); not a panel route
 GET  /api/servers/:id/cash?since=<iso>                  cash-in-play samples since a moment (24 h at most), seeds the dashboard chart
 GET  /api/servers/:id/players/marks?ids=a,b&names=…     watchlist / first-visit / risk per connected player
 GET  /api/servers/:id/players/:steamId                  dossier   POST .../steam (refresh Steam data)
@@ -624,15 +722,15 @@ slots) · `rotationSave` (Save rotation) · `settings configValidate configApply
 ## Notes and limits
 
 - Analytics are derived from observation: player sessions are accurate to the cadence in force
-  (a second or two on a busy server), and match boundaries are inferred from the match clock and
-  map changes. Raw samples are kept for 14 days by default (a TimescaleDB retention policy, or the
+  (a second or two on a busy server), and match boundaries are inferred from map changes, the
+  faction scores falling back to zero and, on builds that send one, the match clock. Raw samples are kept for 14 days by default (a TimescaleDB retention policy, or the
   worker's own prune on plain Postgres) with hourly rollups behind the 30-day charts; sessions and
   matches for a year. Both are settings.
 - Several `web` processes can share one database and one worker; the worker's lease makes exactly
   one process observe, and a second worker takes over within seconds if the first stops renewing.
   Run `WARCON_ROLE=all` as a single replica only: two `all` processes would each keep their own
   live view and lanes, and browsers on the one that does not hold the lease would see nothing live.
-- The game has no push API. Freshness is the observation cadence, which the owner sets; the
+- Apart from the kill feed, the game has no push API. Freshness is the observation cadence, which the owner sets; the
   defaults (1 s players / 2 s status while watched, 2 s / 5 s while busy) are lighter on the game
   than the old per-browser polling was.
 - Password hashing is Better Auth's default scrypt, which runs natively via `node:crypto` on Bun.

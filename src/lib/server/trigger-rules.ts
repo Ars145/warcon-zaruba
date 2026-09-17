@@ -2,7 +2,7 @@
 // kick-on-connect verdict. No database, no game server, so it is unit-testable on its own;
 // triggers.ts holds the engine that runs these against live ticks.
 import { ApiError, int, str } from './http';
-import { accountAgeDays } from './risk';
+import { accountAgeDays, assessRisk, type RiskLevel } from './risk';
 import { RESTART_AFTER_HOURS, restartWindow } from '$lib/uptime';
 import type { SteamProfileRow } from './db/schema';
 import type { TriggerKind } from '$lib/types';
@@ -13,7 +13,10 @@ export const TRIGGER_KINDS: TriggerKind[] = [
 	'broadcast',
 	'empty_reset',
 	'risk_kick',
-	'restart_notice'
+	'restart_notice',
+	'team_kill',
+	'seed_reward',
+	'match_broadcast'
 ];
 export const TRIGGER_LABELS: Record<TriggerKind, string> = {
 	welcome: 'Welcome whisper',
@@ -21,7 +24,10 @@ export const TRIGGER_LABELS: Record<TriggerKind, string> = {
 	broadcast: 'Scheduled broadcast',
 	empty_reset: 'Empty-server map reset',
 	risk_kick: 'Kick on connect risk',
-	restart_notice: 'Restart notice'
+	restart_notice: 'Restart notice',
+	team_kill: 'Team kill limit',
+	seed_reward: 'Seeding reward',
+	match_broadcast: 'Match broadcast'
 };
 
 export interface WelcomeConfig {
@@ -39,6 +45,8 @@ export interface BroadcastConfig {
 	messages: string[];
 	everyMinutes: number;
 	minPlayers: number;
+	/** stop once more than this many are on; null is no ceiling */
+	maxPlayers: number | null;
 }
 export interface EmptyResetConfig {
 	map: string;
@@ -55,6 +63,8 @@ export interface RiskKickConfig {
 	privateProfiles: boolean;
 	bannedElsewhere: boolean;
 	watchlist: boolean;
+	/** also kick at this advisory risk level or worse (the score the players table shows); null is off */
+	kickAtLevel: Exclude<RiskLevel, 'low'> | null;
 	spareReserved: boolean;
 	reason: string;
 }
@@ -71,13 +81,54 @@ export interface RestartNoticeConfig {
 	repeatMinutes: number;
 	minPlayers: number;
 }
+/**
+ * Acts on team kills the kill feed reports, counted per killer within their current session:
+ * a whisper from `warnAt` team kills on (0 = never), a kick at `kickAt` (0 = never).
+ */
+export interface TeamKillConfig {
+	warnAt: number;
+	warnMessage: string;
+	kickAt: number;
+	kickReason: string;
+}
+/**
+ * A reserved slot for players who stay while the server is low: time on with at most `lowAt`
+ * players counts as seed time, and `minutes` of it within `windowDays` earns a slot on the
+ * organisation's reserved list for `slotDays`. `message` is whispered on the grant ('' for none).
+ */
+export interface SeedRewardConfig {
+	lowAt: number;
+	/** count seed time only once the server has filled with the player still on */
+	untilFull: boolean;
+	/** what "filled" means: at least this many on; null is the player limit the server reports */
+	fullAt: number | null;
+	minutes: number;
+	windowDays: number;
+	slotDays: number;
+	message: string;
+}
+/**
+ * Announces a match ending and the next one starting. A match ends when the map changes or the
+ * faction scores fall back (a faction reached the cap, or an admin ended the round); the live
+ * builds send no score cap, so the winner is whoever led when the scores reset.
+ */
+export interface MatchBroadcastConfig {
+	/** sent for the match that ended; '' for none */
+	endMessage: string;
+	/** sent for the match now starting; '' for none */
+	startMessage: string;
+	minPlayers: number;
+}
 export type TriggerConfig =
 	| WelcomeConfig
 	| FactionChangeConfig
 	| BroadcastConfig
 	| EmptyResetConfig
 	| RiskKickConfig
-	| RestartNoticeConfig;
+	| RestartNoticeConfig
+	| TeamKillConfig
+	| SeedRewardConfig
+	| MatchBroadcastConfig;
 
 const MAX_MESSAGE = 200;
 
@@ -107,7 +158,14 @@ export function validateConfig(kind: TriggerKind, raw: unknown): TriggerConfig {
 			if (!messages.length) throw new ApiError(400, 'Add at least one message to broadcast.');
 			const everyMinutes = int(c.everyMinutes, 0, 0, 24 * 60);
 			if (!everyMinutes) throw new ApiError(400, 'everyMinutes must be 1-1440.');
-			return { messages, everyMinutes, minPlayers: int(c.minPlayers, 1, 0, 1000) };
+			const minPlayers = int(c.minPlayers, 1, 0, 1000);
+			const maxPlayers =
+				c.maxPlayers === null || c.maxPlayers === undefined || c.maxPlayers === ''
+					? null
+					: int(c.maxPlayers, 0, 0, 1000);
+			if (maxPlayers !== null && maxPlayers < minPlayers)
+				throw new ApiError(400, 'The player ceiling cannot be below the floor.');
+			return { messages, everyMinutes, minPlayers, maxPlayers };
 		}
 		case 'empty_reset': {
 			const map = str(c.map, 100);
@@ -137,6 +195,7 @@ export function validateConfig(kind: TriggerKind, raw: unknown): TriggerConfig {
 				privateProfiles: !!c.privateProfiles,
 				bannedElsewhere: !!c.bannedElsewhere,
 				watchlist: !!c.watchlist,
+				kickAtLevel: c.kickAtLevel === 'high' || c.kickAtLevel === 'medium' ? c.kickAtLevel : null,
 				spareReserved: c.spareReserved === undefined ? true : !!c.spareReserved,
 				reason:
 					str(c.reason, MAX_MESSAGE) || 'Your account does not meet this server’s requirements.'
@@ -146,7 +205,8 @@ export function validateConfig(kind: TriggerKind, raw: unknown): TriggerConfig {
 				!cfg.gameBans &&
 				!cfg.minAccountDays &&
 				!cfg.bannedElsewhere &&
-				!cfg.watchlist
+				!cfg.watchlist &&
+				!cfg.kickAtLevel
 			)
 				throw new ApiError(400, 'Turn on at least one rule.');
 			return cfg;
@@ -166,7 +226,208 @@ export function validateConfig(kind: TriggerKind, raw: unknown): TriggerConfig {
 				minPlayers: int(c.minPlayers, 1, 0, 1000)
 			};
 		}
+		case 'team_kill': {
+			const warnAt = int(c.warnAt, 0, 0, 100);
+			const kickAt = int(c.kickAt, 0, 0, 100);
+			if (!warnAt && !kickAt)
+				throw new ApiError(400, 'Set a whisper threshold, a kick threshold, or both.');
+			if (warnAt && kickAt && kickAt < warnAt)
+				throw new ApiError(400, 'The kick threshold cannot be below the whisper threshold.');
+			return {
+				warnAt,
+				warnMessage:
+					str(c.warnMessage, MAX_MESSAGE) ||
+					'Careful, {name}: that was a team kill ({count} this session).',
+				kickAt,
+				kickReason: str(c.kickReason, MAX_MESSAGE) || 'Team killing ({count} this session).'
+			};
+		}
+		case 'seed_reward': {
+			const minutes = int(c.minutes, 0, 0, 90 * 1440);
+			if (!minutes) throw new ApiError(400, 'Set how many minutes of seeding earn the slot.');
+			const windowDays = int(c.windowDays, 7, 1, 90);
+			if (minutes > windowDays * 1440)
+				throw new ApiError(
+					400,
+					'The seed time needed cannot exceed the window it is counted over.'
+				);
+			const lowAt = int(c.lowAt, 20, 1, 1000);
+			const fullAt =
+				c.fullAt === null || c.fullAt === undefined || c.fullAt === ''
+					? null
+					: int(c.fullAt, 0, 1, 1000);
+			if (fullAt !== null && fullAt <= lowAt)
+				throw new ApiError(400, 'Filled must be more players than the seeding threshold.');
+			return {
+				lowAt,
+				untilFull: c.untilFull === undefined ? true : !!c.untilFull,
+				fullAt,
+				minutes,
+				windowDays,
+				slotDays: int(c.slotDays, 7, 1, 365),
+				message: str(c.message, MAX_MESSAGE)
+			};
+		}
+		case 'match_broadcast': {
+			const endMessage = str(c.endMessage, MAX_MESSAGE);
+			const startMessage = str(c.startMessage, MAX_MESSAGE);
+			if (!endMessage && !startMessage)
+				throw new ApiError(
+					400,
+					'Add a message for the match ending, the next one starting, or both.'
+				);
+			return { endMessage, startMessage, minPlayers: int(c.minPlayers, 1, 0, 1000) };
+		}
 	}
+}
+
+/** A stretch of time the server spent at or under the seeding threshold (ms since the epoch). */
+export interface LowStretch {
+	from: number;
+	to: number;
+}
+
+/**
+ * The low stretches in a run of samples: each sample holds until the next one (the last until
+ * `to`) but for at most `maxHoldMs`, since a longer gap means the worker was not watching, and
+ * neighbouring low samples merge into one stretch. A failed sample is not low.
+ */
+export function lowStretches(
+	rows: { ts: number; ok: boolean; count: number }[],
+	lowAt: number,
+	to: number,
+	maxHoldMs = Infinity
+): LowStretch[] {
+	const out: LowStretch[] = [];
+	for (let i = 0; i < rows.length; i++) {
+		const r = rows[i];
+		if (!r.ok || r.count > lowAt) continue;
+		const end = Math.min(to, i + 1 < rows.length ? rows[i + 1].ts : to, r.ts + maxHoldMs);
+		if (end <= r.ts) continue;
+		const last = out[out.length - 1];
+		if (last && last.to >= r.ts) last.to = end;
+		else out.push({ from: r.ts, to: end });
+	}
+	return out;
+}
+
+/** The moments the server was filled: samples with the count at or over the rule's fill line. */
+export function fullMoments(
+	rows: { ts: number; ok: boolean; count: number; max: number }[],
+	fullAt: number | null
+): number[] {
+	return rows.filter((r) => r.ok && r.count >= (fullAt ?? r.max)).map((r) => r.ts);
+}
+
+export interface SeedSession {
+	steamId: string;
+	joinedAt: number;
+	/** null while still on */
+	leftAt: number | null;
+}
+
+export interface SeedTotal {
+	seconds: number;
+	/** when the player's seed time reached the target, or null if it never did */
+	crossedAt: number | null;
+}
+
+/**
+ * Seed time per player from how their sessions overlap the low stretches, as the live rule
+ * banks it. With `untilFull` the low time is pending until a full moment with the player still
+ * on, and credited then; a session that ends first forfeits it. Without it every minute of
+ * overlap counts as it passes. `to` closes open sessions.
+ */
+export function seedReplay(
+	stretches: LowStretch[],
+	fulls: number[],
+	sessions: SeedSession[],
+	targetSeconds: number,
+	to: number,
+	untilFull = true
+): Map<string, SeedTotal> {
+	const banked = new Map<string, { at: number; ms: number }[]>();
+	const add = (steamId: string, at: number, ms: number) =>
+		(banked.get(steamId) ?? banked.set(steamId, []).get(steamId)!).push({ at, ms });
+	for (const s of sessions) {
+		const end = s.leftAt ?? to;
+		const spans: { from: number; to: number }[] = [];
+		for (const l of stretches) {
+			const from = Math.max(s.joinedAt, l.from);
+			const until = Math.min(end, l.to);
+			if (until > from) spans.push({ from, to: until });
+		}
+		if (!untilFull) {
+			for (const span of spans) add(s.steamId, span.to, span.to - span.from);
+			continue;
+		}
+		// A low stretch never overlaps a full moment, so each span sits wholly before or after one.
+		let pending = 0;
+		let next = 0;
+		for (const f of fulls) {
+			if (f < s.joinedAt) continue;
+			if (f > end) break;
+			for (; next < spans.length && spans[next].to <= f; next++)
+				pending += spans[next].to - spans[next].from;
+			if (pending) add(s.steamId, f, pending);
+			pending = 0;
+		}
+	}
+	const out = new Map<string, SeedTotal>();
+	for (const [steamId, list] of banked) {
+		list.sort((a, b) => a.at - b.at);
+		let ms = 0;
+		let crossedAt: number | null = null;
+		for (const b of list) {
+			const before = ms;
+			ms += b.ms;
+			if (crossedAt === null && ms >= targetSeconds * 1000)
+				// banked all at once when it fills; minute by minute otherwise
+				crossedAt = untilFull ? b.at : b.at - b.ms + (targetSeconds * 1000 - before);
+		}
+		out.set(steamId, { seconds: Math.floor(ms / 1000), crossedAt });
+	}
+	return out;
+}
+
+/**
+ * What the worker counts seed time against on a server: the enabled seeding rule's threshold and
+ * whether the time only counts once the server fills, or null when there is no such rule. With
+ * more than one rule (one is enforced at save) the highest threshold wins.
+ */
+export interface SeedRuleShape {
+	lowAt: number;
+	untilFull: boolean;
+	fullAt: number | null;
+}
+export function seedRule(rows: { kind: string; config: unknown }[]): SeedRuleShape | null {
+	let out: SeedRuleShape | null = null;
+	for (const r of rows) {
+		if (r.kind !== 'seed_reward') continue;
+		const c = r.config as SeedRewardConfig;
+		if (out === null || c.lowAt > out.lowAt)
+			out = { lowAt: c.lowAt, untilFull: c.untilFull, fullAt: c.fullAt ?? null };
+	}
+	return out;
+}
+
+/** Whether a scheduled broadcast goes out with this many players on. */
+export function broadcastWanted(
+	cfg: Pick<BroadcastConfig, 'minPlayers' | 'maxPlayers'>,
+	playerCount: number
+): boolean {
+	if (playerCount < cfg.minPlayers) return false;
+	return cfg.maxPlayers === null || cfg.maxPlayers === undefined || playerCount <= cfg.maxPlayers;
+}
+
+/** What a team-kill rule does once the killer's count this session has reached `count`. */
+export function teamKillStage(
+	cfg: Pick<TeamKillConfig, 'warnAt' | 'kickAt'>,
+	count: number
+): 'kick' | 'warn' | null {
+	if (cfg.kickAt && count >= cfg.kickAt) return 'kick';
+	if (cfg.warnAt && count >= cfg.warnAt) return 'warn';
+	return null;
 }
 
 /** Per-server memory of a restart notice: which stages went out for the current game start. */
@@ -212,6 +473,115 @@ export function restartNoticeStage(
 	return { stage: 'lead', minutes: Math.max(1, Math.round(w.untilDueMs / 60_000)), state };
 }
 
+/** One look at a server's match, as far as the status shows it. */
+export interface MatchLook {
+	map: string;
+	scores: { name: string; score: number }[];
+	/** the match clock; live builds send none */
+	matchSeconds: number | null;
+}
+
+/** The match a boundary closed: its final scores and who led them. */
+export interface MatchEnd {
+	map: string;
+	scores: { name: string; score: number }[];
+	/** the leader, when it scored; null for a tie or a match nobody scored in */
+	winner: string | null;
+	/** the leader, or every faction tied at the top; empty when nobody scored */
+	leaders: string[];
+}
+
+/**
+ * The match that ended between two looks, or null while it is the same match. A boundary is a
+ * map change, the match clock going backwards, or the total score falling: KOTH scores only rise
+ * during a round, so a lower total is a reset, and "lower" rather than "zero" also catches a look
+ * that lands a tick into the next round with the scores already moving. No previous look (the
+ * first after a start or an outage) is never a boundary.
+ */
+export function matchBoundary(prev: MatchLook | null, next: MatchLook): MatchEnd | null {
+	if (!prev) return null;
+	const total = (l: MatchLook) => l.scores.reduce((n, f) => n + f.score, 0);
+	const clockBack =
+		prev.matchSeconds !== null &&
+		next.matchSeconds !== null &&
+		next.matchSeconds < prev.matchSeconds - 30;
+	if (prev.map === next.map && !clockBack && total(next) >= total(prev)) return null;
+	const scores = [...prev.scores].sort((a, b) => b.score - a.score);
+	const top = scores[0]?.score ?? 0;
+	const leaders = top > 0 ? scores.filter((f) => f.score === top).map((f) => f.name) : [];
+	return {
+		map: prev.map,
+		scores,
+		winner: leaders.length === 1 ? leaders[0] : null,
+		leaders
+	};
+}
+
+/** The placeholders a match boundary fills: the result of the match that ended. */
+export function matchVars(end: MatchEnd): Record<string, string | number> {
+	const top = end.scores[0]?.score ?? 0;
+	return {
+		faction: end.leaders.join(' and '),
+		score: top,
+		scores: end.scores.map((f) => `${f.name} ${f.score}`).join(' · '),
+		previous: end.map
+	};
+}
+
+/**
+ * What a match broadcast sends at a boundary, end message first. The end message is skipped when
+ * nobody scored (a reset from nil-all says nothing worth announcing); both need the player count.
+ */
+export function matchBroadcastMessages(
+	cfg: MatchBroadcastConfig,
+	end: MatchEnd,
+	playerCount: number,
+	vars: Record<string, string | number>
+): { stage: 'end' | 'start'; message: string }[] {
+	if (playerCount < cfg.minPlayers) return [];
+	const all = { ...vars, ...matchVars(end) };
+	const out: { stage: 'end' | 'start'; message: string }[] = [];
+	if (cfg.endMessage && end.leaders.length)
+		out.push({ stage: 'end', message: renderTemplate(cfg.endMessage, all) });
+	if (cfg.startMessage)
+		out.push({ stage: 'start', message: renderTemplate(cfg.startMessage, all) });
+	return out;
+}
+
+export interface MatchSample {
+	ts: number;
+	ok: boolean;
+	map: string;
+	scores: { name: string; score: number }[];
+	count: number;
+}
+
+/**
+ * The match boundaries in a run of samples, for the dry run: each sample is compared with the one
+ * before it, except across a failed sample or a gap longer than `maxHoldMs` (the worker was not
+ * watching, and the live rule would not have seen the boundary either).
+ */
+export function matchReplay(
+	rows: MatchSample[],
+	maxHoldMs: number
+): { ts: number; count: number; map: string; end: MatchEnd }[] {
+	const out: { ts: number; count: number; map: string; end: MatchEnd }[] = [];
+	let prev: MatchSample | null = null;
+	for (const r of rows) {
+		if (!r.ok) {
+			prev = null;
+			continue;
+		}
+		const look = { map: r.map, scores: r.scores, matchSeconds: null };
+		if (prev && r.ts - prev.ts <= maxHoldMs) {
+			const end = matchBoundary({ map: prev.map, scores: prev.scores, matchSeconds: null }, look);
+			if (end) out.push({ ts: r.ts, count: r.count, map: r.map, end });
+		}
+		prev = r;
+	}
+	return out;
+}
+
 /** A player who has a faction now and did not have this one at the last look. */
 export interface FactionPick<P> {
 	player: P;
@@ -248,6 +618,8 @@ export interface RiskKickSignals {
 	steamEnabled: boolean;
 	bannedOn: { serverName: string; reason: string }[];
 	watched: { reason: string } | null;
+	/** banned players whose last known name looks like this one; only the risk level uses it */
+	resembles?: { name: string; steamId: string; serverName: string }[];
 	reserved: boolean;
 	now?: Date;
 }
@@ -272,6 +644,25 @@ export function riskKickVerdict(cfg: RiskKickConfig, s: RiskKickSignals): string
 			} else if (age < cfg.minAccountDays) {
 				return `Steam account only ${age} day${age === 1 ? '' : 's'} old (minimum ${cfg.minAccountDays})`;
 			}
+		}
+	}
+	if (cfg.kickAtLevel) {
+		const risk = assessRisk({
+			profile: s.profile,
+			steamEnabled: s.steamEnabled,
+			watched: s.watched,
+			bannedOn: s.bannedOn,
+			resembles: s.resembles ?? [],
+			now: s.now
+		});
+		const bad = risk.level === 'high' || (cfg.kickAtLevel === 'medium' && risk.level === 'medium');
+		if (bad) {
+			const why = [...risk.reasons]
+				.sort((a, b) => b.weight - a.weight)
+				.slice(0, 3)
+				.map((r) => r.text)
+				.join('; ');
+			return `${risk.level} risk (${risk.score}): ${why}${risk.steamChecked ? '' : ' [Steam not checked]'}`;
 		}
 	}
 	return null;

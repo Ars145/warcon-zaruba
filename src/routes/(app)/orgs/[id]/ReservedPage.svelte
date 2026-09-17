@@ -9,19 +9,13 @@
 	import { fmtTime } from '$lib/format';
 	import { toast } from '$lib/toast.svelte';
 	import { confirmDialog } from '$lib/confirm.svelte';
-	import {
-		describeSync,
-		expiryIso,
-		RESERVE_EXPIRY_OPTIONS,
-		STATE_TEXT,
-		STATE_TONE
-	} from '$lib/lists';
+	import { describeSync, EXPIRY_OPTIONS, expiryIso, STATE_TEXT, STATE_TONE } from '$lib/lists';
 	import { isSteamId, steamProfiles, type SteamProfile } from '$lib/steam-profiles';
 	import Badge from '$lib/components/Badge.svelte';
 	import SteamName from '$lib/components/SteamName.svelte';
-	import ExpiryDialog from '$lib/components/ExpiryDialog.svelte';
 	import ImportCandidates from './ImportCandidates.svelte';
 	import SortHeader from '$lib/components/SortHeader.svelte';
+	import ExpiryDialog from '$lib/components/ExpiryDialog.svelte';
 	import { TableSort, matches } from '$lib/table.svelte';
 	import type { ListEntryView, ListSyncSummary, OrgListsView } from '$lib/types';
 
@@ -42,16 +36,14 @@
 	let owner = $derived(lists.role === 'owner');
 	let search = $state('');
 	let busy = $state(false);
-	let newId = $state('');
-	let newReason = $state('');
-	/** how long the new slot lasts: a value from RESERVE_EXPIRY_OPTIONS ('0' = permanent) */
-	let newExpiry = $state('0');
-	/** the datetime-local value behind the 'custom' choice */
-	let newExpiryCustom = $state('');
 	/** the entry whose expiry is being edited, null when the dialog is closed */
 	let editing = $state<{ steamId: string; name: string | null; expiresAt: string | null } | null>(
 		null
 	);
+	let newId = $state('');
+	let newReason = $state('');
+	let newExpiry = $state('0');
+	let newCustom = $state('');
 	/** Steam personas, for the avatar beside a name */
 	let steam = $state<Record<string, SteamProfile | null>>({});
 	/** the persona for the id being typed into the reserve form: undefined while unknown */
@@ -117,8 +109,9 @@
 		steamId: { by: (r) => r.e.steamId },
 		source: { by: (r) => (r.e.member ? 'member' : 'list') },
 		note: { by: (r) => r.e.reason },
-		expires: { by: (r) => r.e.expiresAt ?? '￿' },
 		added: { by: (r) => (r.e.member ? null : r.e.addedAt), dir: 'desc' },
+		// slots that never expire last, then the soonest to lapse first
+		expires: { by: (r) => r.e.expiresAt ?? '\uffff' },
 		servers: { by: (r) => r.e.servers.filter((s) => s.state === 'applied').length, dir: 'desc' }
 	});
 	let rows = $derived(
@@ -167,26 +160,16 @@
 		}
 		busy = true;
 		try {
-			const expiresAt = expiryIso(newExpiry, newExpiryCustom);
 			const res = await api<{ sync: ListSyncSummary }>('POST', path, {
 				steamId,
 				reason: newReason.trim(),
-				expiresAt
+				expiresAt: expiryIso(newExpiry, newCustom)
 			});
-			toast(
-				describeSync(
-					res.sync,
-					expiresAt
-						? `Reserved a slot for ${steamId} until ${fmtTime(expiresAt)}.`
-						: `Reserved a slot for ${steamId}.`
-				),
-				'ok',
-				8000
-			);
+			toast(describeSync(res.sync, `Reserved a slot for ${steamId}.`), 'ok', 8000);
 			newId = '';
 			newReason = '';
 			newExpiry = '0';
-			newExpiryCustom = '';
+			newCustom = '';
 			await invalidateAll();
 		} catch (err) {
 			toast(errorMessage(err), 'err');
@@ -348,10 +331,10 @@
 				placeholder="Note, e.g. donor, clan member (optional)"
 				bind:value={newReason}
 			/>
-			<div class="flex flex-wrap gap-3">
+			<div class="flex flex-wrap gap-2">
 				<label class="block sm:w-40"
 					><span class="field-label">Expires</span><select class="input" bind:value={newExpiry}>
-						{#each RESERVE_EXPIRY_OPTIONS as [value, label] (value)}
+						{#each EXPIRY_OPTIONS as [value, label] (value)}
 							<option {value}>{label}</option>
 						{/each}
 					</select></label
@@ -361,7 +344,7 @@
 						><span class="field-label">Until (local time)</span><input
 							class="input"
 							type="datetime-local"
-							bind:value={newExpiryCustom}
+							bind:value={newCustom}
 							required
 						/></label
 					>
@@ -370,8 +353,8 @@
 		</form>
 		<p class="note">
 			Handed out on every server in {org.name}, now and when one is added later. A slot with an
-			expiry is withdrawn everywhere on its own when the date passes. To reserve a slot on one
-			server only, use that server's Reserved slots tab.
+			expiry is withdrawn by the panel when the time comes. To reserve a slot on one server only,
+			use that server's Reserved slots tab.
 		</p>
 		{#if owner}
 			<label class="mt-3 flex items-start gap-2 border-t border-white/8 pt-3 text-[13px]">
@@ -420,8 +403,8 @@
 						<SortHeader {sort} key="steamId">SteamID64</SortHeader>
 						<SortHeader {sort} key="source">Source</SortHeader>
 						<SortHeader {sort} key="note">Note</SortHeader>
-						<SortHeader {sort} key="expires">Expires</SortHeader>
 						<SortHeader {sort} key="added">Added</SortHeader>
+						<SortHeader {sort} key="expires">Expires</SortHeader>
 						<SortHeader {sort} key="servers">Servers</SortHeader>
 						<th></th>
 					</tr>
@@ -478,21 +461,19 @@
 							</td>
 							<td class="text-[12.5px] whitespace-nowrap">
 								{#if e.member}
-									<span class="text-mist-600">—</span>
-								{:else if !e.expiresAt}
-									<span class="text-mist-400">Permanent</span>
-								{:else if e.expired}
-									<Badge tone="warn">expired, lifting</Badge>
-								{:else}
-									{fmtTime(e.expiresAt)}
-								{/if}
-							</td>
-							<td class="text-[12.5px] whitespace-nowrap">
-								{#if e.member}
 									<span class="text-mist-400">by membership</span>
 								{:else}
 									<div>{e.addedByName || '—'}</div>
 									<div class="text-mist-400">{fmtTime(e.addedAt)}</div>
+								{/if}
+							</td>
+							<td class="text-[12.5px] whitespace-nowrap">
+								{#if !e.expiresAt}
+									<span class="text-mist-600">never</span>
+								{:else if e.expired}
+									<Badge tone="warn">expired, withdrawing</Badge>
+								{:else}
+									{fmtTime(e.expiresAt)}
 								{/if}
 							</td>
 							<td>

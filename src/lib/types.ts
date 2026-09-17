@@ -144,6 +144,25 @@ export interface LiveView {
 	playersAt: string | null;
 	observedAt: string | null;
 }
+/** One kill as the game's feed reported it and Warcon stored it (kills table). */
+export interface KillView {
+	eventId: string;
+	/** when Warcon received it */
+	ts: string;
+	map: string;
+	/** seconds on the match clock */
+	eventTime: number;
+	/** null: the environment */
+	killer: { steamId: string; name: string; faction: string | null } | null;
+	victim: { steamId: string; name: string; faction: string | null };
+	/** the raw weapon or vehicle tag; $lib/causes labels it */
+	cause: string | null;
+	distanceM: number | null;
+	headshot: boolean;
+	suicide: boolean;
+	teamKill: boolean;
+	tags: string[];
+}
 /** One trigger action and what became of it. */
 export interface OutboxView {
 	id: number;
@@ -353,11 +372,29 @@ export interface DossierSession {
 	lastSeen: string;
 	leftAt: string | null;
 	minutes: number;
+	/** minutes of this session with the player count at or under the server's seeding threshold */
+	seedMinutes: number;
 	kills: number;
 	deaths: number;
 	cash: number;
 }
 
+export interface PlayerCombat {
+	kills: number;
+	deaths: number;
+	headshots: number;
+	teamKills: number;
+	/** times this player was team-killed */
+	teamKilled: number;
+	suicides: number;
+	avgDistanceM: number | null;
+	longestM: number | null;
+	causes: { cause: string; kills: number }[];
+	victims: { steamId: string; name: string; kills: number }[];
+	nemeses: { steamId: string; name: string; deaths: number }[];
+	/** the last kills and deaths involving the player, newest first */
+	recent: (KillView & { serverId: string; serverName: string })[];
+}
 export interface DossierView {
 	steamId: string;
 	name: string;
@@ -380,6 +417,8 @@ export interface DossierView {
 		firstSeen: string | null;
 		lastSeen: string | null;
 	};
+	/** from the kill feed, across the org's servers the viewer can see; null when none has one */
+	combat: PlayerCombat | null;
 	perServer: {
 		serverId: string;
 		serverName: string;
@@ -405,7 +444,15 @@ export interface DossierView {
 // ---- automation ---------------------------------------------------------------------------------
 
 export type TriggerKind =
-	'welcome' | 'faction_change' | 'broadcast' | 'empty_reset' | 'risk_kick' | 'restart_notice';
+	| 'welcome'
+	| 'faction_change'
+	| 'broadcast'
+	| 'empty_reset'
+	| 'risk_kick'
+	| 'restart_notice'
+	| 'team_kill'
+	| 'seed_reward'
+	| 'match_broadcast';
 
 export interface TriggerView {
 	id: string;

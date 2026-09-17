@@ -7,7 +7,7 @@
 	import Modal from './Modal.svelte';
 	import { api, errorMessage } from '$lib/api';
 	import { toast } from '$lib/toast.svelte';
-	import { describeSync, expiryIso, RESERVE_EXPIRY_OPTIONS } from '$lib/lists';
+	import { describeSync, expiryIso, EXPIRY_OPTIONS } from '$lib/lists';
 	import { fmtTime } from '$lib/format';
 	import type { ListKind, ListSyncSummary } from '$lib/types';
 
@@ -84,7 +84,7 @@
 	>
 		<label class="block"
 			><span class="field-label">Expires</span><select class="input" bind:value={choice}>
-				{#each RESERVE_EXPIRY_OPTIONS as [value, text] (value)}
+				{#each EXPIRY_OPTIONS as [value, text] (value)}
 					<option {value}>{text}</option>
 				{/each}
 			</select></label

@@ -41,7 +41,7 @@ Warcon, and Warcon's own process talks plain HTTP to the listener.
 |---|---|---|---|---|
 | GET | `/v1/capabilities` | | `{ apiVersion, build, auth:{scheme,header}, limits:{maxBodyBytes,maxRequestsPerMinutePerIp}, config:{writable,document}, routes:["GET /v1/status", ...] }` | Console feature-detects `PATCH /v1/players/{id}` (change team), `GET /v1/server-id` and `PUT /v1/config`. Warcon shows `build` and the routes under Servers → Test, and the worker re-reads it hourly. |
 | GET | `/v1/server-id` | | `{ serverId: "<uuid>" }` | **New in CL-501228.** The server's join code, issued by the WARDOGS backend; read-only. Warcon action `serverId`; shown as "Join code" in the server header (click to copy), the connection test and, as a copyable code block, on the Discord status card. |
-| GET | `/v1/status` | | `{ serverName, map, experiences[], lighting, alternator, scoreTick:{current,min,max}, scoreCap, matchSeconds, players:{current,max}, factionScores:[{name,colorHex,score}], rotation:{nowIndex,nextIndex} }` | Live build CL-499480 (2026-09-11) sends **no `scoreCap` and no `matchSeconds`**; the mock has them, Warcon treats both as optional. `players.max` is the public cap: `MaxPlayers` less `MaxReservedSlots` (98 for `MaxPlayers=100`, `MaxReservedSlots=2`); Warcon shows the held-back slots beside it from the config document. |
+| GET | `/v1/status` | | `{ serverName, map, experiences[], lighting, alternator, scoreTick:{current,min,max}, scoreCap, matchSeconds, players:{current,max}, factionScores:[{name,colorHex,score}], rotation:{nowIndex,nextIndex} }` | Live builds CL-499480 (2026-09-11) and CL-501228 (2026-09-17, TLR host) send **no `scoreCap` and no `matchSeconds`**; the mock has them, Warcon treats both as optional. So on live servers a new match is only visible as a map change (or, on servers that feed kills, as the feed's `eventTime` resetting), and the cap a faction plays to is not readable. `MOCK_LIVE_BUILD` drops both from the mock too. `players.max` is the public cap: `MaxPlayers` less `MaxReservedSlots` (98 for `MaxPlayers=100`, `MaxReservedSlots=2`); Warcon shows the held-back slots beside it from the config document. |
 | GET | `/v1/players` | | `{ players:[{name, steamId, faction, kills, deaths, cash, pingMs}], count }` | Confirmed on CL-499480. List responses all carry `count`. |
 | POST | `/v1/players/{steamId}/kick` | `{ reason }` | `{ message }` | |
 | POST | `/v1/players/{steamId}/kill` | | `{ message }` | |
@@ -52,7 +52,7 @@ Warcon, and Warcon's own process talks plain HTTP to the listener.
 | POST | `/v1/bans` | `{ steamId, reason? }` | `{ message }` | Persists to `+DefaultBannedPlayerIds`. |
 | DELETE | `/v1/bans/{steamId}` | | `{ message }` | Unknown id: `404 { code:"ban_not_found", message:"Error: SteamId … is not currently banned." }`. |
 | GET | `/v1/reserved-slots` | | `{ reservedSlots:[steamId], count }` | Permanent only on real servers (the console carries a `reservedExpiry` flag and `expiresAtUtc`, but only its mock sets them). The list has no length limit: anyone on it skips the join queue; `MaxReservedSlots` only says how many player slots are held back for them. |
-| POST | `/v1/reserved-slots` | `{ steamId }` | `{ message }` | **Not served by live builds CL-499480 / CL-501228.** Both the console (since 2026-09-14) and Warcon then edit `DefaultReservedPlayerIds` in the config document instead: `GET /v1/config`, add the id, `PUT /v1/config` with `If-Match` (`src/lib/reserved-doc.ts`, `reservedViaConfig` in `actions.ts`); Warcon keeps the live-route error codes (`already_reserved`, `reserved_not_found`) so the org list sync behaves the same either way. The console's mock refused adds beyond `MaxReservedSlots` with a `reserved_full` 409; no real server does, and Warcon no longer imitates it. |
+| POST | `/v1/reserved-slots` | `{ steamId }` | `{ message }` | **Not served by live builds CL-499480 / CL-501228.** Both the console (since 2026-09-14) and Warcon then edit `DefaultReservedPlayerIds` in the config document instead: `GET /v1/config`, add the id, `PUT /v1/config` with `If-Match` (`src/lib/reserved-doc.ts`, `reservedViaConfig` in `actions.ts`); Warcon keeps the live-route error codes (`already_reserved`, `reserved_not_found`) so the org list sync behaves the same either way. The console's mock refused adds beyond `MaxReservedSlots` with a `reserved_full` 409; no real server does, and Warcon no longer imitates it. **The running server does not re-read the array until it restarts** (seen 2026-09-15 on a CL-501228 host: withdrawn from the document, still returned by `GET /v1/reserved-slots` five minutes later, and the twelve-hour self-restart is when it clears). Warcon re-reads the live list after every document edit and reports `pendingRestart`; the slots page badges such ids "leaves at restart" / "arrives at restart" and offers no second Withdraw. `MOCK_LIVE_BUILD` reproduces it. |
 | DELETE | `/v1/reserved-slots/{steamId}` | | `{ message }` | **Not served by live builds**; same document fallback. |
 | GET | `/v1/catalog/maps` | | `{ maps:[{id, displayName}] }` | Map ids: `Kavkazi` (Bakurani), `Europe` (Ozeti), `NorthAmerica` (Zestafona). |
 | GET | `/v1/catalog/lightings` | | `{ lightings:[{id, displayName}] }` | `DayStartClear`, `DayEarlyClear`, `DayEarlyFog`, `DayClear`, `DayLateClear`, `DayLateGray`, `DayLateGrayFog`, `DayEndClear`. |
@@ -127,12 +127,37 @@ number of `MaxPlayers` held back from public joins for them, which is why the TL
 `AllowedOrigins` under the RCON block, and CL-501228 adds `bWriteAuditLogFile` there (presumably
 whether the listener log `GET /v1/audit` shows is also written to disk); none is documented in the
 reference ini, and nothing on rcon.wardogs.com mentions any of the four. Warcon leaves the RCON
-block to the raw editor, as before. `WDServerFeed` (`Url` + `Token`, "kill-event feed
-endpoint and its ingest token") is most likely the game's own telemetry: the server pushing kill
-events to Bulkhead's ingest service for stats. It is not documented for hosts, its default is not
-visible in the document (the TLR file has no such section, so it runs on built-in defaults), and
-repointing it would divert the developer's data. Leave it alone; Warcon keeps building kill and
-cash data from the scoreboard.
+block to the raw editor, as before. `WDServerFeed` (`Url` + `Token`) is a push feed the host may point anywhere: once both keys are
+set (read at startup), the game process POSTs JSON to **`Url` + `/api/ingest/events`** (the
+suffix is the game's own and is always appended; `Url` is a base, confirmed 2026-09-17 by a
+capture on the hosted panel where `Url=https://console.warcon.app/api/feed/events` produced posts
+to `/api/feed/events/api/ingest/events`) with `Authorization: Bearer <Token>` and user agent
+`Wardogs/++Wardogs+Live-CL-501228 (http-eventloop) Linux/debian12`. A quoted `Url="https://…"`
+is read correctly at startup. Captured on 2026-09-16 from the TLR server through a request bin
+set as the base (3 h 26 m, 1900 posts, 2435 kills):
+
+```
+{ "serverId": "<uuid>",          // a per-boot game instance id, not the join code from GET /v1/server-id
+  "serverName": "...",
+  "events": [ { "eventId": "<uuid>", "type": "killed", "eventTime": 3317.77, "matchId": "<uuid>",
+                "mapName": "Kavkazi", "killerName", "killerId", "killerSteamId", "victimName",
+                "victimId", "victimSteamId", "cause": "Id.Item.AK74M", "distance": 704.87,
+                "contextTags": ["Meta.Progression.Context.Player.KillContext.Headshot",
+                                "Meta.PlayerKillFlag.Player.Local.Kill", "Meta.PlayerKillFlag.Player.Local.Death"] } ] }
+```
+
+Batches flush about every two seconds (one to ten events, in clock order). `eventTime` is the
+match clock (it reset at the map change, like `matchSeconds`); `matchId` did **not** change at the
+map change, so treat it as per boot too. `killerName`/`killerId`/`killerSteamId` are absent on
+environment deaths, `cause` on falls, `distance` (Unreal units, centimetres) on vehicle
+explosions and most suicides. Tags seen: `Headshot`, `Penetration`, `Ricochet`, `WeaponMelee`,
+`VehicleExplosion`, `RoadKill`, `Falling` (all `Meta.Progression.Context.Player.KillContext.*`),
+`Suicide` and the constant `Local.Kill`/`Local.Death` (`Meta.PlayerKillFlag.Player.*`). No faction
+on either side. Only `killed` was seen; other types may exist. Whether the game buffers while the
+endpoint is down is not known. Warcon serves the endpoint at `POST /api/ingest/events` and writes
+`Url=<origin>` with a per-server token (README, "Kill feed"), keeps `<origin>/api/feed/events`
+plus the suffix served for configs written before the suffix was known, and keeps building the
+scoreboard's kill and cash totals as before.
 
 Only `ScorePeriod`, `bEnabled` and `RotationMode` have live routes; everything else changes via the
 config document (PUT `/v1/config`) or by editing the ini and restarting.

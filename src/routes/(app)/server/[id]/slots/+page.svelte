@@ -16,7 +16,7 @@
 	import { TableSort, matches } from '$lib/table.svelte';
 	import { isSteamId, steamProfiles, type SteamProfile } from '$lib/steam-profiles';
 	import ExpiryDialog from '$lib/components/ExpiryDialog.svelte';
-	import { describeSync, expiryIso, RESERVE_EXPIRY_OPTIONS, STATE_TONE } from '$lib/lists';
+	import { describeSync, expiryIso, EXPIRY_OPTIONS, STATE_TONE } from '$lib/lists';
 	import type { ListSyncServer, ListSyncSummary, ServerListsState } from '$lib/types';
 	import type { PageProps } from './$types';
 
@@ -376,7 +376,7 @@
 			<div class="mt-2 flex flex-wrap gap-3">
 				<label class="block sm:w-40"
 					><span class="field-label">Expires</span><select class="input" bind:value={newExpiry}>
-						{#each RESERVE_EXPIRY_OPTIONS as [value, text] (value)}
+						{#each EXPIRY_OPTIONS as [value, text] (value)}
 							<option {value}>{text}</option>
 						{/each}
 					</select></label

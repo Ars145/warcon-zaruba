@@ -36,15 +36,6 @@ export const EXPIRY_OPTIONS = [
 	['custom', 'Until a date…']
 ] as const;
 
-/** The same, for a reserved slot: donors and clan slots are handed out by the month. */
-export const RESERVE_EXPIRY_OPTIONS = [
-	['0', 'Permanent'],
-	['30', '30 days'],
-	['60', '60 days'],
-	['90', '90 days'],
-	['custom', 'Until a date…']
-] as const;
-
 /** The ISO timestamp an expiry choice stands for, or null for permanent. */
 export function expiryIso(choice: string, custom: string): string | null {
 	if (choice === 'custom') return custom ? new Date(custom).toISOString() : null;
