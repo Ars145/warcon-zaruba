@@ -1,0 +1,8 @@
+[Unit]
+Description=Update Warcon to the image published for main
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/warcon/deploy/update.sh
