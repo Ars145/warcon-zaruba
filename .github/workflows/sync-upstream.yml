@@ -12,7 +12,7 @@ on:
 
 permissions:
   contents: write
-  issues: write
+  pull-requests: write
 
 concurrency:
   group: sync-upstream
@@ -49,17 +49,27 @@ jobs:
           if git merge --no-edit upstream/main; then
             git push origin main
             echo "merged=true" >> "$GITHUB_OUTPUT"
-          else
-            git merge --abort
-            echo "merged=false" >> "$GITHUB_OUTPUT"
-            {
-              echo "conflicts<<EOF"
-              git diff --name-only --diff-filter=U upstream/main | head -40
-              echo "EOF"
-            } >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-      - name: Report a conflict
+          # The conflicted paths have to be read before the abort clears the index.
+          {
+            echo "conflicts<<GHEOF"
+            git diff --name-only --diff-filter=U | head -40
+            echo "GHEOF"
+          } >> "$GITHUB_OUTPUT"
+          git merge --abort
+          echo "merged=false" >> "$GITHUB_OUTPUT"
+
+          # Park upstream's tip on a branch so the conflict can be reviewed and
+          # resolved in a pull request. main is left exactly as it was.
+          git push --force origin upstream/main:refs/heads/sync/upstream
+
+      # Forks have Issues switched off, so a conflict is reported as a pull
+      # request from the parked branch instead. It cannot be merged as it
+      # stands — it is the place to resolve the conflict, by hand or in the
+      # web editor.
+      - name: Open a pull request for the conflict
         if: steps.merge.outputs.merged == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -67,10 +77,10 @@ jobs:
           CONFLICTS: ${{ steps.merge.outputs.conflicts }}
         run: |
           TITLE="Upstream merge needs hands ($BEHIND commit(s) behind)"
-          EXISTING=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number')
-          BODY=$(printf 'Automatic merge of upstream/main stopped on conflicts.\n\nFiles:\n```\n%s\n```\n\nResolve locally:\n```\ngit fetch upstream\ngit merge upstream/main\n```\n' "$CONFLICTS")
+          BODY=$(printf 'The scheduled merge of upstream/main stopped on conflicts, so main was left alone.\n\nConflicting files:\n```\n%s\n```\n\nResolve locally:\n```\ngit fetch upstream\ngit merge upstream/main\n```\n' "$CONFLICTS")
+          EXISTING=$(gh pr list --head sync/upstream --state open --json number --jq '.[0].number')
           if [ -n "$EXISTING" ]; then
-            gh issue comment "$EXISTING" --body "$BODY"
+            gh pr edit "$EXISTING" --title "$TITLE" --body "$BODY"
           else
-            gh issue create --title "$TITLE" --body "$BODY"
+            gh pr create --base main --head sync/upstream --title "$TITLE" --body "$BODY"
           fi
