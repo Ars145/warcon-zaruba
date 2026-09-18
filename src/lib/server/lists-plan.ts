@@ -49,6 +49,40 @@ export interface DesiredBan {
 	listId: string;
 }
 
+/** An active entry with the list it is on, as desiredOf takes it. */
+export interface DesiredEntry {
+	kind: Kind;
+	steamId: string;
+	reason: string;
+	listId: string;
+	/** the list's server, when the list belongs to one server; null for an org list */
+	serverId: string | null;
+}
+
+/**
+ * The bans and reserved slots a server's lists want on it, one per player and kind: a player on
+ * both the org list and the server's own list is wanted once, from the org list, so removing the
+ * org entry leaves the server's entry in force (the next sync re-attributes the slot to it).
+ */
+export function desiredOf(rows: DesiredEntry[]): {
+	bans: DesiredBan[];
+	reserved: DesiredReserve[];
+} {
+	const bans = new Map<string, DesiredBan>();
+	const reserved = new Map<string, DesiredReserve>();
+	const ordered = [...rows].sort(
+		(a, b) => Number(a.serverId !== null) - Number(b.serverId !== null)
+	);
+	for (const r of ordered) {
+		if (r.kind === 'ban') {
+			if (!bans.has(r.steamId))
+				bans.set(r.steamId, { steamId: r.steamId, reason: r.reason, listId: r.listId });
+		} else if (!reserved.has(r.steamId))
+			reserved.set(r.steamId, { steamId: r.steamId, listId: r.listId, member: false });
+	}
+	return { bans: [...bans.values()], reserved: [...reserved.values()] };
+}
+
 export interface DesiredReserve {
 	steamId: string;
 	listId: string;
@@ -171,3 +205,36 @@ export function planSync(i: PlanInput): SyncPlan {
 }
 
 export const planHasWork = (p: SyncPlan): boolean => p.adds.length > 0 || p.removes.length > 0;
+
+export interface RefusedBan {
+	steamId: string;
+	reason: string;
+	listId: string;
+}
+
+/**
+ * The bans the lists want on a server that the game refused at its last attempt (the live build
+ * only bans a connected player), as they stand after a run: the failed rows before it, less what
+ * the run added or confirmed, plus what it failed to add. The worker keeps them in memory and
+ * bans the player the moment they are seen on the server.
+ */
+export function refusedBansAfter(
+	desired: DesiredBan[],
+	state: StateLike[],
+	run: { added: PlanRef[]; confirms: PlanRef[]; failedAdds: PlanRef[] } = {
+		added: [],
+		confirms: [],
+		failedAdds: []
+	}
+): RefusedBan[] {
+	const failed = new Set(
+		state.filter((s) => s.kind === 'ban' && s.state === 'failed').map((s) => s.steamId)
+	);
+	const bansOf = (rows: PlanRef[]) => rows.filter((r) => r.kind === 'ban').map((r) => r.steamId);
+	for (const id of bansOf(run.added)) failed.delete(id);
+	for (const id of bansOf(run.confirms)) failed.delete(id);
+	for (const id of bansOf(run.failedAdds)) failed.add(id);
+	return desired
+		.filter((d) => failed.has(d.steamId))
+		.map(({ steamId, reason, listId }) => ({ steamId, reason, listId }));
+}

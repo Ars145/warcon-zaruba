@@ -8,6 +8,8 @@
 	import { confirmDialog } from '$lib/confirm.svelte';
 	import Badge from '$lib/components/Badge.svelte';
 	import BanDialog from '$lib/components/BanDialog.svelte';
+	import CareerPanel from '$lib/components/CareerPanel.svelte';
+	import CombatSummary from '$lib/components/CombatSummary.svelte';
 	import { describeSync, STATE_TONE } from '$lib/lists';
 	import SortHeader from '$lib/components/SortHeader.svelte';
 	import { TableSort } from '$lib/table.svelte';
@@ -49,9 +51,6 @@
 		cash: { by: (s) => s.cash, dir: 'desc' }
 	});
 	let recent = $derived(sessionSort.sorted(d.recent));
-	let maxCause = $derived(Math.max(1, ...(d.combat?.causes.map((c) => c.kills) ?? [])));
-	const pct = (part: number, whole: number) =>
-		whole ? `${Math.round((part / whole) * 100)}%` : '—';
 	const clock = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour12: false });
 
 	/** remove the player from an org list (unban across the org, or withdraw the reserved slot) */
@@ -298,55 +297,10 @@
 						class="text-accent hover:underline">Every kill and death on this server →</a
 					>
 				</p>
-				<div class="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
-					{#each [['Kills', fmtNum(d.combat.kills)], ['Deaths', fmtNum(d.combat.deaths)], ['K/D', kd(d.combat.kills, d.combat.deaths)], ['Headshots', `${d.combat.headshots} · ${pct(d.combat.headshots, d.combat.kills)}`], ['Team kills', String(d.combat.teamKills)], ['Team killed', String(d.combat.teamKilled)], ['Suicides', String(d.combat.suicides)], ['Distance', d.combat.avgDistanceM === null ? '—' : `${d.combat.avgDistanceM} m avg · ${d.combat.longestM} m best`]] as [label, value] (label)}
-						<div class="rounded-ctl border border-black bg-ink-950 px-3.5 py-3">
-							<div class="caps text-mist-400">{label}</div>
-							<div class="mt-1 font-display text-xl font-semibold tabular">{value}</div>
-						</div>
-					{/each}
-				</div>
-				<div class="grid grid-cols-1 gap-4 md:grid-cols-3">
-					<div>
-						<span class="field-label">Weapons</span>
-						{#each d.combat.causes as c (c.cause)}
-							<div class="mb-2">
-								<div class="mb-0.5 flex justify-between text-[13px]">
-									<span>{causeLabel(c.cause)}</span><span class="font-mono text-mist-400 tabular"
-										>{c.kills}</span
-									>
-								</div>
-								<div class="progress">
-									<span class="progress-bar" style="width:{(c.kills / maxCause) * 100}%"></span>
-								</div>
-							</div>
-						{:else}<div class="text-[13px] text-mist-600">No kills yet.</div>{/each}
-					</div>
-					<div>
-						<span class="field-label">Most killed</span>
-						{#each d.combat.victims as v (v.steamId)}
-							<div class="flex justify-between text-[13px]">
-								<a
-									href="/server/{encodeURIComponent(id)}/players/{v.steamId}"
-									class="hover:text-accent hover:underline">{v.name}</a
-								>
-								<span class="font-mono text-mist-400 tabular">{v.kills}</span>
-							</div>
-						{:else}<div class="text-[13px] text-mist-600">Nobody yet.</div>{/each}
-					</div>
-					<div>
-						<span class="field-label">Nemeses</span>
-						{#each d.combat.nemeses as n (n.steamId)}
-							<div class="flex justify-between text-[13px]">
-								<a
-									href="/server/{encodeURIComponent(id)}/players/{n.steamId}"
-									class="hover:text-accent hover:underline">{n.name}</a
-								>
-								<span class="font-mono text-mist-400 tabular">{n.deaths}</span>
-							</div>
-						{:else}<div class="text-[13px] text-mist-600">Nobody yet.</div>{/each}
-					</div>
-				</div>
+				<CombatSummary
+					combat={d.combat}
+					hrefFor={(steamId) => `/server/${encodeURIComponent(id)}/players/${steamId}`}
+				/>
 				{#if d.combat.recent.length}
 					<span class="mt-4 field-label">Recent kills and deaths</span>
 					<div class="max-h-[320px] table-wrap">
@@ -388,6 +342,22 @@
 				{/if}
 			</div>
 		{/if}
+
+		<div class="panel">
+			<div class="mb-3 flex items-center gap-2">
+				<span class="label-sm mb-0!">Career</span>
+				<a
+					href="/server/{encodeURIComponent(id)}/leaderboard"
+					class="ml-auto text-[12px] text-accent hover:underline">Leaderboards →</a
+				>
+			</div>
+			<CareerPanel
+				career={data.career}
+				serverName={data.server.name}
+				orgName={data.server.orgName}
+				multiServer={data.multiServer}
+			/>
+		</div>
 
 		<div class="panel">
 			<span class="label-sm">Admin actions on this player</span>
@@ -472,80 +442,81 @@
 			</div>
 		{/if}
 
-		<div class="panel">
-			<div class="mb-3 flex items-center gap-2">
-				<span class="label-sm mb-0!">Organisation lists</span>
-				{#if d.orgLists.canEdit}
+		<!-- the entry, its reason and who added it are for those who may open the lists -->
+		{#if d.orgLists.canEdit}
+			<div class="panel">
+				<div class="mb-3 flex items-center gap-2">
+					<span class="label-sm mb-0!">Organisation lists</span>
 					<a
 						href="/orgs/{encodeURIComponent(data.server.orgId)}/bans"
 						class="ml-auto text-[12px] text-accent hover:underline">Open the lists →</a
 					>
-				{/if}
-			</div>
-			<div class="space-y-3 text-[13px]">
-				<div class="flex flex-wrap items-center gap-2">
-					{#if d.orgLists.ban}
-						{@const b = d.orgLists.ban}
-						<Badge tone="err">banned org-wide</Badge>
-						<span class="min-w-0 flex-1 truncate text-mist-400"
-							>{b.reason || 'no reason'} · by {b.addedByName || '—'}{#if b.expiresAt}
-								· until {fmtTime(b.expiresAt)}{/if}</span
-						>
-						<span class="inline-flex flex-wrap gap-1">
-							{#each b.servers as s (s.serverId)}
-								<span title="{s.serverName}: {s.state}{s.error ? ` — ${s.error}` : ''}"
-									><Badge tone={STATE_TONE[s.state]}>{s.serverName}</Badge></span
-								>
-							{/each}
-						</span>
-						{#if d.orgLists.canEdit}
-							<button class="btn btn-sm" disabled={busy} onclick={() => orgRemove('ban')}
-								>Unban org-wide</button
-							>
-						{/if}
-					{:else}
-						<span class="text-mist-400">Not on the organisation's ban list.</span>
-						{#if d.orgLists.canEdit}
-							<button
-								class="ml-auto btn btn-sm btn-danger"
-								disabled={busy}
-								onclick={() => (banning = true)}>Ban org-wide</button
-							>
-						{/if}
-					{/if}
 				</div>
-				<div class="flex flex-wrap items-center gap-2">
-					{#if d.orgLists.reserve}
-						{@const r = d.orgLists.reserve}
-						<Badge tone="accent">reserved slot</Badge>
-						<span class="min-w-0 flex-1 truncate text-mist-400"
-							>{r.reason || 'org-wide'}{#if r.member}
-								· member{/if}{#if r.expiresAt}
-								· until {fmtTime(r.expiresAt)}{/if}</span
-						>
-						<span class="inline-flex flex-wrap gap-1">
-							{#each r.servers as s (s.serverId)}
-								<span title="{s.serverName}: {s.state}{s.error ? ` — ${s.error}` : ''}"
-									><Badge tone={STATE_TONE[s.state]}>{s.serverName}</Badge></span
+				<div class="space-y-3 text-[13px]">
+					<div class="flex flex-wrap items-center gap-2">
+						{#if d.orgLists.ban}
+							{@const b = d.orgLists.ban}
+							<Badge tone="err">banned org-wide</Badge>
+							<span class="min-w-0 flex-1 truncate text-mist-400"
+								>{b.reason || 'no reason'} · by {b.addedByName || '—'}{#if b.expiresAt}
+									· until {fmtTime(b.expiresAt)}{/if}</span
+							>
+							<span class="inline-flex flex-wrap gap-1">
+								{#each b.servers as s (s.serverId)}
+									<span title="{s.serverName}: {s.state}{s.error ? ` — ${s.error}` : ''}"
+										><Badge tone={STATE_TONE[s.state]}>{s.serverName}</Badge></span
+									>
+								{/each}
+							</span>
+							{#if d.orgLists.canEdit}
+								<button class="btn btn-sm" disabled={busy} onclick={() => orgRemove('ban')}
+									>Unban org-wide</button
 								>
-							{/each}
-						</span>
-						{#if d.orgLists.canEdit && !r.member}
-							<button class="btn btn-sm" disabled={busy} onclick={() => orgRemove('reserve')}
-								>Withdraw</button
-							>
+							{/if}
+						{:else}
+							<span class="text-mist-400">Not on the organisation's ban list.</span>
+							{#if d.orgLists.canEdit}
+								<button
+									class="ml-auto btn btn-sm btn-danger"
+									disabled={busy}
+									onclick={() => (banning = true)}>Ban org-wide</button
+								>
+							{/if}
 						{/if}
-					{:else}
-						<span class="text-mist-400">No reserved slot from the organisation.</span>
-						{#if d.orgLists.canEdit}
-							<button class="ml-auto btn btn-sm" disabled={busy} onclick={orgReserve}
-								>Reserve a slot</button
+					</div>
+					<div class="flex flex-wrap items-center gap-2">
+						{#if d.orgLists.reserve}
+							{@const r = d.orgLists.reserve}
+							<Badge tone="accent">reserved slot</Badge>
+							<span class="min-w-0 flex-1 truncate text-mist-400"
+								>{r.reason || 'org-wide'}{#if r.member}
+									· member{/if}{#if r.expiresAt}
+									· until {fmtTime(r.expiresAt)}{/if}</span
 							>
+							<span class="inline-flex flex-wrap gap-1">
+								{#each r.servers as s (s.serverId)}
+									<span title="{s.serverName}: {s.state}{s.error ? ` — ${s.error}` : ''}"
+										><Badge tone={STATE_TONE[s.state]}>{s.serverName}</Badge></span
+									>
+								{/each}
+							</span>
+							{#if d.orgLists.canEdit && !r.member}
+								<button class="btn btn-sm" disabled={busy} onclick={() => orgRemove('reserve')}
+									>Withdraw</button
+								>
+							{/if}
+						{:else}
+							<span class="text-mist-400">No reserved slot from the organisation.</span>
+							{#if d.orgLists.canEdit}
+								<button class="ml-auto btn btn-sm" disabled={busy} onclick={orgReserve}
+									>Reserve a slot</button
+								>
+							{/if}
 						{/if}
-					{/if}
+					</div>
 				</div>
 			</div>
-		</div>
+		{/if}
 
 		<div class="panel">
 			<div class="mb-3 flex items-center gap-2">
@@ -639,9 +610,11 @@
 			{#if d.watch.watched}
 				<p class="mb-2 text-[13px]">
 					On the watchlist{#if d.watch.reason}: <b>{d.watch.reason}</b>{/if}.
-					<span class="text-mist-400"
-						>Added by {d.watch.updatedByName || '?'} · {fmtTime(d.watch.updatedAt)}</span
-					>
+					{#if notes}
+						<span class="text-mist-400"
+							>Added by {d.watch.updatedByName || '?'} · {fmtTime(d.watch.updatedAt)}</span
+						>
+					{/if}
 				</p>
 				<button class="btn btn-sm" disabled={busy || !notes} onclick={() => setWatch(false)}
 					>Remove from watchlist</button
@@ -665,42 +638,47 @@
 			</p>
 		</div>
 
-		<div class="panel">
-			<span class="label-sm">Notes</span>
-			{#if notes}
-				<div class="mb-3">
-					<textarea
-						class="min-h-[70px] input"
-						placeholder="Anything the next admin should know…"
-						maxlength="2000"
-						bind:value={note}></textarea>
-					<div class="mt-2 flex justify-end">
-						<button class="btn btn-sm btn-primary" disabled={busy || !note.trim()} onclick={addNote}
-							>Add note</button
-						>
-					</div>
-				</div>
-			{/if}
-			<div class="space-y-2">
-				{#each d.notes as n (n.id)}
-					<div class="rounded-ctl border border-black bg-ink-950 px-3 py-2">
-						<div class="mb-1 flex items-center gap-2 text-[12px] text-mist-400">
-							<b class="text-mist-100">{n.authorName || '—'}</b>
-							<span>{fmtTime(n.createdAt)}</span>
-							{#if n.deletable}<button
-									class="ml-auto btn btn-sm btn-ghost"
-									aria-label="Delete note"
-									disabled={busy}
-									onclick={() => deleteNote(n.id)}>✕</button
-								>{/if}
+		<!-- notes are read by those who may write them -->
+		{#if notes}
+			<div class="panel">
+				<span class="label-sm">Notes</span>
+				{#if notes}
+					<div class="mb-3">
+						<textarea
+							class="min-h-[70px] input"
+							placeholder="Anything the next admin should know…"
+							maxlength="2000"
+							bind:value={note}></textarea>
+						<div class="mt-2 flex justify-end">
+							<button
+								class="btn btn-sm btn-primary"
+								disabled={busy || !note.trim()}
+								onclick={addNote}>Add note</button
+							>
 						</div>
-						<div class="text-[13.5px] whitespace-pre-wrap">{n.body}</div>
 					</div>
-				{:else}
-					<p class="text-[13px] text-mist-600">No notes yet.</p>
-				{/each}
+				{/if}
+				<div class="space-y-2">
+					{#each d.notes as n (n.id)}
+						<div class="rounded-ctl border border-black bg-ink-950 px-3 py-2">
+							<div class="mb-1 flex items-center gap-2 text-[12px] text-mist-400">
+								<b class="text-mist-100">{n.authorName || '—'}</b>
+								<span>{fmtTime(n.createdAt)}</span>
+								{#if n.deletable}<button
+										class="ml-auto btn btn-sm btn-ghost"
+										aria-label="Delete note"
+										disabled={busy}
+										onclick={() => deleteNote(n.id)}>✕</button
+									>{/if}
+							</div>
+							<div class="text-[13.5px] whitespace-pre-wrap">{n.body}</div>
+						</div>
+					{:else}
+						<p class="text-[13px] text-mist-600">No notes yet.</p>
+					{/each}
+				</div>
 			</div>
-		</div>
+		{/if}
 	</div>
 </div>
 

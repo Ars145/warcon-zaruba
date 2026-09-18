@@ -56,7 +56,7 @@ export const keyUser = (k: ApiKeyPrincipal): SessionUser => ({
 	apiKey: k
 });
 
-const keyForbidden = () =>
+export const keyForbidden = () =>
 	new ApiError(403, 'API keys cannot manage an organisation or the panel.', 'api_key_forbidden');
 
 export const ORG_ROLES: OrgRole[] = ['owner', 'member'];
@@ -166,9 +166,12 @@ export interface OrgSummary {
 	suspended: boolean;
 	/** may open the org's ban and reserved lists: owners, and anyone whose role on one of its servers includes lists.edit */
 	lists: boolean;
+	/** site-owner allowances for the public surfaces ($lib/features) */
+	allowPublicStatus: boolean;
+	allowPublicLeaderboards: boolean;
 }
 
-/** Servers (with their orgs) where the user's granted role includes `cap`. */
+/** Servers (with their orgs) where the user's granted role includes `cap`; a suspended org grants nothing. */
 async function grantedWith(
 	env: Env,
 	user: SessionUser,
@@ -178,8 +181,9 @@ async function grantedWith(
 		.select({ serverId: serverGrants.serverId, orgId: servers.orgId })
 		.from(serverGrants)
 		.innerJoin(servers, eq(servers.id, serverGrants.serverId))
+		.innerJoin(organizations, eq(organizations.id, servers.orgId))
 		.innerJoin(orgRoles, eq(orgRoles.id, serverGrants.roleId))
-		.where(and(eq(serverGrants.userId, user.id), hasCap(cap)));
+		.where(and(eq(serverGrants.userId, user.id), isNull(organizations.suspendedAt), hasCap(cap)));
 }
 
 /** Orgs the user belongs to, with their role; the site owner sees every org as owner. */
@@ -190,13 +194,13 @@ export async function userOrgs(env: Env, user: SessionUser): Promise<OrgSummary[
 		slug: o.slug,
 		role,
 		suspended: !!o.suspendedAt,
-		lists
+		lists,
+		allowPublicStatus: o.allowPublicStatus,
+		allowPublicLeaderboards: o.allowPublicLeaderboards
 	});
 	if (user.apiKey) {
 		const o = await getOrg(env, user.apiKey.orgId);
-		return o && !o.suspendedAt
-			? [shape(o, 'member', user.apiKey.capabilities.includes('lists.edit'))]
-			: [];
+		return o && !o.suspendedAt ? [shape(o, 'member', keyEditsLists(user.apiKey))] : [];
 	}
 	if (user.role === 'owner') {
 		const all = await env.db.select().from(organizations).orderBy(asc(organizations.name));
@@ -218,6 +222,14 @@ export async function userOrgs(env: Env, user: SessionUser): Promise<OrgSummary[
 
 // --- org lists (bans and reserved slots) ---
 
+/**
+ * The org lists are pushed to every server of the org, so a key held to some of its servers
+ * cannot edit them, whatever capabilities it carries. (A person with lists.edit on one server
+ * can: that is what the capability says, and an owner chose to give it.)
+ */
+const keyEditsLists = (key: ApiKeyPrincipal): boolean =>
+	key.capabilities.includes('lists.edit') && key.serverIds === null;
+
 /** owner: the org's owners; editor: holds lists.edit on at least one of its servers. Both may add and remove entries. */
 export type ListsRole = 'owner' | 'editor';
 
@@ -227,9 +239,7 @@ export async function listsRoleFor(
 	orgId: string
 ): Promise<ListsRole | null> {
 	if (user.apiKey)
-		return user.apiKey.orgId === orgId && user.apiKey.capabilities.includes('lists.edit')
-			? 'editor'
-			: null;
+		return keyEditsLists(user.apiKey) && user.apiKey.orgId === orgId ? 'editor' : null;
 	if ((await orgRoleFor(env, user, orgId)) === 'owner') return 'owner';
 	const [row] = await env.db
 		.select({ serverId: serverGrants.serverId })
@@ -358,6 +368,7 @@ export type ServerSummary = {
 	orgId: string;
 	orgName: string;
 	name: string;
+	/** where the game's RCON listens, and the owners' notes: blank unless `manager` */
 	host: string;
 	port: number;
 	scheme: 'http' | 'https';
@@ -369,28 +380,38 @@ export type ServerSummary = {
 	manager: boolean;
 	sortOrder: number;
 	demo: boolean;
+	publicStatus: boolean;
+	publicLeaderboards: boolean;
+	publicKills: boolean;
+	allowPublicStatus: boolean;
+	allowPublicLeaderboards: boolean;
 };
 
 export function shapeServer(
 	env: Env,
 	s: ServerRow,
-	orgName: string,
+	org: Pick<OrgRow, 'name' | 'allowPublicStatus' | 'allowPublicLeaderboards'>,
 	access: ServerAccess
 ): ServerSummary {
 	return {
 		id: s.id,
 		orgId: s.orgId,
-		orgName,
+		orgName: org.name,
 		name: s.name,
-		host: s.host,
-		port: s.port,
-		scheme: s.scheme,
-		notes: s.notes,
+		host: access.manager ? s.host : '',
+		port: access.manager ? s.port : 0,
+		scheme: access.manager ? s.scheme : 'http',
+		notes: access.manager ? s.notes : '',
 		roleName: access.roleName,
 		caps: [...access.caps],
 		manager: access.manager,
 		sortOrder: s.sortOrder,
-		demo: isDemoServer(env, s)
+		demo: isDemoServer(env, s),
+		publicStatus: s.publicStatus,
+		publicLeaderboards: s.publicLeaderboards,
+		publicKills: s.publicKills,
+		allowPublicStatus: org.allowPublicStatus,
+		allowPublicLeaderboards: org.allowPublicLeaderboards
 	};
 }
 
@@ -410,32 +431,28 @@ export async function accessibleServers(
 		if (orgId && orgId !== key.orgId) return [];
 		if (!key.capabilities.includes('server.view')) return [];
 		const rows = await env.db
-			.select({ server: servers, orgName: organizations.name })
+			.select({ server: servers, org: organizations })
 			.from(servers)
 			.innerJoin(organizations, eq(organizations.id, servers.orgId))
 			.where(and(eq(servers.orgId, key.orgId), isNull(organizations.suspendedAt)))
 			.orderBy(...order);
 		return rows
 			.filter((r) => keyCoversServer(key, r.server))
-			.map((r) =>
-				shapeServer(env, r.server, r.orgName, accessFromCaps(key.capabilities, 'API key'))
-			);
+			.map((r) => shapeServer(env, r.server, r.org, accessFromCaps(key.capabilities, 'API key')));
 	}
 	if (user.role === 'owner') {
 		const rowsAll = await env.db
-			.select({ server: servers, orgName: organizations.name })
+			.select({ server: servers, org: organizations })
 			.from(servers)
 			.innerJoin(organizations, eq(organizations.id, servers.orgId))
 			.where(inOrg)
 			.orderBy(...order);
-		return rowsAll.map((r) =>
-			shapeServer(env, r.server, r.orgName, resolveAccess({ manager: true })!)
-		);
+		return rowsAll.map((r) => shapeServer(env, r.server, r.org, resolveAccess({ manager: true })!));
 	}
 	const rows = await env.db
 		.select({
 			server: servers,
-			orgName: organizations.name,
+			org: organizations,
 			roleId: serverGrants.roleId,
 			roleName: orgRoles.name,
 			capabilities: orgRoles.capabilities,
@@ -461,7 +478,7 @@ export async function accessibleServers(
 		shapeServer(
 			env,
 			r.server,
-			r.orgName,
+			r.org,
 			resolveAccess({
 				manager: r.orgRole === 'owner',
 				grant: r.roleId
@@ -487,9 +504,19 @@ export async function auditVisibility(
 		return { userId: user.id, adminServerIds: covered, ownedOrgIds: [] };
 	}
 	if (user.role === 'owner') return null;
+	// A suspended org is closed to its owners too: they keep their own rows and nothing else.
 	const [granted, orgIds] = await Promise.all([
 		grantedWith(env, user, 'audit.read'),
-		ownedOrgIds(env, user)
+		ownedOrgIds(env, user).then(async (ids) =>
+			ids.length
+				? (
+						await env.db
+							.select({ id: organizations.id })
+							.from(organizations)
+							.where(and(inArray(organizations.id, ids), isNull(organizations.suspendedAt)))
+					).map((o) => o.id)
+				: []
+		)
 	]);
 	const ids = new Set(granted.map((r) => r.serverId));
 	if (orgIds.length) {
@@ -526,26 +553,28 @@ export async function loginLockSeconds(env: Env, keys: string[]): Promise<number
 	return worst;
 }
 
+/**
+ * One statement per key, so failures that arrive together are each counted: a read and a write
+ * apart let a burst of guesses overwrite one another's count and stay under the limit.
+ */
 export async function noteLoginFailure(env: Env, keys: string[]): Promise<void> {
 	const now = new Date();
+	const windowStart = new Date(now.getTime() - WINDOW_MINUTES * 60 * 1000);
+	const lockUntil = new Date(now.getTime() + LOCK_MINUTES * 60 * 1000);
 	for (const key of keys) {
-		const [row] = await env.db
-			.select({ count: loginAttempts.count, firstAt: loginAttempts.firstAt })
-			.from(loginAttempts)
-			.where(eq(loginAttempts.key, key))
-			.limit(1);
-		let count = 1;
-		let firstAt = now;
-		if (row && now.getTime() - row.firstAt.getTime() < WINDOW_MINUTES * 60 * 1000) {
-			count = row.count + 1;
-			firstAt = row.firstAt;
-		}
 		const limit = key.startsWith('ip:') ? LOCK_AFTER_IP : LOCK_AFTER_USER;
-		const lockedUntil = count >= limit ? new Date(now.getTime() + LOCK_MINUTES * 60 * 1000) : null;
+		const inWindow = sql`${loginAttempts.firstAt} > ${windowStart.toISOString()}::timestamptz`;
 		await env.db
 			.insert(loginAttempts)
-			.values({ key, count, firstAt, lockedUntil })
-			.onConflictDoUpdate({ target: loginAttempts.key, set: { count, firstAt, lockedUntil } });
+			.values({ key, count: 1, firstAt: now, lockedUntil: limit <= 1 ? lockUntil : null })
+			.onConflictDoUpdate({
+				target: loginAttempts.key,
+				set: {
+					count: sql`CASE WHEN ${inWindow} THEN ${loginAttempts.count} + 1 ELSE 1 END`,
+					firstAt: sql`CASE WHEN ${inWindow} THEN ${loginAttempts.firstAt} ELSE ${now.toISOString()}::timestamptz END`,
+					lockedUntil: sql`CASE WHEN ${inWindow} AND ${loginAttempts.count} + 1 >= ${limit} THEN ${lockUntil.toISOString()}::timestamptz ELSE NULL END`
+				}
+			});
 	}
 }
 

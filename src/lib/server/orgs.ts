@@ -6,6 +6,7 @@ import { ApiError, int, newId, str } from './http';
 import { writeAudit } from './audit';
 import { ORG_ROLES, type OrgRole, type OrgRow, type SessionUser } from './access';
 import {
+	apiKeys,
 	orgInvites,
 	orgMembers,
 	orgRoles,
@@ -15,11 +16,12 @@ import {
 	user
 } from './db/schema';
 import type { OrgInviteRow } from './db/schema';
-import type { Db } from './db';
+import type { Db, DbOrTx } from './db';
 import { ensureOrgLists } from './lists';
 import { ensureOrgRoles, roleInOrg, rolesOf } from './roles';
 import { gateway } from './gateway';
 import type { InviteStatus, InviteView, ListSyncSummary, OrgMemberView, OrgView } from '$lib/types';
+import { parseDiscordInvite } from '$lib/discord-invite';
 
 /** A Drizzle transaction handle (what `db.transaction(async (tx) => ...)` passes). */
 export type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
@@ -96,6 +98,9 @@ const shapeOrg = (
 	serverLimit: serverLimitFor(env, o),
 	customServerLimit: o.serverLimit,
 	suspended: o.suspendedAt ? { at: o.suspendedAt.toISOString(), reason: o.suspendedReason } : null,
+	allowPublicStatus: o.allowPublicStatus,
+	allowPublicLeaderboards: o.allowPublicLeaderboards,
+	discordInviteUrl: o.discordInviteUrl,
 	createdBy: creator ? { username: creator.username || '', name: creator.name } : null,
 	createdAt: iso(o.createdAt)
 });
@@ -134,7 +139,7 @@ export async function listOrgs(env: Env, ids: string[]): Promise<OrgView[]> {
 	);
 }
 
-/** Site-owner controls: per-org server limit and suspension. */
+/** Site-owner controls: per-org server limit, suspension and the public-surface allowances. */
 export async function setOrgControls(
 	env: Env,
 	req: Request,
@@ -155,6 +160,12 @@ export async function setOrgControls(
 		set.serverLimit = limit;
 		changes.serverLimit = limit;
 	}
+	// Withdrawing an allowance closes the pages at once: the effective set is computed from both
+	// switches ($lib/features), so the servers' own switches can stay as their owners left them.
+	if (body.allowPublicStatus !== undefined)
+		changes.allowPublicStatus = set.allowPublicStatus = !!body.allowPublicStatus;
+	if (body.allowPublicLeaderboards !== undefined)
+		changes.allowPublicLeaderboards = set.allowPublicLeaderboards = !!body.allowPublicLeaderboards;
 	if (body.suspended !== undefined) {
 		const suspended = !!body.suspended;
 		if (suspended && !org.suspendedAt) {
@@ -245,20 +256,35 @@ export async function updateOrg(
 	org: OrgRow,
 	body: Record<string, unknown>
 ): Promise<void> {
-	const name = validateOrgName(body.name);
-	const slug = await freeSlug(env, slugOf(name), org.id);
-	await env.db
-		.update(organizations)
-		.set({ name, slug, updatedAt: new Date() })
-		.where(eq(organizations.id, org.id));
+	const set: Partial<typeof organizations.$inferInsert> = {};
+	const detail: Record<string, unknown> = { orgId: org.id };
+	if (body.name !== undefined) {
+		set.name = validateOrgName(body.name);
+		set.slug = await freeSlug(env, slugOf(set.name), org.id);
+		detail.from = org.name;
+	}
+	if (body.discordInviteUrl !== undefined) {
+		const raw = str(body.discordInviteUrl, 200);
+		const url = raw ? parseDiscordInvite(raw) : '';
+		if (url === null)
+			throw new ApiError(
+				400,
+				'Paste a Discord invite link: https://discord.gg/<code> or https://discord.com/invite/<code>.'
+			);
+		set.discordInviteUrl = url;
+		detail.discordInviteUrl = url;
+	}
+	if (!Object.keys(set).length) throw new ApiError(400, 'Nothing to update.');
+	set.updatedAt = new Date();
+	await env.db.update(organizations).set(set).where(eq(organizations.id, org.id));
 	await writeAudit(env, req, {
 		actor,
 		orgId: org.id,
 		category: 'org',
 		action: 'org.update',
 		outcome: 'ok',
-		target: name,
-		detail: { orgId: org.id, from: org.name }
+		target: set.name ?? org.name,
+		detail
 	});
 }
 
@@ -357,12 +383,20 @@ export async function listMembers(env: Env, orgId: string): Promise<OrgMemberVie
 	}));
 }
 
-async function ownerCountIn(env: Env, orgId: string): Promise<number> {
-	const [row] = await env.db
-		.select({ n: count() })
+/**
+ * Refuses to take away an org's last owner. Called inside the transaction that demotes or removes:
+ * it locks the org's owner rows, so of two requests that arrive together the second waits, then
+ * counts what the first left. A count before the transaction let both through.
+ */
+async function keepAnOwner(tx: DbOrTx, org: OrgRow, userId: string): Promise<void> {
+	const owners = await tx
+		.select({ userId: orgMembers.userId })
 		.from(orgMembers)
-		.where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.role, 'owner')));
-	return row?.n ?? 0;
+		.where(and(eq(orgMembers.orgId, org.id), eq(orgMembers.role, 'owner')))
+		.orderBy(orgMembers.userId)
+		.for('update');
+	if (owners.length <= 1 && owners.some((o) => o.userId === userId))
+		throw new ApiError(400, `${org.name} needs at least one owner.`);
 }
 
 /** Is there a stored membership row (site owners are not implied members)? */
@@ -413,12 +447,14 @@ export async function setMemberRole(
 	if (!ORG_ROLES.includes(role)) throw new ApiError(400, 'role must be owner or member.');
 	const m = await memberOf(env, org.id, userId);
 	if (m.role === role) return;
-	if (m.role === 'owner' && (await ownerCountIn(env, org.id)) <= 1)
-		throw new ApiError(400, `${org.name} needs at least one owner.`);
-	await env.db
-		.update(orgMembers)
-		.set({ role })
-		.where(and(eq(orgMembers.orgId, org.id), eq(orgMembers.userId, userId)));
+	const ended = await env.db.transaction(async (tx) => {
+		if (role === 'member') await keepAnOwner(tx, org, userId);
+		await tx
+			.update(orgMembers)
+			.set({ role })
+			.where(and(eq(orgMembers.orgId, org.id), eq(orgMembers.userId, userId)));
+		return role === 'member' ? revokeMintedBy(tx, userId, org.id) : null;
+	});
 	await writeAudit(env, req, {
 		actor,
 		orgId: org.id,
@@ -426,11 +462,48 @@ export async function setMemberRole(
 		action: 'org.member.role',
 		outcome: 'ok',
 		target: m.label,
-		detail: { orgId: org.id, org: org.name, role }
+		detail: { orgId: org.id, org: org.name, role, ...(ended ?? {}) }
 	});
 }
 
-/** Removes the membership and every grant on the org's servers. */
+/**
+ * Ends the invite links and API keys this person minted, in one org or (deleting the account) in
+ * all of them. Both are an owner's to make and both work without their maker: left live, an
+ * owner-role link lets a removed owner straight back in, and their key goes on driving the
+ * servers. Returns how many of each it ended, for the audit trail.
+ */
+export async function revokeMintedBy(
+	db: DbOrTx,
+	userId: string,
+	orgId?: string
+): Promise<{ invitesRevoked: number; keysRevoked: number }> {
+	const now = new Date();
+	const links = await db
+		.update(orgInvites)
+		.set({ revokedAt: now })
+		.where(
+			and(
+				eq(orgInvites.createdBy, userId),
+				isNull(orgInvites.revokedAt),
+				orgId ? eq(orgInvites.orgId, orgId) : undefined
+			)
+		)
+		.returning({ id: orgInvites.id });
+	const keys = await db
+		.update(apiKeys)
+		.set({ revokedAt: now })
+		.where(
+			and(
+				eq(apiKeys.createdBy, userId),
+				isNull(apiKeys.revokedAt),
+				orgId ? eq(apiKeys.orgId, orgId) : undefined
+			)
+		)
+		.returning({ id: apiKeys.id });
+	return { invitesRevoked: links.length, keysRevoked: keys.length };
+}
+
+/** Removes the membership, every grant on the org's servers, and the links and keys they minted. */
 export async function removeMember(
 	env: Env,
 	req: Request,
@@ -439,9 +512,8 @@ export async function removeMember(
 	userId: string
 ): Promise<void> {
 	const m = await memberOf(env, org.id, userId);
-	if (m.role === 'owner' && (await ownerCountIn(env, org.id)) <= 1)
-		throw new ApiError(400, `${org.name} needs at least one owner.`);
-	await env.db.transaction(async (tx) => {
+	const ended = await env.db.transaction(async (tx) => {
+		await keepAnOwner(tx, org, userId);
 		const ids = (
 			await tx.select({ id: servers.id }).from(servers).where(eq(servers.orgId, org.id))
 		).map((r) => r.id);
@@ -452,6 +524,7 @@ export async function removeMember(
 		await tx
 			.delete(orgMembers)
 			.where(and(eq(orgMembers.orgId, org.id), eq(orgMembers.userId, userId)));
+		return revokeMintedBy(tx, userId, org.id);
 	});
 	await writeAudit(env, req, {
 		actor,
@@ -460,7 +533,7 @@ export async function removeMember(
 		action: 'org.member.remove',
 		outcome: 'ok',
 		target: m.label,
-		detail: { orgId: org.id, org: org.name }
+		detail: { orgId: org.id, org: org.name, ...ended }
 	});
 }
 

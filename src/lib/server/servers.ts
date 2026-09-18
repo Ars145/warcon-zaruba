@@ -8,13 +8,14 @@ import { ApiError, int, newId, publicMessage, str } from './http';
 import { encryptSecret } from './crypto';
 import { writeAudit } from './audit';
 import { assertReachableTarget, normaliseHost } from './hostpolicy';
-import type { OrgRow, ServerRow, SessionUser } from './access';
+import { getOrg, type OrgRow, type ServerRow, type SessionUser } from './access';
 import { gateway } from './gateway';
 import { GameError, WardogsClient } from './rcon';
-import { orgRoles, serverGrants, servers, user } from './db/schema';
+import { orgMembers, orgRoles, serverGrants, servers, user } from './db/schema';
 import { rolesOf } from './roles';
-import { assertCanAddServer, ensureMemberships } from './orgs';
+import { assertCanAddServer } from './orgs';
 import { ensureServerLists } from './lists';
+import { allowed, FEATURE_LABELS, NOT_ALLOWED, type PublicFeature } from '$lib/features';
 
 export interface TargetFields {
 	name?: string;
@@ -25,6 +26,39 @@ export interface TargetFields {
 	sortOrder?: number;
 	/** Recomputed whenever the target (host, port, scheme) changes; see hostpolicy.ts. */
 	allowPrivate?: boolean;
+	publicStatus?: boolean;
+	publicLeaderboards?: boolean;
+	publicKills?: boolean;
+}
+
+export type PublicSwitchKey = 'publicStatus' | 'publicLeaderboards' | 'publicKills';
+export const PUBLIC_SWITCH_KEYS: readonly PublicSwitchKey[] = [
+	'publicStatus',
+	'publicLeaderboards',
+	'publicKills'
+];
+
+/**
+ * The public-page switches an org owner may set. Turning a page on needs the site owner's
+ * allowance for the organisation; turning off never does, so a page can always be closed. The
+ * kill feed switch is part of the status page and needs no allowance of its own.
+ */
+export function publicSwitches(
+	org: Pick<OrgRow, 'allowPublicStatus' | 'allowPublicLeaderboards'>,
+	body: Record<string, unknown>
+): Pick<TargetFields, PublicSwitchKey> {
+	const out: Pick<TargetFields, PublicSwitchKey> = {};
+	const read = (key: 'publicStatus' | 'publicLeaderboards', feature: PublicFeature) => {
+		if (body[key] === undefined) return;
+		const on = !!body[key];
+		if (on && !allowed(org, feature))
+			throw new ApiError(403, `${FEATURE_LABELS[feature]}: ${NOT_ALLOWED}`, 'not_allowed');
+		out[key] = on;
+	};
+	read('publicStatus', 'status');
+	read('publicLeaderboards', 'leaderboards');
+	if (body.publicKills !== undefined) out.publicKills = !!body.publicKills;
+	return out;
 }
 
 /** May this user register a private (same-box, LAN) target? Only the site owner. */
@@ -128,6 +162,7 @@ export async function createServer(
 			err
 		)
 	);
+	const pub = publicSwitches(org, body);
 	const id = newId();
 	// One transaction: a server must never exist without its subscription to the org's lists.
 	await env.db.transaction(async (tx) => {
@@ -142,6 +177,9 @@ export async function createServer(
 			passwordEnc: encryptSecret(env, password),
 			notes: t.notes || '',
 			sortOrder: t.sortOrder || 0,
+			publicStatus: pub.publicStatus ?? false,
+			publicLeaderboards: pub.publicLeaderboards ?? false,
+			publicKills: pub.publicKills ?? false,
 			createdBy: actor.id
 		});
 		await ensureServerLists(tx, id, orgId);
@@ -154,7 +192,7 @@ export async function createServer(
 		action: 'server.create',
 		outcome: 'ok',
 		target: `${t.host}:${t.port}`,
-		detail: { scheme: t.scheme, orgId, allowPrivate: t.allowPrivate }
+		detail: { scheme: t.scheme, orgId, allowPrivate: t.allowPrivate, ...pub }
 	});
 	void gateway()
 		.observeNow(env, id)
@@ -169,6 +207,19 @@ export async function updateServer(
 	server: ServerRow,
 	body: Record<string, unknown>
 ): Promise<void> {
+	// A change of where RCON listens is the add-a-server flow again: the stored password goes out
+	// as the bearer to whatever the target is, so an owner who never knew it could otherwise point
+	// the server at a host of their own and read it there.
+	const moved =
+		(body.host !== undefined && str(body.host, 253).toLowerCase() !== server.host) ||
+		(body.port !== undefined && Number(body.port) !== server.port) ||
+		(body.scheme !== undefined && (body.scheme === 'https' ? 'https' : 'http') !== server.scheme);
+	if (moved && !(typeof body.password === 'string' && body.password))
+		throw new ApiError(
+			400,
+			'Changing the host, port or scheme needs the RCON password again.',
+			'password_required'
+		);
 	const t = await validateTarget(env, actor, body, server).catch((err) =>
 		auditRefusedTarget(
 			env,
@@ -182,6 +233,11 @@ export async function updateServer(
 		)
 	);
 	const set: Partial<typeof servers.$inferInsert> = { ...t };
+	if (PUBLIC_SWITCH_KEYS.some((k) => body[k] !== undefined)) {
+		const org = await getOrg(env, server.orgId);
+		if (!org) throw new ApiError(404, 'Organisation not found.', 'not_found');
+		Object.assign(set, publicSwitches(org, body));
+	}
 	if (typeof body.password === 'string' && body.password)
 		set.passwordEnc = encryptSecret(env, body.password);
 	if (!Object.keys(set).length) throw new ApiError(400, 'Nothing to update.');
@@ -194,7 +250,13 @@ export async function updateServer(
 		category: 'server',
 		action: 'server.update',
 		outcome: 'ok',
-		detail: { ...t, credentialRotated: !!body.password }
+		detail: {
+			...t,
+			publicStatus: set.publicStatus,
+			publicLeaderboards: set.publicLeaderboards,
+			publicKills: set.publicKills,
+			credentialRotated: !!body.password
+		}
 	});
 }
 
@@ -208,6 +270,7 @@ export async function deleteServer(
 	await writeAudit(env, req, {
 		actor,
 		server: { id: server.id, name: server.name },
+		orgId: server.orgId,
 		category: 'server',
 		action: 'server.delete',
 		outcome: 'ok',
@@ -317,10 +380,13 @@ export async function setServerGrants(
 	grants: unknown
 ) {
 	const wanted = Array.isArray(grants) ? (grants as { userId?: unknown; roleId?: unknown }[]) : [];
+	// Members of the server's org only: people join through an invite link (or the site owner's
+	// Users page), never by an owner naming their account id here.
 	const [users, roles] = await Promise.all([
 		env.db
-			.select({ id: user.id })
-			.from(user)
+			.select({ id: orgMembers.userId })
+			.from(orgMembers)
+			.where(eq(orgMembers.orgId, server.orgId))
 			.then((rows) => new Set(rows.map((u) => u.id))),
 		rolesOf(env, server.orgId)
 	]);
@@ -343,10 +409,6 @@ export async function setServerGrants(
 					grantedBy: actor.id
 				}))
 			);
-		await ensureMemberships(
-			tx,
-			applied.map((a) => ({ orgId: server.orgId, userId: a.userId }))
-		);
 	});
 	await writeAudit(env, req, {
 		actor,

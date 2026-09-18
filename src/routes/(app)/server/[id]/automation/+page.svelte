@@ -166,19 +166,22 @@
 			case 'team_kill':
 				return data.feed
 					? ''
-					: 'Needs the kill feed, which is off on this server. Turn it on under Configuration.';
+					: 'Needs the kill feed, which is off on this server. Turn it on under Config.';
 			case 'risk_kick':
 				return data.steam
 					? ''
 					: 'Steam lookup is off on this panel, so only the ban-list and watchlist rows can run.';
 			case 'seed_reward':
-				return can(data.server.caps, 'lists.edit')
+				return canSlotHere || canSlotOrg
 					? ''
-					: 'Saving needs the Org lists capability as well as Automation.';
+					: 'Saving needs the Reserved slots capability (or Org lists, for a slot on every server) as well as Automation.';
 			default:
 				return '';
 		}
 	});
+	/** what a Seeding reward may hand out: a slot on this server (Reserved slots) or org-wide (Org lists) */
+	let canSlotHere = $derived(can(data.server.caps, 'slots.manage'));
+	let canSlotOrg = $derived(can(data.server.caps, 'lists.edit'));
 	/** A kind that lacks what it needs stays in the menu, greyed, with the reason in a few words. */
 	const short = (kind: TriggerKind): string =>
 		kind === 'team_kill' ? 'needs the kill feed' : kind === 'risk_kick' ? 'needs a Steam key' : '';
@@ -258,7 +261,7 @@
 		messages: string;
 		everyMinutes: number;
 		minPlayers: number;
-		maxPlayers: number | '';
+		maxPlayers: number | null;
 		afterMinutes: number;
 		cooldownMinutes: number;
 		vacBans: boolean;
@@ -281,10 +284,11 @@
 		kickReason: string;
 		lowAt: number;
 		untilFull: boolean;
-		fullAt: number | '';
+		fullAt: number | null;
 		minutes: number;
 		windowDays: number;
 		slotDays: number;
+		slotScope: 'server' | 'org';
 	}
 	let form = $state<Form | null>(null);
 	/**
@@ -351,7 +355,7 @@
 				: 'Join our Discord for events and support.\nNo team-killing. Admins are watching.',
 			everyMinutes: n('everyMinutes', 15),
 			minPlayers: n('minPlayers', 1),
-			maxPlayers: typeof c.maxPlayers === 'number' ? c.maxPlayers : '',
+			maxPlayers: typeof c.maxPlayers === 'number' ? c.maxPlayers : null,
 			afterMinutes: n('afterMinutes', 20),
 			cooldownMinutes: n('cooldownMinutes', 30),
 			vacBans: b('vacBans', true),
@@ -380,10 +384,12 @@
 			kickReason: s('kickReason', 'Team killing ({count} this session).'),
 			lowAt: n('lowAt', 20),
 			untilFull: b('untilFull', true),
-			fullAt: typeof c.fullAt === 'number' ? c.fullAt : '',
+			fullAt: typeof c.fullAt === 'number' ? c.fullAt : null,
 			minutes: n('minutes', 60),
 			windowDays: n('windowDays', 7),
-			slotDays: n('slotDays', 7)
+			slotDays: n('slotDays', 7),
+			// a rule saved before the scope existed hands out org-wide slots; a new one, this server's
+			slotScope: c.scope === 'server' ? 'server' : t ? 'org' : canSlotHere ? 'server' : 'org'
 		};
 		dry = null;
 		pendingSel =
@@ -397,6 +403,7 @@
 				: null;
 	}
 
+	// A cleared number input binds null, not '': an optional count is sent only when it is a number.
 	function config(f: Form): Record<string, unknown> {
 		switch (f.kind) {
 			case 'welcome':
@@ -412,7 +419,7 @@
 					messages: f.messages.split('\n'),
 					everyMinutes: Number(f.everyMinutes),
 					minPlayers: Number(f.minPlayers),
-					maxPlayers: f.maxPlayers === '' ? null : Number(f.maxPlayers)
+					maxPlayers: typeof f.maxPlayers === 'number' ? f.maxPlayers : null
 				};
 			case 'empty_reset':
 				return {
@@ -457,10 +464,11 @@
 				return {
 					lowAt: Number(f.lowAt),
 					untilFull: f.untilFull,
-					fullAt: f.fullAt === '' ? null : Number(f.fullAt),
+					fullAt: typeof f.fullAt === 'number' ? f.fullAt : null,
 					minutes: Number(f.minutes),
 					windowDays: Number(f.windowDays),
 					slotDays: Number(f.slotDays),
+					scope: f.slotScope,
 					message: f.message
 				};
 		}
@@ -579,7 +587,7 @@
 					.join(' · ')
 					.concat(' · per session');
 			case 'seed_reward':
-				return `${c.minutes} min with ${c.lowAt} or fewer on${c.untilFull === false ? '' : `, staying until ${typeof c.fullAt === 'number' ? `${c.fullAt}+ on` : 'it fills'}`}, within ${c.windowDays} day${c.windowDays === 1 ? '' : 's'} · slot for ${c.slotDays} day${c.slotDays === 1 ? '' : 's'}${c.message ? ' · with a whisper' : ''}`;
+				return `${c.minutes} min with ${c.lowAt} or fewer on${c.untilFull === false ? '' : `, staying until ${typeof c.fullAt === 'number' ? `${c.fullAt}+ on` : 'it fills'}`}, within ${c.windowDays} day${c.windowDays === 1 ? '' : 's'} · slot ${c.scope === 'server' ? 'here' : 'on every server'} for ${c.slotDays} day${c.slotDays === 1 ? '' : 's'}${c.message ? ' · with a whisper' : ''}`;
 		}
 	}
 </script>
@@ -1320,6 +1328,20 @@
 							/>
 							days
 						</div>
+						<div class="flex flex-wrap gap-x-4 gap-y-1">
+							<label class="flex items-center gap-2 {canSlotHere ? '' : 'text-mist-600'}"
+								><input
+									type="radio"
+									bind:group={f.slotScope}
+									value="server"
+									disabled={!canSlotHere}
+								/> on this server only</label
+							>
+							<label class="flex items-center gap-2 {canSlotOrg ? '' : 'text-mist-600'}"
+								><input type="radio" bind:group={f.slotScope} value="org" disabled={!canSlotOrg} />
+								on every server in the organisation</label
+							>
+						</div>
 					</fieldset>
 					<fieldset class="space-y-2">
 						<legend class="field-label">Whisper on the grant, blank for none</legend>
@@ -1329,9 +1351,10 @@
 					<p class="note">
 						With the box ticked, seed time stays pending until the server has filled with the player
 						still on; leave before that and it is forfeited. Unticked, every low minute counts as it
-						passes. The slot goes on the organisation's reserved-slot list: this server applies it
-						at once, the other servers at their next sync, and it can be earned again once it
-						lapses. Players who already hold a reserved slot are skipped.
+						passes. A slot on this server only goes on this server's own reserved-slot list; one on
+						every server goes on the organisation's, which this server applies at once and the
+						others at their next sync. Either lapses on its own and can be earned again. Players who
+						already hold a reserved slot here are skipped.
 					</p>
 				{/if}
 

@@ -6,6 +6,7 @@ import { ApiError, int, str } from './http';
 import { gamePath } from './hostpolicy';
 import { classifyGameError, etagOf, GameError, parseJson, WardogsClient } from './rcon';
 import { reservedFromText, reservedIntoText } from '../reserved-doc';
+import { hideSecretValues, redactSecrets, restoreSecrets, SECRET_PLACEHOLDER } from '../config-doc';
 
 export interface ActionDef {
 	cap: Capability;
@@ -135,6 +136,53 @@ const isNoRoute = (err: unknown): boolean =>
 	err instanceof GameError && (err.code === 'no_route' || err.status === 405);
 
 /**
+ * The config document as the game serves it, RCON password and all. For the worker and the edits
+ * in this file that write the document back; what a caller is handed is the `config` action's
+ * answer, which hides the credentials.
+ */
+export async function readConfig(c: WardogsClient): Promise<{
+	revision: string;
+	writable: boolean;
+	text: string;
+	sections: unknown[];
+	warnings: unknown[];
+}> {
+	// Read raw for the headers: CL-501228 sends the revision as an ETag as well, which
+	// covers a build that stops putting it in the body.
+	const res = await c.raw('GET', '/v1/config');
+	const d = parseJson(res.text) ?? {};
+	if (res.status < 200 || res.status >= 300)
+		throw classifyGameError('GET', '/v1/config', res.status, res.statusText, d, res.headers);
+	const revision = d.revision || etagOf(res.headers);
+	// Anything but a document (a proxy page, an empty answer) must never become a writable
+	// empty file that the reserved-slot path would then PUT back over the real one.
+	if (typeof d.text !== 'string' || !revision || !Array.isArray(d.sections))
+		throw new GameError(502, 'The server did not return a config document.', 'bad_response');
+	return {
+		revision,
+		writable: d.writable !== false,
+		text: d.text,
+		sections: d.sections,
+		warnings: d.warnings || []
+	};
+}
+
+/**
+ * A document on its way back to the game: where a credential still reads as the placeholder the
+ * caller was shown, the value the server has now goes back in its place.
+ */
+async function withSecrets(c: WardogsClient, text: unknown): Promise<string> {
+	const sent = String(text ?? '');
+	if (!sent.includes(SECRET_PLACEHOLDER)) return sent;
+	const live = (await readConfig(c)).text;
+	try {
+		return restoreSecrets(sent, live);
+	} catch (err) {
+		throw new ApiError(400, err instanceof Error ? err.message : 'Bad document.', 'hidden_value');
+	}
+}
+
+/**
  * Reserved slots on a build without the live routes (CL-499480 and CL-501228 alike), the way the
  * official console does it: the DefaultReservedPlayerIds array of the config document, edited with
  * the smallest possible change and applied against the revision that was read. Bounded to that one
@@ -149,11 +197,7 @@ async function reservedViaConfig(
 	op: 'add' | 'remove'
 ): Promise<{ message: string; via: 'config'; revision: string; pendingRestart: boolean }> {
 	for (let attempt = 0; ; attempt++) {
-		const doc = (await ACTIONS.config.run(c, {})) as {
-			revision: string;
-			writable: boolean;
-			text: string;
-		};
+		const doc = await readConfig(c);
 		if (!doc.writable) {
 			throw new GameError(
 				400,
@@ -209,6 +253,7 @@ async function reservedViaConfig(
 		// quote the file, which slots.manage alone may not see.
 		const e = classifyGameError('PUT', '/v1/config', status, '', body);
 		e.body = null;
+		e.message = hideSecretValues(e.message, doc.text);
 		throw e;
 	}
 }
@@ -241,6 +286,16 @@ async function editReserved(c: WardogsClient, p: any, op: 'add' | 'remove'): Pro
 		}
 	}
 	return reservedViaConfig(c, id, op);
+}
+
+function rotationSettingsOf(p: any): { rotationEnabled?: boolean; rotationMode?: string } {
+	const body: { rotationEnabled?: boolean; rotationMode?: string } = {};
+	if (p.rotationEnabled !== undefined)
+		body.rotationEnabled =
+			p.rotationEnabled === true || p.rotationEnabled === 'on' || p.rotationEnabled === 'true';
+	if (p.rotationMode !== undefined)
+		body.rotationMode = String(p.rotationMode).toLowerCase() === 'random' ? 'random' : 'ordered';
+	return body;
 }
 
 export const ACTIONS: Record<string, ActionDef> = {
@@ -389,8 +444,7 @@ export const ACTIONS: Record<string, ActionDef> = {
 			if (!p.document) return { reserved };
 			let document: string[] | null = null;
 			try {
-				const doc = (await ACTIONS.config.run(c, {})) as { text: string };
-				document = reservedFromText(doc.text);
+				document = reservedFromText((await readConfig(c)).text);
 			} catch (err) {
 				if (!(err instanceof GameError)) throw err;
 			}
@@ -402,8 +456,11 @@ export const ACTIONS: Record<string, ActionDef> = {
 		mutating: false,
 		run: async (c) => ({ imageUrl: (await c.json('GET', '/v1/sponsor')).imageUrl || '' })
 	},
+	// The game's own RCON log: who connected and what they ran. Audit trail, like the panel's
+	// record of the same actions. The peer addresses are blanked in rcon-run.ts for everyone but
+	// the site owner.
 	serverLog: {
-		cap: 'server.view',
+		cap: 'audit.read',
 		mutating: false,
 		run: async (c, p) => {
 			const limit = int(p.limit, 50, 1, 500);
@@ -419,28 +476,16 @@ export const ACTIONS: Record<string, ActionDef> = {
 			};
 		}
 	},
+	// The document without its credentials: the RCON password, its hash and the kill feed token
+	// read as a placeholder for everyone, and validate/apply put the live values back. Nobody
+	// needs them from here (README, "Roles"). The rest of the document (the join password, the
+	// admin list, every setting) is for those who may apply it.
 	config: {
-		cap: 'server.view',
+		cap: 'config.apply',
 		mutating: false,
 		run: async (c) => {
-			// Read raw for the headers: CL-501228 sends the revision as an ETag as well, which
-			// covers a build that stops putting it in the body.
-			const res = await c.raw('GET', '/v1/config');
-			const d = parseJson(res.text) ?? {};
-			if (res.status < 200 || res.status >= 300)
-				throw classifyGameError('GET', '/v1/config', res.status, res.statusText, d, res.headers);
-			const revision = d.revision || etagOf(res.headers);
-			// Anything but a document (a proxy page, an empty answer) must never become a writable
-			// empty file that the reserved-slot path would then PUT back over the real one.
-			if (typeof d.text !== 'string' || !revision || !Array.isArray(d.sections))
-				throw new GameError(502, 'The server did not return a config document.', 'bad_response');
-			return {
-				revision,
-				writable: d.writable !== false,
-				text: d.text,
-				sections: d.sections,
-				warnings: d.warnings || []
-			};
+			const doc = await readConfig(c);
+			return hideSecretValues({ ...doc, text: redactSecrets(doc.text) }, doc.text);
 		}
 	},
 
@@ -646,22 +691,27 @@ export const ACTIONS: Record<string, ActionDef> = {
 		mutating: true,
 		run: (c) => c.json('POST', '/v1/rotation/save')
 	},
+	// Rotation on or off and its order belong with saving the rotation, which is what the
+	// capability says and what the rotation page enables the switch on.
+	rotationSettings: {
+		cap: 'rotation.save',
+		mutating: true,
+		target: (p) => Object.keys(p || {}).join(','),
+		run: (c, p) => {
+			const body = rotationSettingsOf(p);
+			if (!Object.keys(body).length)
+				throw new ApiError(400, 'No settings to apply (rotationEnabled, rotationMode).');
+			return c.json('PATCH', '/v1/settings', body);
+		}
+	},
 	settings: {
 		cap: 'config.apply',
 		mutating: true,
 		target: (p) => Object.keys(p || {}).join(','),
 		run: (c, p) => {
-			const body: any = {};
+			const body: any = rotationSettingsOf(p);
 			if (p.scoreTick !== undefined) {
 				body.scoreTick = int(p.scoreTick, 24, 1, 600);
-			}
-			if (p.rotationEnabled !== undefined) {
-				body.rotationEnabled =
-					p.rotationEnabled === true || p.rotationEnabled === 'on' || p.rotationEnabled === 'true';
-			}
-			if (p.rotationMode !== undefined) {
-				body.rotationMode =
-					String(p.rotationMode).toLowerCase() === 'random' ? 'random' : 'ordered';
 			}
 			if (!Object.keys(body).length) {
 				throw new ApiError(400, 'No settings to apply (scoreTick, rotationEnabled, rotationMode).');
@@ -677,12 +727,9 @@ export const ACTIONS: Record<string, ActionDef> = {
 		mutating: false,
 		audit: (p) => ({ text: fingerprint(p.text) }),
 		run: async (c, p) => {
-			const { status, body, etag } = await c.configCall(
-				'POST',
-				'/v1/config/validate',
-				String(p.text ?? '')
-			);
-			return configResult(status, body, etag);
+			const text = await withSecrets(c, p.text);
+			const { status, body, etag } = await c.configCall('POST', '/v1/config/validate', text);
+			return hideSecretValues(configResult(status, body, etag), text);
 		}
 	},
 	configApply: {
@@ -705,13 +752,22 @@ export const ACTIONS: Record<string, ActionDef> = {
 				query.push('fullApply=true');
 			}
 			const path = '/v1/config' + (query.length ? `?${query.join('&')}` : '');
+			const text = await withSecrets(c, p.text);
 			const { status, body, etag } = await c.configCall(
 				'PUT',
 				path,
-				String(p.text ?? ''),
+				text,
 				str(p.revision, 100) || undefined
 			);
-			const result = configResult(status, body, etag);
+			const answered = configResult(status, body, etag);
+			// A conflict is told as the lines that differ, and the live side of one may be a
+			// credential this document never held.
+			const live = answered.conflict
+				? await readConfig(c)
+						.then((d) => d.text)
+						.catch(() => '')
+				: '';
+			const result = hideSecretValues(answered, text, live);
 			if (!result.ok && !result.conflict) {
 				throw new GameError(
 					status,
@@ -741,6 +797,32 @@ export const ACTIONS: Record<string, ActionDef> = {
 			}
 			// Parsed and re-serialised first: "%2e%2e" is a dot segment to a URL parser.
 			const path = gamePath(str(p.path, 500));
+			// The config document carries the RCON password, so it leaves through the config actions,
+			// which hide it. What a listener makes of an escape, a ';' or a control character in a
+			// route is not something to guess at (%3F, a second layer of %25, a trailing %20), and no
+			// /v1 route needs one: the route is plain characters or it is refused. A query may carry
+			// escapes.
+			const route = path.split('?')[0];
+			if (!/^[A-Za-z0-9/_~.-]+$/.test(route))
+				throw new ApiError(
+					400,
+					'A raw path is letters, digits, "/", "-", "_", "." and "~"; put anything else in the query or the body.',
+					'bad_path'
+				);
+			if (/^\/v1\/config(?![a-z0-9_-])/i.test(route))
+				throw new ApiError(
+					403,
+					"The config document is not served through raw: use the 'config', 'configValidate' and 'configApply' actions.",
+					'use_config_actions'
+				);
+			// The listener's log names the address of everyone who connected to it; 'serverLog' serves
+			// it, with those addresses for the site owner only.
+			if (/^\/v1\/audit(?![a-z0-9_-])/i.test(route))
+				throw new ApiError(
+					403,
+					"The listener's log is not served through raw: use the 'serverLog' action.",
+					'use_server_log'
+				);
 			const isText = typeof p.body === 'string';
 			const res = await c.raw(
 				method,
@@ -754,9 +836,15 @@ export const ACTIONS: Record<string, ActionDef> = {
 			} catch {
 				parsed = null;
 			}
-			return { status: res.status, headers: res.headers, body: parsed ?? res.text };
+			// Only the headers the API documents: a proxy in front of the listener answers with a
+			// Location, Via or Alt-Svc that names where RCON listens, and raw is not an owner's tool.
+			const headers: Record<string, string> = {};
+			for (const name of RAW_HEADERS) if (res.headers[name]) headers[name] = res.headers[name];
+			return { status: res.status, headers, body: parsed ?? res.text };
 		}
 	}
 };
+
+const RAW_HEADERS = ['content-type', 'etag', 'retry-after'];
 
 export const ACTION_NAMES = Object.keys(ACTIONS);

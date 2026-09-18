@@ -3,6 +3,7 @@
 import { and, asc, count, desc, eq, isNull, max, ne, or, sql } from 'drizzle-orm';
 import type { Auth } from './auth';
 import { emailFor, MIN_PASSWORD, USERNAME_RE } from './auth';
+import type { DbOrTx } from './db';
 import type { Env } from './env';
 import { ApiError, str } from './http';
 import { writeAudit } from './audit';
@@ -19,7 +20,7 @@ import {
 	twoFactor,
 	user
 } from './db/schema';
-import { ensureMemberships, soleOwnerOf } from './orgs';
+import { ensureMemberships, revokeMintedBy, soleOwnerOf } from './orgs';
 import { refreshAuthComplete } from './enrolment';
 import type { UserView } from '$lib/types';
 
@@ -45,12 +46,41 @@ export async function userCount(env: Env): Promise<number> {
 	return row?.n ?? 0;
 }
 
+export const NOT_SET_UP = 'This panel has not been set up yet. Open /setup first.';
+
+/**
+ * The first account on the panel is the site owner's, made at /setup (which refuses once anyone
+ * exists). Every way an account is made passes here, so a Steam or Discord sign-up that arrives
+ * before setup cannot take the first place and leave the panel without an owner.
+ */
+export async function refuseMemberBeforeOwner(env: { db: DbOrTx }, role: unknown): Promise<void> {
+	if (role === 'owner') return;
+	const [first] = await env.db.select({ id: user.id }).from(user).limit(1);
+	if (!first) throw new ApiError(409, NOT_SET_UP, 'not_set_up');
+}
+
 export async function ownerCount(env: Env): Promise<number> {
 	const [row] = await env.db
 		.select({ n: count() })
 		.from(user)
 		.where(and(eq(user.role, 'owner'), or(isNull(user.banned), eq(user.banned, false))));
 	return row?.n ?? 0;
+}
+
+/**
+ * The same question inside the transaction that demotes or disables an owner, with the owners'
+ * rows locked: of two requests that arrive together the second waits and counts what the first
+ * left. The count before the transaction answers the ordinary case early; alone it let both through.
+ */
+async function keepASiteOwner(tx: DbOrTx, userId: string): Promise<void> {
+	const owners = await tx
+		.select({ id: user.id })
+		.from(user)
+		.where(and(eq(user.role, 'owner'), or(isNull(user.banned), eq(user.banned, false))))
+		.orderBy(user.id)
+		.for('update');
+	if (owners.length <= 1 && owners.some((o) => o.id === userId))
+		throw new ApiError(400, 'The panel needs at least one owner.');
 }
 
 const iso = (v: Date | null | undefined): string | null => (v ? v.toISOString() : null);
@@ -283,14 +313,23 @@ export async function updateUser(
 	if (!Object.keys(changes).length) throw new ApiError(400, 'Nothing to update.');
 	set.updatedAt = new Date();
 	await env.db.transaction(async (tx) => {
+		if (u.role === 'owner' && (changes.role === 'member' || changes.disabled === true))
+			await keepASiteOwner(tx, u.id);
 		await tx.update(user).set(set).where(eq(user.id, u.id));
 		if (resetAuth) {
 			await tx.delete(twoFactor).where(eq(twoFactor.userId, u.id));
 			await tx.delete(passkey).where(eq(passkey.userId, u.id));
 		}
 		if (signOut) await tx.delete(session).where(eq(session.userId, u.id));
+		// A disabled account is signed out everywhere; the keys and links it minted work without
+		// a session, so they end with it (and stay ended if the account is enabled again).
+		// So do a site owner's when they stop being one: they could mint them in any organisation.
+		if (changes.disabled === true || (u.role === 'owner' && changes.role === 'member'))
+			Object.assign(changes, await revokeMintedBy(tx, u.id));
 	});
-	if (resetAuth || body.password !== undefined) await refreshAuthComplete(env, u.id);
+	// The verdict depends on the methods and on the role: an owner is held to more than a member.
+	if (resetAuth || body.password !== undefined || changes.role !== undefined)
+		await refreshAuthComplete(env, u.id);
 	await writeAudit(env, req, {
 		actor,
 		category: 'user',
@@ -319,6 +358,8 @@ export async function deleteUser(
 			400,
 			`${label(u)} is the only owner of ${sole.join(', ')}. Promote another owner there first.`
 		);
+	// Before the row goes: a key's created_by is set null by the delete, and then nothing says whose it was.
+	await revokeMintedBy(env.db, u.id);
 	await auth.api.removeUser({ body: { userId: u.id }, headers: req.headers }); // grants and memberships cascade
 	await writeAudit(env, req, {
 		actor,
@@ -398,7 +439,6 @@ export interface SessionView {
 	createdAt: string | null;
 	updatedAt: string | null;
 	expiresAt: string | null;
-	ip: string;
 	userAgent: string;
 	current: boolean;
 }
@@ -414,7 +454,6 @@ export async function listSessions(
 			createdAt: session.createdAt,
 			updatedAt: session.updatedAt,
 			expiresAt: session.expiresAt,
-			ipAddress: session.ipAddress,
 			userAgent: session.userAgent
 		})
 		.from(session)
@@ -425,7 +464,6 @@ export async function listSessions(
 		createdAt: iso(s.createdAt),
 		updatedAt: iso(s.updatedAt),
 		expiresAt: iso(s.expiresAt),
-		ip: s.ipAddress || '',
 		userAgent: s.userAgent || '',
 		current: s.id === currentId
 	}));

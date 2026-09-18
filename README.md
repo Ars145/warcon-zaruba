@@ -36,8 +36,9 @@ What is in the box:
 - **Account management**: Better Auth accounts; password resets, forced password change, disable,
   session revocation, login throttling.
 - **Full audit trail**: every login, user or server change, and every game-server command, with
-  actor, server, target, outcome, upstream status, IP and duration. Filterable and exportable
-  (CSV/JSON). The game server's own listener log is shown alongside it.
+  actor, server, target, outcome, upstream status and duration. Filterable and exportable
+  (CSV/JSON). The game server's own listener log is shown alongside it; the addresses of its peers
+  are shown to the site owner only.
 - **Live view**: a worker process watches every server on a cadence that follows what is
   happening: every second or two while someone has it open or people are on it, every half
   minute when it is empty. Pages get each observation as it happens over an event stream, and a
@@ -97,7 +98,7 @@ Taken against the built-in demo server, so the numbers are synthetic.
 | ------------------------------------------------------------------ | ----------------------------------------------------- |
 | ![Audit trail with filters and export](docs/screenshots/audit.png) | ![Map rotation editor](docs/screenshots/rotation.png) |
 
-| Configuration                                                                    | Game server log                                                      |
+| Config                                                                           | Game server log                                                      |
 | -------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
 | ![Score tick, sponsor image and ServerSettings.ini](docs/screenshots/config.png) | ![The game server's own RCON listener log](docs/screenshots/log.png) |
 
@@ -130,7 +131,9 @@ re-checks it inside every write.
 The official console calls the game server straight from the browser over plain HTTP, so it cannot
 be hosted on HTTPS and every admin needs the raw RCON password. Warcon keeps the password
 server-side (AES-GCM encrypted), authenticates admins with its own accounts, checks the role for
-every action, and writes an audit row before answering.
+every action, and writes an audit row before answering. Nobody reads the password back, owners
+included, and changing a server's host, port or scheme asks for it again, since the stored one
+would otherwise be sent to the new address.
 
 ## Deploy with Docker
 
@@ -181,13 +184,58 @@ ADDRESS_HEADER=x-forwarded-for    # the header your proxy puts the client IP in;
 ```
 
 `ADDRESS_HEADER` and `XFF_DEPTH` are read by SvelteKit's Node adapter, which resolves the client
-address for the audit trail and login throttling. Use `x-real-ip` for nginx, `x-forwarded-for` for
+address for login throttling and the rate limits (it is never stored). Use `x-real-ip` for nginx, `x-forwarded-for` for
 Caddy and Traefik, `cf-connecting-ip` for a Cloudflare Tunnel. Only set it when the proxy is the only
-way to reach the port; otherwise anyone can spoof the recorded IP.
+way to reach the port; otherwise anyone can spoof their address and dodge the limits.
 
 Have the proxy redirect plain `http://` to `https://` (Caddy does this by default; on Cloudflare turn on
 **Always Use HTTPS**). A page served over http has an http origin, and every form post on it is then
 rejected as cross-site against the https `ORIGIN`.
+
+### Metrics (Prometheus)
+
+Both processes export Prometheus metrics at `/metrics`, the web on its normal port and the worker
+on `WORKER_PORT`, behind the `METRICS_TOKEN` bearer; the endpoint answers 404 until that is set.
+Warcon ships no Prometheus or Grafana of its own: point the ones you already run at it. Everything
+is counted in memory on paths that already run, never with a query per server, and the few gauges
+that need a look at the database or the scheduler are read once per scrape.
+
+```yaml
+# prometheus.yml on your monitoring host
+scrape_configs:
+  - job_name: warcon-web
+    authorization: { credentials: <METRICS_TOKEN> }
+    static_configs: [{ targets: ['panel.example.com:443'] }]
+    scheme: https
+  - job_name: warcon-worker
+    authorization: { credentials: <METRICS_TOKEN> }
+    static_configs: [{ targets: ['10.0.0.5:7700'] }] # the worker's private address
+```
+
+With `WARCON_ROLE=all` one process serves both sets, so one job is enough. The web endpoint sits
+on the panel's own URL, so it is reachable wherever the panel is. The worker's port is the relay
+port: the Compose file keeps it inside the Compose network, so a Prometheus on another machine
+cannot see it until you publish it on a private address (add `ports: ['10.0.0.5:7700:7700']` to
+the `worker` service, never `0.0.0.0`), or run Prometheus on the same host and Compose network.
+The exposition carries fleet-wide figures: keep the token out of URLs and never publish
+`/metrics` without it.
+[`monitoring/grafana-dashboard.json`](monitoring/grafana-dashboard.json) is a dashboard to import
+into your Grafana (Dashboards → New → Import); it expects the two job names above and, for its
+database panels, a [postgres_exporter](https://github.com/prometheus-community/postgres_exporter)
+scraped as job `postgres`, which is optional.
+
+| Metric                                                                                | What it is                                                                                  |
+| ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `warcon_players_online`, `warcon_servers{tier}`                                       | Players on every reachable server and the roster by observation tier (worker).              |
+| `warcon_observations_total{outcome}`, `warcon_observation_seconds`                    | Looks at game servers per second and how long they take (worker).                           |
+| `warcon_servers_behind`, `warcon_observations_stuck`, `warcon_observations_in_flight` | Whether the worker is keeping up: the same figures as the Admin page's Overview tab.        |
+| `warcon_deliveries_total{outcome}`, `warcon_outbox_pending`                           | Trigger actions delivered, failed, skipped or unknown, and the queue depth (worker).        |
+| `warcon_worker_lease_held`                                                            | 1 on the process that owns observation and delivery.                                        |
+| `warcon_http_requests_total{route,method,status}`, `warcon_http_request_seconds`      | Every request by SvelteKit route id (web).                                                  |
+| `warcon_feed_posts_total{outcome}`, `warcon_feed_kills_total{result}`                 | Kill feed batches accepted, refused or rejected, and events accepted, skipped or duplicate. |
+| `warcon_rate_limited_total{scope}`                                                    | Requests the in-memory limiter refused, by the limit that fired.                            |
+| `warcon_fleet{table}`                                                                 | Row counts of organizations, users, servers, org members, webhooks and triggers (web).      |
+| `process_*`, `nodejs_*`                                                               | CPU, memory and event-loop lag of each process.                                             |
 
 ### Configuration (`.env`)
 
@@ -203,7 +251,8 @@ rejected as cross-site against the https `ORIGIN`.
 | `PORT` / `HOST`                                              | `3000` / `0.0.0.0`     | Listen address.                                                                                                                                                                   |
 | `WARCON_ROLE`                                                | `all`                  | `all` serves, migrates and runs the worker in one process; `web` and `worker` split them (Compose does); `migrate` applies migrations and exits.                                  |
 | `RELAY_SECRET` / `RELAY_URL` / `WORKER_PORT`                 | unset / unset / `7700` | Split roles only: the secret web and worker share, where the web finds the worker (`http://worker:7700`), and the worker's port.                                                  |
-| `POLL_SECONDS` / `POLL_CONCURRENCY`                          | `20` / `128`           | Seeds for two of the runtime settings on a fresh install only; after that the owner edits cadences, budgets and retention on the **Settings** page without a restart.             |
+| `METRICS_TOKEN`                                              | unset                  | Bearer for `GET /metrics` (Prometheus) on the web and worker processes; the endpoint answers 404 until it is set. See [Metrics](#metrics-prometheus).                             |
+| `POLL_SECONDS` / `POLL_CONCURRENCY`                          | `20` / `128`           | Seeds for two of the runtime settings on a fresh install only; after that the owner edits cadences, budgets and retention under **Admin → Settings** without a restart.           |
 | `APP_NAME`                                                   | `Warcon`               | Name shown in the UI.                                                                                                                                                             |
 | `AUDIT_LOG_READS`                                            | `false`                | Also audit read-only calls (status polls etc.). Noisy.                                                                                                                            |
 | `ALLOW_ORG_SIGNUP`                                           | `false`                | Anyone may create an account and their own organisation at `/sign-up` (3 orgs per person). For hosted, multi-clan instances.                                                      |
@@ -219,7 +268,7 @@ rejected as cross-site against the https `ORIGIN`.
 
 Every server belongs to an **organisation**. People are members of organisations, either as
 **org owner** or **member**, and members get a per-server role. The **site owner** (the account
-from first-run setup, plus anyone it promotes on the Users page) runs the whole panel.
+from first-run setup, plus anyone it promotes under Admin → Users) runs the whole panel.
 
 A server role is a named set of **capabilities**. Every organisation starts with three, `viewer`,
 `operator` and `admin`, holding what the table shows. Its owners can change any of them on the
@@ -227,23 +276,37 @@ org's **Roles** tab (a change applies at once to everyone holding the role), res
 what it shipped with, and add roles of their own, say a `Trial staff` that may kick but not ban.
 Org owners and the site owner hold every capability on every server in scope.
 
-| Capability        | Unlocks                                                                                                                               | viewer | operator | admin |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------ | -------- | ----- |
-| View              | status, players, rotation, bans, reserved, config (read), server log, analytics, player dossiers, triggers (read). Every role has it. | ✓      | ✓        | ✓     |
-| Chat              | broadcast, whisper                                                                                                                    |        | ✓        | ✓     |
-| Kick, kill, move  | kick, kill, change team                                                                                                               |        | ✓        | ✓     |
-| Match control     | end/restart match, change map, next map, weather                                                                                      |        | ✓        | ✓     |
-| Live rotation     | add, remove and reorder rotation entries on the running server                                                                        |        | ✓        | ✓     |
-| Notes & watchlist | player notes (delete your own), watch and unwatch                                                                                     |        | ✓        | ✓     |
-| Bans              | ban and unban on the server                                                                                                           |        |          | ✓     |
-| Reserved slots    | reserve and unreserve on the server                                                                                                   |        |          | ✓     |
-| Org lists         | the organisation's ban and reserved-slot lists, pushed to every server; sync                                                          |        |          | ✓     |
-| Others' notes     | delete anyone's note; the full dossier                                                                                                |        |          | ✓     |
-| Save rotation     | save the rotation, rotation mode on and off                                                                                           |        |          | ✓     |
-| Config & settings | score tick, sponsor image, validate and apply the config document, connection test                                                    |        |          | ✓     |
-| Automation        | create, edit, dry-run and delete triggers                                                                                             |        |          | ✓     |
-| Audit trail       | everyone's actions on the server in the audit log, not just your own                                                                  |        |          | ✓     |
-| Raw RCON          | any /v1 route on the game server directly                                                                                             |        |          | ✓     |
+| Capability        | Unlocks                                                                                                                                                                   | viewer | operator | admin |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | -------- | ----- |
+| View              | what is happening on the server: status, players, kills, rotation, who is banned and who holds a reserved slot, analytics, leaderboards, player stats. Every role has it. | ✓      | ✓        | ✓     |
+| Chat              | broadcast, whisper                                                                                                                                                        |        | ✓        | ✓     |
+| Kick, kill, move  | kick, kill, change team                                                                                                                                                   |        | ✓        | ✓     |
+| Match control     | end/restart match, change map, next map, weather                                                                                                                          |        | ✓        | ✓     |
+| Live rotation     | add, remove and reorder rotation entries on the running server                                                                                                            |        | ✓        | ✓     |
+| Notes & watchlist | read and add player notes (delete your own), watch and unwatch, the reason a player is watched                                                                            |        | ✓        | ✓     |
+| Bans              | ban and unban on the server                                                                                                                                               |        |          | ✓     |
+| Reserved slots    | reserve and unreserve on this server, with a note and an expiry, and read the notes; a Seeding reward rule that hands out slots here                                      |        |          | ✓     |
+| Org lists         | the organisation's ban and reserved-slot lists, pushed to every server; sync; a player's entry on them in the dossier                                                     |        |          | ✓     |
+| Others' notes     | delete anyone's note                                                                                                                                                      |        |          | ✓     |
+| Save rotation     | save the rotation, rotation mode on and off                                                                                                                               |        |          | ✓     |
+| Config & settings | read, validate and apply the config document; score tick, sponsor image, connection test, the game's raw status                                                           |        |          | ✓     |
+| Automation        | see the triggers and what they did; create, edit, dry-run and delete them                                                                                                 |        |          | ✓     |
+| Audit trail       | everyone's actions on the server in the audit log, not just your own; the game server's own RCON log                                                                      |        |          | ✓     |
+| Raw RCON          | any /v1 route on the game server directly, except the config document                                                                                                     |        |          | ✓     |
+
+View is what is happening on the server and nothing about how it is run. The config document, the
+triggers, staff notes on players and the game's RCON log each need the capability that manages
+them, in the panel and for API keys alike; where the server listens (its RCON host and port) and
+the notes on the Servers page are shown to the organisation's owners only.
+
+No role reads the server's credentials. The config document leaves the panel with the RCON
+`Password`, its `PasswordHash` and the kill feed `Token` shown as `(hidden)`, for every role, org
+owners and API keys included. Leave `(hidden)` as it is and validate and apply put the server's
+current value back; type over it to change the value. A copied or downloaded document carries the
+placeholder too, so it is not a backup of those three lines. Raw RCON does not serve `/v1/config`;
+the `config`, `configValidate` and `configApply` actions are the way to the document. Nor does it
+serve `/v1/audit`: the `serverLog` action does, with the peers' addresses blank for everyone but
+the site owner, API keys included.
 
 Beyond server roles, an **org owner** adds, edits and removes the org's servers, manages members,
 roles, per-server grants and invite links and Discord webhooks, and sees the org's audit trail. The
@@ -276,7 +339,7 @@ expected to be able to survive losing one thing. The rules, checked on the **Acc
   authenticator app (TOTP, with backup codes) or drop the password and rely on passkeys and
   providers. Passkeys and provider sign-ins are two factors by themselves and never ask for a code.
 - **Owners hold a linked provider or a recovery key.** An organisation owner can reset a member's
-  methods from the Users page, but nobody resets an owner, so an owner needs a way back in that
+  methods under Admin → Users, but nobody resets an owner, so an owner needs a way back in that
   does not depend on one device.
 
 The **recovery key** is a 40-character secret shown once; the panel stores only its hash. Using it
@@ -328,13 +391,17 @@ Each organisation keeps a **ban list** and a **reserved-slot list** in the panel
 **Ban list** and **Reserved slots** tabs of the organisation page, and pushes them to every one of
 its servers. Each server's own **Bans** and **Reserved slots** tabs show what that server holds,
 mark the entries the organisation put there, and link to the organisation lists. The Reserved
-slots tab is a roster: who holds a slot, whether they are playing right now, the note on their
-org entry, and how many player slots the server holds back for them. The organisation's Reserved
+slots tab is a roster: who holds a slot, whether they are playing right now, the note and expiry
+on their entry, and how many player slots the server holds back for them. Its form reserves a
+slot **on this server only**, with a note and an expiry, through a reserved-slot list of the
+server's own: the panel applies it at once and withdraws it when the expiry comes, and the
+roster marks these _here_. The organisation's Reserved
 slots tab has the same shape across every server: the roster with who is playing where, how far
 the list has been applied on each server, and the form that hands out a slot everywhere. Ban a player from the
 Players tab or a dossier and choose _every server in the organisation_ (the default, when you may
 edit the org list) or _this server only_. Org owners and
-anyone whose role on one of the org's servers includes _Org lists_ can edit the lists; a ban can carry a reason and
+anyone whose role on one of the org's servers includes _Org lists_ can edit the org lists, and
+_Reserved slots_ on a server covers its own list; a ban can carry a reason and
 an expiry, a reserved slot a note and an expiry.
 
 Each entry shows where it stands on every server: **applied** by the panel, **pending** the next
@@ -356,13 +423,17 @@ applied it to. With
 **Members get a reserved slot** on (an owner's switch on the Reserved slots tab), every member of
 the organisation who linked a SteamID on their Account page is reserved a slot on all its servers,
 skipped while the org has them banned. A **Seeding reward** rule (see [Automation](#automation-triggers))
-hands out expiring entries the same way, to players who stayed while a server was low; the entry
-names the rule that added it.
+hands out expiring entries the same way, on the seeded server's own list or the organisation's,
+to players who stayed while a server was low; the entry names the rule that added it.
 
 Sync happens twice over: right away when a list is edited (the toast says on how many servers the
 change landed, and which are unreachable and will be retried), and on every poll, where the
 poller re-applies anything missing, so an org ban that someone lifts on the server directly comes
-back at the next poll; use the org list to lift it everywhere. A reserved slot is a queue skip:
+back at the next poll; use the org list to lift it everywhere. The live game build only bans a
+player who is connected, so a ban added while the player is elsewhere is refused on that server
+(the entry shows as failed on the list page, with the game's answer); the worker keeps those in
+mind and bans the player the moment it sees them on that server, without waiting for the sync's
+five-minute retry. A reserved slot is a queue skip:
 the game takes the list at any length, and `MaxReservedSlots` only sets how many player slots
 are held back for the people on it (a 100-slot server with 2 held back reports 98 to the public;
 the panel shows the split). Live builds have no reserved-slot routes,
@@ -375,17 +446,21 @@ bans. **Sync now** on a list page pushes everything on demand.
 
 The **Automation** tab on each server holds rules the poller evaluates on every sample. Admins
 create them; every action they take is in the audit trail under the `trigger` category with the
-rule that fired, and can be mirrored to Discord.
+rule that fired, and can be mirrored to Discord. A rule acts with nobody at the controls, so
+saving or dry-running one needs, besides _Automation_, the capability for what it does: _Chat_ for
+the rules that message players, _Match control_ for the map reset, _Kick, kill, move_ for the two
+that kick, and for the Seeding reward _Reserved slots_ or _Org lists_ (see its row). A custom role
+or API key with _Automation_ alone can read the rules and delete them.
 
-| Trigger                | Does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Welcome whisper        | Whispers a message to each joiner (optionally only on their first visit). Placeholders `{name}` `{server}` `{map}` `{players}` `{max}`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| Scheduled broadcast    | Rotates through a list of messages every N minutes while at least M players are on, and optionally only until a ceiling, so a fill-the-server message stops once it has.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| Empty-server map reset | After the server has been empty for N minutes on a different map or mode, sets the chosen map as next and ends the match (or requests it directly when there is no rotation).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| Kick on connect risk   | Kicks joiners who match rules: VAC ban, game ban, Steam account younger than N days (optionally private profiles too), banned on another server in the org, or on the watchlist; or whose advisory risk score is high (or medium or worse), as the players table shows it. Reserved-slot players can be spared.                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| Team kill limit        | Whispers a player from N team kills in their current session, and kicks them at M. Needs the [kill feed](#kill-feed); acted on as each kill arrives, not per poll.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| Match broadcast        | Announces the result when a match ends and the map as the next one starts, either message optional, with at least N players on. A match ends when the map changes or the faction scores fall back to zero (a faction reached the cap, or an admin ended the round; live builds send no score cap or match clock, so Warcon assumes the game's default of 100), so `{faction}` is whoever led at that moment, tied factions named together. Placeholders `{faction}` `{score}` `{scores}` `{cap}` `{previous}` `{map}` `{server}` `{players}` `{max}`. Sent one poll after the round ends.                                                                                                                                                                                                   |
-| Seeding reward         | Time a player spends on with at most N players counts as seed time, by default banked only once the server has filled (a count the rule sets, else the limit the server reports) with the player still on, so staying until the threshold and leaving, or a few minutes on an empty server, earns nothing (a switch on the rule counts every low minute instead); M minutes of it over the sessions that ended in the last D days puts them on the organisation's reserved-slot list for E days, with an optional whisper. The seeded server applies it at once and the other org servers at their next sync; it lapses on its own and can be earned again; players who already hold a slot are skipped. Seed time is kept on each session, so the dossier history and the dry run show it. |
+| Trigger                | Does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Welcome whisper        | Whispers a message to each joiner (optionally only on their first visit). Placeholders `{name}` `{server}` `{map}` `{players}` `{max}`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Scheduled broadcast    | Rotates through a list of messages every N minutes while at least M players are on, and optionally only until a ceiling, so a fill-the-server message stops once it has.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Empty-server map reset | After the server has been empty for N minutes on a different map or mode, sets the chosen map as next and ends the match (or requests it directly when there is no rotation).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Kick on connect risk   | Kicks joiners who match rules: VAC ban, game ban, Steam account younger than N days (optionally private profiles too), banned on another server in the org, or on the watchlist; or whose advisory risk score is high (or medium or worse), as the players table shows it. Reserved-slot players can be spared.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Team kill limit        | Whispers a player from N team kills in their current session, and kicks them at M. Needs the [kill feed](#kill-feed); acted on as each kill arrives, not per poll.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Match broadcast        | Announces the result when a match ends and the map as the next one starts, either message optional, with at least N players on. A match ends when the map changes or the faction scores fall back to zero (a faction reached the cap, or an admin ended the round; live builds send no score cap or match clock, so Warcon assumes the game's default of 100), so `{faction}` is whoever led at that moment, tied factions named together. Placeholders `{faction}` `{score}` `{scores}` `{cap}` `{previous}` `{map}` `{server}` `{players}` `{max}`. Sent one poll after the round ends.                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Seeding reward         | Time a player spends on with at most N players counts as seed time, by default banked only once the server has filled (a count the rule sets, else the limit the server reports) with the player still on, so staying until the threshold and leaving, or a few minutes on an empty server, earns nothing (a switch on the rule counts every low minute instead); M minutes of it over the sessions that ended in the last D days earns a reserved slot for E days, with an optional whisper: on this server only (its own reserved-slot list, which needs the Reserved slots capability) or on every server in the organisation (the org list, which needs Org lists), chosen on the rule. The seeded server applies it at once and, for an org-wide slot, the other servers at their next sync; it lapses on its own and can be earned again; players who already hold a slot here are skipped. Seed time is kept on each session, so the dossier history, the leaderboard's Seed time column and the dry run show it. |
 
 **Dry run** replays the last 24 hours of the server's own history (joins, player counts, empty
 stretches, cached Steam data) against a rule and lists what it would have done, so you can tune a
@@ -400,7 +475,7 @@ joiner then.
 WARDOGS can push every kill to an HTTP endpoint: with `[WDServerFeed] Url` and `Token` set in
 `ServerSettings.ini`, the game process POSTs each kill (killer, victim, weapon or vehicle,
 distance, headshot and other context) a second or two after it happens. Warcon is that endpoint.
-On the server's **Configuration** tab an org owner clicks **Configure**: Warcon mints a token,
+On the server's **Config** tab an org owner clicks **Configure**: Warcon mints a token,
 writes both keys into the config document and applies; the game reads them at its next restart
 (its own twelve-hour one, or a manual restart). `Url` is the panel's origin alone: the game
 appends `/api/ingest/events` to it by itself. The card shows when the last batch arrived, so a
@@ -421,8 +496,11 @@ The feed identifies its server by the token alone (the body's `serverId` changes
 reboot), so each server has its own. The token is stored encrypted, like the RCON password, and
 shown to org owners only. `POST /api/ingest/events` is the one `/api` route that takes neither a
 session nor an API key, and it is exempt from the CSRF header for the same reason a bearer is.
-Configs written by earlier versions hold `Url=<origin>/api/feed/events`; the game's posts to that
-path plus its own suffix are served by the same handler, so they keep working unchanged.
+Configs written by earlier versions hold `Url=<origin>/api/feed/events`, which the game turns into
+a path Warcon does not serve. Click **Configure** again (the game reads the new `Url` at its next
+restart), or have the proxy in front of the panel rewrite `/api/feed/events/api/ingest/events` to
+`/api/ingest/events` until then. It has to be a rewrite, not a redirect: the game follows a 301 or
+302 as a GET, which the feed refuses.
 
 ### Discord webhooks
 
@@ -431,12 +509,12 @@ organisation's overview an owner adds channel webhooks (in Discord: channel sett
 Integrations → Webhooks → copy URL) and chooses what to mirror: bans (including org list changes), other game commands, trigger
 actions, player notes and watchlist changes, management changes, sign-ins, team kills from the
 [kill feed](#kill-feed); for every server or a subset. A separate team-kill channel is a second
-webhook with only that box ticked; the server's **Discord** tab connects one in a click. Events are batched into one message per burst, IP addresses are never sent, and the URL
+webhook with only that box ticked; the server's **Settings** tab connects one in a click. Events are batched into one message per burst, and the URL
 (which lets anyone post to the channel) is stored encrypted with `ENCRYPTION_KEY` and never shown
 again. **Test** posts a message right away; delivery failures show on the org page.
 
 A webhook can also keep a **live status card** for each server it covers (tick _Keep status
-cards in the channel_ on the org page, or open the server's **Discord** tab, paste a webhook and
+cards in the channel_ on the org page, or open the server's **Settings** tab, paste a webhook and
 tick the card, team kills, or both; pin what it posts). Three card styles: **banner** (the default) with the wide map art and a
 column of players per faction, **compact** with a map thumbnail, faction counts and the top
 three, and **scoreboard** with one ranked table across the factions. The worker edits each card
@@ -448,27 +526,79 @@ server shows red with the error and when it was last seen. Edits go out when som
 at least 30 seconds apart (longer when many servers share one webhook), plus a refresh every five
 minutes, inside Discord's webhook limit. A card someone deleted from the channel is posted again;
 pausing the webhook, switching the option off or changing the URL removes the cards, and a server
-the webhook stops covering loses its card. Server links, map art and the icon point back at the
-panel and need `ORIGIN` to be https for the pictures to show.
+the webhook stops covering loses its card. Map art and the icon need `ORIGIN` to be https for the
+pictures to show.
+
+Each webhook sets how often its cards are edited (**refresh**, 30 seconds to 5 minutes, one
+minute by default; the spacing that keeps a shared webhook under Discord's limit still applies
+on top) and which **links** its cards carry: the server's public status page, its public
+leaderboard, and the panel. The card's title opens the first link and the rest sit on a line
+under the body. A public link goes out only while that page is on for the server (see
+[Public pages](#public-pages)), so a card never sends people to the sign-in wall; the panel link
+is off by default, for staff channels. The server's **Settings** tab has these controls next to
+the card style, with the public page switches under them.
+
+### Leaderboards and careers
+
+Every server page has a **Leaderboards** tab: a board over this server or every server of the
+organisation you can see, ranked by kills, deaths, K/D, kills per hour of playtime, playtime,
+seed time (time on with the server low, as a [Seeding reward](#automation-triggers) counts it),
+matches played, wins, win rate or cash, over 7, 30 or 90 days or all time, paged, with sortable
+headers. A **playtime floor** (an hour by default) keeps a ten-minute visit off the top of the
+K/D board. Kills, deaths, headshots, team kills and suicides come from the [kill feed](#kill-feed)
+(killer and victim), never from the game's own counters; playtime, seed time and cash from player sessions;
+a match is counted when a session overlapped it, and the result (win, loss, draw) is read from
+the match's winner and final scores against the faction of the player's last session in it. A
+match with no winner and nobody scoring has no result. Names link to the dossier.
+
+Each dossier has a **Career** section: rank on the all-time kills board for this server and the
+organisation, the current win or loss streak, matches with wins, losses and draws, a table per
+map and per faction (matches, wins, K/D), and the last ten matches with map, faction, result,
+kills and deaths. Everything is read at page load from the tables the worker already writes;
+nothing is precomputed.
+
+### Public pages
+
+Two pages of a server can be opened to anyone with the address. An org owner **switches each on**
+per server on the server's **Settings** tab, which shows the addresses to copy (the server's edit
+dialog carries the same switches); nothing is public until then.
+The site owner can **close** either page for a whole organisation from the org's page, next to
+the server limit, which shuts every such page in it at once.
+
+- **Live status** at `/s/<server id>`: map, mode, player count, join code and each team's players
+  under its score with kills and deaths, refreshed every twenty seconds. A second switch under it
+  adds the last twenty kills from the [kill feed](#kill-feed) (weapon, distance, names only).
+- **Leaderboards and careers** at `/s/<server id>/leaderboard` and `/s/<server id>/players/<SteamID>`:
+  the same board and career as the panel, over this server or the organisation's servers whose
+  leaderboards are public too, with the player's kill-feed record (headshots, longest shot,
+  weapons, most killed, nemeses). While this is on, names on the live page open the career.
+
+Public pages show in-game names, never SteamIDs, pings, cash, the build or the panel's own
+error text (an unreachable server says only that it could not be reached), and read Steam
+personas from the cache only. A page that is off answers 404, so a closed page looks like no
+page. An org owner can set the organisation's **Discord invite** link (discord.gg or
+discord.com/invite), shown as a button on its public pages. Each page has a JSON twin under
+`/api/public/servers/<id>`, rate limited per address and cacheable for a few seconds.
 
 ### Accounts and personal data
 
 An account holds a username, display name, password hash if a password is set, the encrypted
 authenticator secret and backup codes if the app is on, passkey public keys, the hash of a
-recovery key, sessions (with IP address and browser), the Discord id and avatar URL when Discord
+recovery key, sessions (with the browser), the Discord id and avatar URL when Discord
 is linked, and a SteamID64 when Steam is linked or the person enters one on the Account page (so
 an organisation can hand them a reserved slot). Every sign-in and action is written to the audit
-trail with the actor's name, IP address and browser. No email address is ever asked for. Nothing
-else is collected, and nothing leaves the panel.
+trail with the actor's name and browser. IP addresses are not kept: the panel reads a request's
+address to throttle sign-ins and rate limit, in memory, and the login and sign-up lockouts store only a keyed
+hash of it. No email address is ever asked for. Nothing else is collected, and nothing leaves
+the panel.
 
 Anyone can delete their own account from the **Account** page (right to erasure): password
 accounts confirm with the password, the rest by typing their username after a recent sign-in.
 Deletion removes the account, its credentials, passkeys, sessions, server roles and organisation
-memberships at once. Audit entries the person caused stay for the record but lose their name, IP
-address and browser, and entries that named them lose the username; one row recording the deletion
-itself keeps the requester's IP. The only owner of an organisation, or the only site owner, must
+memberships at once. Audit entries the person caused stay for the record but lose their name and
+browser, and entries that named them lose the username. The only owner of an organisation, or the only site owner, must
 hand over first, so nothing is left without an owner. The site owner can delete anyone from the
-Users page under the same rules.
+Users tab of the Admin page under the same rules.
 
 Analytics store the Steam id and in-game name of every player seen on a server, for a year (see
 [Notes and limits](#notes-and-limits)). With `STEAM_API_KEY` set the panel also caches what the
@@ -478,11 +608,22 @@ other people, publish a privacy notice that says so, along with the audit retent
 
 ### Site owner controls
 
+The **Admin** page (site owner only) has three tabs. **Overview** is the whole install at a
+glance, refreshed every five seconds: players online, servers reachable, organisations and users,
+kill feed and observation rates, the worker's tiers, queue and memory, the web process's request
+and error figures, the database's size table by table, players seen today, this month and ever
+(a tally cached for five minutes, with a Recount button), servers by game build, and whether the
+[Prometheus endpoint](#metrics-prometheus) is on. **Users** manages every account and **Settings**
+the runtime settings (cadences, delivery, retention). The old `/users` and `/settings` addresses
+redirect to their tabs.
+
 The Orgs page shows every organisation with its creator, member and server counts against its
 limit, and status. From there (or from an org's own page) the site owner can raise or lower an
 org's server limit and **suspend** it: members lose access to its servers, owners cannot add
 servers or mint links, and invite links stop working, until it is restored. Deleting an org removes
-its servers from the panel; the accounts stay.
+its servers from the panel; the accounts stay. The org's page is also where the site owner can
+**close** the [public pages](#public-pages) (status page, leaderboards and careers) for that
+organisation; they are allowed for every organisation unless closed there.
 
 ### Bots and API keys
 
@@ -567,8 +708,11 @@ bun run build && bun run start   # production build, http://localhost:3000 (set 
 To run the split roles locally after `bun run build`: `bun run db:migrate`, then
 `WARCON_ROLE=worker RELAY_SECRET=… bun run worker` in one terminal and
 `WARCON_ROLE=web RELAY_SECRET=… RELAY_URL=http://127.0.0.1:7700 bun run start` in another.
-`/api/health` on the web (and `/health` on the worker) shows the worker's tiers, in-flight count,
-"behind" and "stuck" figures, and the delivery queue; the owner's **Settings** page shows the same.
+`/api/health` on the web (and `/health` on the worker) answers a plain liveness check for anyone
+(a monitor or the container healthcheck reads only `ok`); the worker's tiers, in-flight count,
+"behind" and "stuck" figures and the delivery queue are added only for the site owner's own session
+or a caller presenting `METRICS_TOKEN`, since they are fleet-wide. The Admin page's Overview tab
+shows the same figures to the owner.
 
 The schema is defined in [src/lib/server/db/schema.ts](src/lib/server/db/schema.ts). After changing
 it, run `bun run db:generate` to write a new migration into `drizzle/`; the app applies pending
@@ -593,6 +737,10 @@ What a change needs before it is merged:
 
 - It works, and where the code is testable it has a test. Tests sit next to the code as
   `*.test.ts` and run with `bun test`.
+- A new route, page load or game action has a line in the permission matrices under
+  [src/test](src/test): they ask every route as every kind of person and key, and fail when one
+  is missing. They need a Postgres to make a throwaway database on, named by
+  `TEST_DATABASE_URL` (see `.env.example`); without it they are skipped locally, and CI runs them.
 - CI passes: `bun run lint` (Prettier), `bun run check` (svelte-check), `bun test` and
   `bun run build`, the same four steps [ci.yml](.github/workflows/ci.yml) runs.
 - The commit message says what behaviour changed, in plain words. Small whole commits are easier
@@ -633,7 +781,7 @@ src/lib/server/apikeys.ts / apikeys-core.ts   organisation API keys for bots: mi
 src/lib/server/users.ts        account management on top of Better Auth (create, disable, reset, grants)
 src/lib/server/orgs.ts         organisations: members, per-server roles, invite links, joining
 src/lib/server/servers.ts      server records, reachability test, per-server grants
-src/lib/server/lists.ts        organisation ban and reserved-slot lists: entries, per-server standing, views
+src/lib/server/lists.ts        organisation ban and reserved-slot lists and each server's own reserved slots: entries, per-server standing, views
 src/lib/server/lists-plan.ts / lists-sync.ts   what to add or remove on a server (pure) / the per-server sync run and API fan-out
 src/lib/server/actions.ts      every panel action -> capability + /v1 call(s)
 src/lib/server/rcon-run.ts     /api/servers/:id/rcon/:action dispatcher with audit rows
@@ -654,6 +802,9 @@ src/lib/server/live.ts / events.ts / interest.ts   live snapshot rows, the in-pr
 src/lib/server/gateway.ts      the web↔worker seam; gateway-local.ts (same process), gateway-remote.ts + relay.ts (HTTP)
 src/lib/server/settings.ts     owner-editable runtime settings (site_settings): keys, bounds, hot reload
 src/lib/server/players.ts      dossiers, notes, watchlist, per-player marks (risk) for the players table
+src/lib/leaderboard.ts / server/leaderboards.ts   board and career maths (pure) / the queries over kills, sessions and matches
+src/lib/features.ts            which public pages a server has: the site owner's allowance and the server's switch (pure)
+src/lib/server/public.ts       the public surface: 404 gates, the public status shape, per-address limits
 src/lib/server/steam.ts        Steam Web API lookups cached in steam_profiles
 src/lib/server/risk.ts         advisory risk score and name resemblance (pure)
 src/lib/server/trigger-rules.ts / triggers.ts   trigger settings and verdicts (pure) / evaluation into intents, dry runs
@@ -665,7 +816,8 @@ src/lib/config-doc.ts / config-fields.ts   ServerSettings.ini parser and line-le
 src/lib/components/            Modal, MapPicker, PopulationChart, CashChart, ConfigForm, Toasts, badges…
 src/routes/(auth)/             /sign-in (+ /verify), /setup, /join/[token], /recover (form actions)     src/routes/sign-out
 src/routes/api/passkeys/       WebAuthn ceremonies relayed to Better Auth; src/routes/auth/steam/ the Steam callback
-src/routes/(app)/              dashboard, /server/[id]/{,players,players/[steamId],bans,rotation,config,automation,analytics,log}, /audit, /orgs, /orgs/[id]/{,bans,reserved}, /users, /servers, /account
+src/routes/(app)/              dashboard, /server/[id]/{,players,players/[steamId],bans,rotation,config,automation,analytics,leaderboard,log,settings}, /audit, /orgs, /orgs/[id]/{,bans,reserved}, /admin/{,users,settings}, /servers, /account
+src/routes/(public)/           /s/[id]{,/leaderboard,/players/[steamId]}: the public pages, no session
 src/routes/api/                JSON API (below)
 docs/wardogs-api.md            the reverse-engineered game-server API
 ```
@@ -680,13 +832,13 @@ which call Better Auth server-side behind the login lockout and the audit trail.
 own `/api/auth/*` routes only the OAuth callback is reachable over HTTP; everything else answers 404.
 
 ```
-GET/POST /api/orgs  PATCH/DELETE /api/orgs/:id   PATCH {name} | {membersReserved} | site owner: {serverLimit, suspended, reason}
+GET/POST /api/orgs  PATCH/DELETE /api/orgs/:id   PATCH {name} | {discordInviteUrl} | {membersReserved} | site owner: {serverLimit, suspended, reason, allowPublicStatus, allowPublicLeaderboards}
 GET  /api/orgs/:id/members  PATCH/DELETE /api/orgs/:id/members/:userId {role}  PUT .../:userId/grants {grants:[{serverId,roleId}]}
 GET/POST /api/orgs/:id/roles {name,capabilities[]}  PATCH/DELETE .../:roleId {name?,capabilities?}  POST .../:roleId/reset
 GET/POST /api/orgs/:id/keys {label,capabilities[],serverIds[]|null,expiresDays}  DELETE .../:keyId   (POST returns the token once)
 GET/POST /api/orgs/:id/invites {label,orgRole,serverRoleId,expiresDays,maxUses}  DELETE /api/orgs/:id/invites/:inviteId
 GET/POST /api/users  PATCH/DELETE /api/users/:id  PUT /api/users/:id/grants {grants:[{serverId,roleId}]}
-GET/POST /api/servers {orgId,...}  PATCH/DELETE /api/servers/:id  POST /api/servers/:id/test
+GET/POST /api/servers {orgId,...}  PATCH/DELETE /api/servers/:id  POST /api/servers/:id/test   (PATCH also {publicStatus, publicLeaderboards, publicKills}, org owners, within the site owner's allowance; a PATCH that changes host, port or scheme must carry password, or it is 400 password_required)
 GET/PUT /api/servers/:id/grants {grants:[{userId,roleId}]}   GET /api/servers/:id/summary
 GET|POST /api/servers/:id/rcon/:action   (GET for reads with query params, POST JSON for mutations)
 GET  /api/servers/:id/analytics?range=24h|7d|30d       includes `combat` from the kill feed when the server has one
@@ -696,15 +848,18 @@ GET/POST/DELETE /api/servers/:id/feed                   the kill feed setup: tok
 POST /api/ingest/events                                 where the game posts: [WDServerFeed] Url is the origin, the game adds this path (Authorization: Bearer wkf_…); not a panel route
 GET  /api/servers/:id/cash?since=<iso>                  cash-in-play samples since a moment (24 h at most), seeds the dashboard chart
 GET  /api/servers/:id/players/marks?ids=a,b&names=…     watchlist / first-visit / risk per connected player
-GET  /api/servers/:id/players/:steamId                  dossier   POST .../steam (refresh Steam data)
+GET  /api/servers/:id/players/:steamId                  dossier   POST .../steam (refresh Steam data)   GET .../career   rank, streak, results by map and faction, the last ten matches
+GET  /api/servers/:id/leaderboard?scope=server|org&range=7d|30d|90d|all&sort=kills|deaths|kd|perHour|playtime|matches|wins|winRate|cash&dir=desc|asc&page=1&minMinutes=60
 POST /api/servers/:id/players/:steamId/notes {body}     DELETE .../notes/:noteId   PUT .../watch {watched,reason}
 GET/POST /api/servers/:id/triggers {kind,name,enabled,config}   PATCH/DELETE .../:triggerId   POST .../dry-run {kind,config}
-GET/POST /api/orgs/:id/webhooks {label,url,events,serverIds,enabled}   PATCH/DELETE .../:webhookId   POST .../:webhookId/test
+GET/POST /api/orgs/:id/webhooks {label,url,events,serverIds,enabled,statusEnabled,statusStyle,statusIntervalS,linkStatus,linkLeaderboard,linkPanel}   PATCH/DELETE .../:webhookId   POST .../:webhookId/test
+GET  /api/public/servers/:id   .../leaderboard (same query as above)   .../players/:steamId      the public pages' JSON: no session, 404 while the page is off, limited per address
 GET  /api/orgs/:id/lists                                 the org's ban and reserved-slot lists, and the caller's role on them
 GET/POST /api/orgs/:id/lists/:kind/entries {steamId,reason,expiresAt}   DELETE .../entries/:steamId   (kind = ban | reserve; ?includeRemoved=1)
 POST /api/orgs/:id/lists/sync                            push the lists to every org server now
 GET  /api/orgs/:id/lists/import                          server entries not on the org list   POST {entries:[{kind,steamId,reason}]} adopts them (owner)
-GET  /api/servers/:id/lists/state                        which bans / reserved slots here come from the org lists   POST .../lists/sync
+GET  /api/servers/:id/lists/state                        which bans / reserved slots here come from the org lists or this server's own   POST .../lists/sync
+POST /api/servers/:id/lists/reserve/entries {steamId,reason,expiresAt}   reserve on this server only (Reserved slots)   DELETE .../entries/:steamId
 GET  /api/actions                     lists actions with the capability each needs
 GET  /api/audit?server=&actor=&action=&outcome=&q=&from=&to=&before=&limit=
 GET  /api/audit/export?format=csv|json GET /api/audit/meta
@@ -712,17 +867,19 @@ GET  /api/steam/profiles?ids=a,b      GET /api/health
 ```
 
 Actions, by the capability each needs: `capabilities status health serverId players maps lightings
-experiences alternators catalog rotation bans reserved sponsor serverLog config` (View) ·
+experiences alternators catalog rotation bans reserved sponsor` (View) ·
 `broadcast whisper` (Chat) · `kick kill changeTeam` (Kick, kill, move) · `endMatch restartMatch
 changeMap setWeather setNextMap` (Match control) · `rotationAdd rotationRemove rotationMove
 rotationReorder` (Live rotation) · `ban unban` (Bans) · `reservedAdd reservedRemove` (Reserved
-slots) · `rotationSave` (Save rotation) · `settings configValidate configApply` (Config & settings)
-· `raw` (Raw RCON).
+slots) · `rotationSave rotationSettings` (Save rotation) · `config settings configValidate configApply` (Config &
+settings) · `serverLog` (Audit trail) · `raw` (Raw RCON).
 
 ## Notes and limits
 
 - Analytics are derived from observation: player sessions are accurate to the cadence in force
-  (a second or two on a busy server), and match boundaries are inferred from map changes, the
+  (a second or two on a busy server). A player missing from the list for under a minute is still
+  in their session (the game reports nobody while a new map loads), and a leave is dated to the
+  last time they were seen. Match boundaries are inferred from map changes, the
   faction scores falling back to zero and, on builds that send one, the match clock. Raw samples are kept for 14 days by default (a TimescaleDB retention policy, or the
   worker's own prune on plain Postgres) with hourly rollups behind the 30-day charts; sessions and
   matches for a year. Both are settings.

@@ -187,6 +187,15 @@ export const organizations = pgTable('organizations', {
 	suspendedReason: text('suspended_reason').notNull().default(''),
 	/** members who set a SteamID on their account get a reserved slot on every org server */
 	membersReserved: boolean('members_reserved').notNull().default(false),
+	/**
+	 * Site-owner allowances: what this org's owners may switch on per server, allowed unless the
+	 * site owner withdraws it. Each public surface needs the allowance and the server's own
+	 * switch; $lib/features computes the effective set.
+	 */
+	allowPublicStatus: boolean('allow_public_status').notNull().default(true),
+	allowPublicLeaderboards: boolean('allow_public_leaderboards').notNull().default(true),
+	/** a discord.gg or discord.com/invite link, shown as a button on the org's public pages; '' = none */
+	discordInviteUrl: text('discord_invite_url').notNull().default(''),
 	createdAt: ts('created_at').notNull().defaultNow(),
 	updatedAt: ts('updated_at').notNull().defaultNow()
 });
@@ -317,6 +326,11 @@ export const servers = pgTable('servers', {
 	feedTokenEnc: text('feed_token_enc'),
 	/** sha256 of the token: how a feed batch finds its server */
 	feedTokenHash: text('feed_token_hash').unique(),
+	/** the org owner's switches for the public pages; effective only with the org's allowance ($lib/features) */
+	publicStatus: boolean('public_status').notNull().default(false),
+	publicLeaderboards: boolean('public_leaderboards').notNull().default(false),
+	/** the public status page also shows the last kills (needs the feed and the status page on) */
+	publicKills: boolean('public_kills').notNull().default(false),
 	createdBy: text('created_by'),
 	createdAt: ts('created_at').notNull().defaultNow(),
 	updatedAt: ts('updated_at').notNull().defaultNow()
@@ -366,7 +380,6 @@ export const auditLog = pgTable(
 		outcome: text('outcome', { enum: ['ok', 'error', 'denied'] }).notNull(),
 		status: integer('status'),
 		message: text('message').notNull().default(''),
-		ip: text('ip').notNull().default(''),
 		userAgent: text('user_agent').notNull().default(''),
 		durationMs: integer('duration_ms')
 	},
@@ -380,7 +393,7 @@ export const auditLog = pgTable(
 );
 
 export const loginAttempts = pgTable('login_attempts', {
-	/** 'u:<username>' or 'ip:<address>' */
+	/** 'u:<username>', or 'ip:' / 'signup:' + a keyed hash of the address (addressKey in http.ts) */
 	key: text('key').primaryKey(),
 	count: integer('count').notNull().default(0),
 	firstAt: ts('first_at').notNull(),
@@ -646,6 +659,12 @@ export const webhooks = pgTable(
 		statusStyle: text('status_style', { enum: ['banner', 'compact', 'scoreboard'] })
 			.notNull()
 			.default('banner'),
+		/** seconds between edits of one card (30-300); the per-server spacing applies on top */
+		statusIntervalS: integer('status_interval_s').notNull().default(60),
+		/** which links the card carries: the public status page, the public leaderboard, the panel */
+		linkStatus: boolean('link_status').notNull().default(true),
+		linkLeaderboard: boolean('link_leaderboard').notNull().default(true),
+		linkPanel: boolean('link_panel').notNull().default(false),
 		/** server id -> the Discord id of its message, once posted */
 		statusMessages: jsonb('status_messages'),
 		statusSentAt: ts('status_sent_at'),
@@ -661,7 +680,10 @@ export const webhooks = pgTable(
 
 // ---- Organisation lists: bans and reserved slots kept in the panel and pushed to every server --
 
-/** A ban list or reserved-slot list an org owns. Servers subscribe through server_lists. */
+/**
+ * A ban list or reserved-slot list an org owns. Servers subscribe through server_lists: every org
+ * list to every org server, and a server's own list (server_id set) to that server alone.
+ */
 export const lists = pgTable(
 	'lists',
 	{
@@ -669,6 +691,8 @@ export const lists = pgTable(
 		orgId: text('org_id')
 			.notNull()
 			.references(() => organizations.id, { onDelete: 'cascade' }),
+		/** set on a list that belongs to one server (its own reserved slots); null for the org's */
+		serverId: text('server_id').references(() => servers.id, { onDelete: 'cascade' }),
 		kind: text('kind', { enum: ['ban', 'reserve'] }).notNull(),
 		name: text('name').notNull().default('Default'),
 		/** reserved for sharing between orgs; unused for now */
@@ -677,7 +701,14 @@ export const lists = pgTable(
 		createdAt: ts('created_at').notNull().defaultNow(),
 		updatedAt: ts('updated_at').notNull().defaultNow()
 	},
-	(t) => [uniqueIndex('lists_org_kind_name_uidx').on(t.orgId, t.kind, t.name)]
+	(t) => [
+		uniqueIndex('lists_org_kind_name_uidx')
+			.on(t.orgId, t.kind, t.name)
+			.where(sql`${t.serverId} is null`),
+		uniqueIndex('lists_server_kind_uidx')
+			.on(t.serverId, t.kind)
+			.where(sql`${t.serverId} is not null`)
+	]
 );
 
 /** One player on a list. Removal is soft so history and audit stay intact; re-adding inserts a new row. */
@@ -709,7 +740,7 @@ export const listEntries = pgTable(
 	]
 );
 
-/** Which lists apply to which server (every org list to every org server, today). */
+/** Which lists apply to which server: every org list to every org server, a server's own to itself. */
 export const serverLists = pgTable(
 	'server_lists',
 	{

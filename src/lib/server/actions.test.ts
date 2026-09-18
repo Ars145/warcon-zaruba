@@ -457,3 +457,180 @@ test('a refused PUT is classified (a missing route stays no_route) and carries n
 	expect(conflict.code).toBe('revision_conflict');
 	expect(conflict.body).toBeNull();
 });
+
+// The document carries the RCON password. It leaves the panel without it, for every role, and
+// comes back with it: whoever holds the password runs the server without the panel.
+const RCON = '[/Script/WDRCON.WDRCONSettings]';
+const WITH_SECRETS = `${SESSION}\r\nServerName=x\r\n!DefaultReservedPlayerIds=ClearArray\r\n\r\n${RCON}\r\nPassword=hunter2\r\n\r\n[WDServerFeed]\r\nToken=wcf_abc\r\n`;
+
+test('config hides the RCON password and the feed token from whoever reads it', async () => {
+	const f = reservedClient({ route: false, text: WITH_SECRETS });
+	const r: any = await ACTIONS.config.run(f.client, {});
+	expect(r.text).not.toContain('hunter2');
+	expect(r.text).not.toContain('wcf_abc');
+	expect(r.text).toContain('Password=(hidden)');
+	expect(r.text).toContain('ServerName=x');
+	expect(r.revision).toBe('r1');
+});
+
+test('configApply puts the live credentials back where the placeholder was left alone', async () => {
+	const f = reservedClient({ route: false, text: WITH_SECRETS });
+	const shown = ((await ACTIONS.config.run(f.client, {})) as any).text as string;
+	await ACTIONS.configApply.run(f.client, {
+		text: shown.replace('ServerName=x', 'ServerName=y'),
+		revision: 'r1'
+	});
+	expect(f.text()).toBe(WITH_SECRETS.replace('ServerName=x', 'ServerName=y'));
+	// A typed password is the caller's, and a document without placeholders costs no extra read.
+	f.calls.length = 0;
+	await ACTIONS.configApply.run(f.client, {
+		text: WITH_SECRETS.replace('hunter2', 'rotated'),
+		revision: 'r2'
+	});
+	expect(f.calls).toEqual(['PUT /v1/config r2']);
+	expect(f.text()).toContain('Password=rotated');
+});
+
+test('configValidate checks the document the server would get, not the placeholders', async () => {
+	const f = reservedClient({ route: false, text: WITH_SECRETS });
+	const shown = ((await ACTIONS.config.run(f.client, {})) as any).text as string;
+	let validated = '';
+	f.client.configCall = async (_m: string, _p: string, body: string) => {
+		validated = body;
+		return { status: 200, body: { ok: true } };
+	};
+	await ACTIONS.configValidate.run(f.client, { text: shown });
+	expect(validated).toBe(WITH_SECRETS);
+});
+
+test('what the game says about a document never quotes a credential back', async () => {
+	const f = reservedClient({ route: false, text: WITH_SECRETS });
+	const shown = ((await ACTIONS.config.run(f.client, {})) as any).text as string;
+	// A build that echoes lines: nothing documented does, and nothing says one never will.
+	const echo = {
+		ok: true,
+		changed: [{ key: 'Password', from: 'hunter2', to: 'hunter2' }],
+		warnings: ['line 7: Password=hunter2 is short', 'Token=wcf_abc unused']
+	};
+	f.client.configCall = async () => ({ status: 200, body: echo });
+	for (const action of [ACTIONS.configValidate, ACTIONS.configApply]) {
+		const told = JSON.stringify(await action.run(f.client, { text: shown, revision: 'r1' }));
+		expect(told).not.toContain('hunter2');
+		expect(told).not.toContain('wcf_abc');
+		expect(told).toContain('Password=(hidden) is short');
+	}
+	// A refused apply carries the game's answer as the error's body, and a conflict names the
+	// live side, which may be a password this document never held.
+	f.client.configCall = async () => ({
+		status: 400,
+		body: { ok: false, error: { message: 'bad line: Password=hunter2' }, errors: ['hunter2'] }
+	});
+	const refused: any = await ACTIONS.configApply
+		.run(f.client, { text: shown, revision: 'r1' })
+		.catch((e) => e);
+	expect(refused.message).not.toContain('hunter2');
+	expect(JSON.stringify(refused.body)).not.toContain('hunter2');
+	f.client.configCall = async () => ({
+		status: 412,
+		body: { conflict: [{ line: 'Password=hunter2' }] }
+	});
+	const conflict = await ACTIONS.configApply.run(f.client, {
+		text: WITH_SECRETS.replace('hunter2', 'typed-by-me'),
+		revision: 'r0'
+	});
+	expect(JSON.stringify(conflict)).not.toContain('hunter2');
+});
+
+test('a reserved slot the document refuses says so without quoting a credential', async () => {
+	const f = reservedClient({ route: false, text: WITH_SECRETS, live: [] });
+	f.client.configCall = async () => ({
+		status: 400,
+		body: { error: { code: 'invalid', message: 'bad line: Password=hunter2' } }
+	});
+	const refused: any = await ACTIONS.reservedAdd.run(f.client, { steamId: ID }).catch((e) => e);
+	expect(refused.message).toBe('bad line: Password=(hidden)');
+	expect(refused.body).toBeNull();
+});
+
+test('a placeholder the server has no value for is refused before anything is written', async () => {
+	const f = reservedClient({ route: false, text: `${SESSION}\r\nServerName=x\r\n` });
+	await expect(
+		ACTIONS.configApply.run(f.client, { text: `${RCON}\r\nPassword=(hidden)\r\n`, revision: 'r1' })
+	).rejects.toMatchObject({ status: 400, code: 'hidden_value' });
+	expect(f.calls).toEqual(['GET /v1/config']);
+});
+
+test('a reserved slot written through the document keeps the real password in the file', async () => {
+	const f = reservedClient({ route: false, text: WITH_SECRETS, live: [] });
+	await ACTIONS.reservedAdd.run(f.client, { steamId: ID });
+	expect(f.text()).toContain('Password=hunter2');
+	expect(f.text()).toContain('Token=wcf_abc');
+	expect(f.text()).toContain(ID);
+});
+
+test('raw does not serve the config document, however the path is spelt', async () => {
+	const calls: string[] = [];
+	const client: any = {
+		raw: async (method: string, path: string) => {
+			calls.push(`${method} ${path}`);
+			return { status: 200, statusText: 'OK', headers: {}, text: '{}' };
+		}
+	};
+	for (const path of [
+		'/v1/config',
+		'/v1/config?x=1',
+		'/v1/Config',
+		'/v1/config.',
+		'/v1/config/validate'
+	])
+		await expect(ACTIONS.raw.run(client, { method: 'GET', path })).rejects.toMatchObject({
+			status: 403,
+			code: 'use_config_actions'
+		});
+	for (const path of ['/v1/audit', '/v1/audit?limit=500', '/v1/AUDIT.'])
+		await expect(ACTIONS.raw.run(client, { method: 'GET', path })).rejects.toMatchObject({
+			status: 403,
+			code: 'use_server_log'
+		});
+	// A listener that reads an escape, a ';' or a second layer of encoding its own way would serve
+	// the document for these, so a route with anything but plain characters is not sent at all.
+	for (const path of [
+		'/v1/%63onfig',
+		'/v1/%61udit',
+		'/v1/config%3Fx',
+		'/v1/config%23x',
+		'/v1/config;x',
+		'/v1/config%20',
+		'/v1/config%00',
+		'/v1/config%5c',
+		'/v1/%2563onfig',
+		'/v1/%63onfig/%ZZ'
+	])
+		await expect(ACTIONS.raw.run(client, { method: 'GET', path })).rejects.toMatchObject({
+			status: 400
+		});
+	expect(calls).toEqual([]);
+	await ACTIONS.raw.run(client, { method: 'GET', path: '/v1/configuration' });
+	await ACTIONS.raw.run(client, { method: 'GET', path: '/v1/status' });
+	await ACTIONS.raw.run(client, { method: 'GET', path: '/v1/players?name=a%20b' });
+	expect(calls).toEqual(['GET /v1/configuration', 'GET /v1/status', 'GET /v1/players?name=a%20b']);
+});
+
+test('raw passes on the documented headers only: a proxy in front of the listener names the RCON address in the others', async () => {
+	const client: any = {
+		raw: async () => ({
+			status: 301,
+			statusText: 'Moved',
+			headers: {
+				'content-type': 'text/html',
+				etag: '"abc"',
+				location: 'https://rcon.example.net:7776/v1/status/',
+				via: '1.1 rcon.example.net',
+				'alt-svc': 'h3="rcon.example.net:7776"'
+			},
+			text: ''
+		})
+	};
+	const res: any = await ACTIONS.raw.run(client, { method: 'GET', path: '/v1/status' });
+	expect(res.headers).toEqual({ 'content-type': 'text/html', etag: '"abc"' });
+});

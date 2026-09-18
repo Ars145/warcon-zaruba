@@ -60,17 +60,15 @@ describe('buildEmbed', () => {
 		outcome: 'ok' as const,
 		status: 200,
 		message: 'Kicked Nomad.',
-		ip: '203.0.113.9',
 		userAgent: 'curl',
 		durationMs: 12
 	};
-	test('names the action, actor, target and server, never the IP', () => {
+	test('names the action, actor, target and server', () => {
 		const e = buildEmbed('Warcon', row);
 		expect(e.title).toBe('Kick');
 		expect(e.description).toContain('**james** → `76561198000000001`');
 		expect(e.description).toContain('Server: EU #1');
 		expect(e.description).toContain('Kicked Nomad.');
-		expect(JSON.stringify(e)).not.toContain('203.0.113.9');
 		expect(e.color).toBe(0x7bc462);
 		expect(e.timestamp).toBe('2026-09-09T12:00:00.000Z');
 	});
@@ -83,6 +81,24 @@ describe('buildEmbed', () => {
 		});
 		expect(e.description).toContain('Outcome: **denied** (403)');
 		expect(e.color).toBe(0x8a8a90);
+	});
+	test('a server added, refused or deleted never says where RCON listens', () => {
+		for (const action of ['server.create', 'server.update', 'server.delete']) {
+			const e = buildEmbed('Warcon', {
+				...row,
+				category: 'server',
+				action,
+				outcome: 'denied',
+				status: 400,
+				target: 'rcon.example.net:7776',
+				message: 'rcon.example.net resolves to 10.0.0.5, a private address.'
+			});
+			expect(e.description).toContain('**james**');
+			expect(e.description).toContain('Server: EU #1');
+			expect(e.description).not.toContain('example.net');
+			expect(e.description).not.toContain('7776');
+			expect(e.description).not.toContain('10.0.0.5');
+		}
 	});
 });
 

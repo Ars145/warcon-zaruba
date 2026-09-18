@@ -1,5 +1,6 @@
 import { json as kitJson, type RequestEvent, type RequestHandler } from '@sveltejs/kit';
 import { isAPIError } from 'better-auth/api';
+import { createHmac } from 'node:crypto';
 
 /** Thrown by server modules; API routes turn it into a JSON error response. */
 export class ApiError extends Error {
@@ -31,6 +32,21 @@ export function normalizeError(err: unknown): ApiError | null {
 	return null;
 }
 
+/**
+ * An error as it goes to the process log: its stack, and the cause's message. A failed query's
+ * message lists its parameters, and for the servers table those are the stored RCON password (as
+ * ciphertext) and the address, so the parameters are left out.
+ */
+export function forLog(err: unknown): unknown {
+	if (!(err instanceof Error)) return err;
+	const text = (err.stack || err.message).replace(
+		/\nparams: [\s\S]*?(?=\n\s+at |$)/,
+		'\nparams: (not logged)'
+	);
+	const cause = (err as { cause?: unknown }).cause;
+	return cause instanceof Error ? `${text}\ncause: ${cause.message}` : text;
+}
+
 export function apiError(raw: unknown): Response {
 	const err = normalizeError(raw);
 	if (err) {
@@ -46,7 +62,7 @@ export function apiError(raw: unknown): Response {
 			err.status
 		);
 	}
-	console.error('unhandled', raw instanceof Error ? raw.stack : raw);
+	console.error('unhandled', forLog(raw));
 	return apiJson({ ok: false, error: { message: 'Internal error.', code: 'internal' } }, 500);
 }
 
@@ -58,7 +74,7 @@ export function apiError(raw: unknown): Response {
 export function publicMessage(err: unknown, fallback = 'Internal error.'): string {
 	const known = normalizeError(err);
 	if (known) return known.message;
-	console.error('unhandled', err instanceof Error ? err.stack : err);
+	console.error('unhandled', forLog(err));
 	return fallback;
 }
 
@@ -91,6 +107,14 @@ export async function readJson<T = Record<string, unknown>>(req: Request): Promi
 /** Set by hooks.server.ts on every request (overwriting anything the client sent). */
 export const CLIENT_IP_HEADER = 'x-warcon-client-ip';
 export const clientIp = (req: Request): string => req.headers.get(CLIENT_IP_HEADER) || '';
+/**
+ * The client address as a key for a limit that is stored (the login lockout): a keyed hash, so no
+ * address is ever written down. The address itself is only ever held in memory, for throttling.
+ */
+export const addressKey = (req: Request, secret: string): string => {
+	const ip = clientIp(req);
+	return ip ? createHmac('sha256', secret).update(ip).digest('hex').slice(0, 32) : 'unknown';
+};
 
 /**
  * The client address as adapter-node resolved it (socket peer, or the header named by

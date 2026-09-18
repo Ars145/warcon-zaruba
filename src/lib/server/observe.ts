@@ -10,7 +10,7 @@ import { and, desc, eq, isNull } from 'drizzle-orm';
 import type { Env } from './env';
 import { publicMessage } from './http';
 import type { OrgRow, ServerRow } from './access';
-import { ACTIONS } from './actions';
+import { ACTIONS, readConfig } from './actions';
 import { reservedSlotsHeld } from '../reserved-doc';
 import { GameError, WardogsClient } from './rcon';
 import { matches, samples, serverLive } from './db/schema';
@@ -29,7 +29,14 @@ import {
 	type TickContext
 } from './triggers';
 import { applyTriggerUpdates, enqueueIntents, wakeDelivery } from './outbox';
-import { liveObserved, reconcileServer, writeSnapshot, type Observed } from './lists-sync';
+import {
+	banOnSight,
+	liveObserved,
+	reconcileServer,
+	writeSnapshot,
+	type Observed
+} from './lists-sync';
+import type { RefusedBan } from './lists-plan';
 import {
 	closeAllSessions,
 	diffPresence,
@@ -45,6 +52,7 @@ import { settings } from './settings';
 import { isWatched } from './interest';
 import { emit } from './events';
 import { liveView, writeLive } from './live';
+import { observations, observationSeconds } from './metrics';
 import { nextDue, withHold } from './poller-schedule';
 import { cashByFaction } from '$lib/cash';
 import type { Features, LiveView, Player, Status } from '$lib/types';
@@ -85,6 +93,8 @@ export interface ServerMemory {
 	/** the previous look at the match (map, scores, clock); null until one is remembered */
 	lastMatch: MatchLook | null;
 	reserved: Set<string>;
+	/** bans the lists want here that the game refused (the player was not on): applied on sight */
+	refusedBans: Map<string, RefusedBan>;
 	listsAt: number;
 	syncAt: number;
 	liveKey: string;
@@ -148,6 +158,7 @@ export function memoryFor(server: ServerRow, org: OrgRow): ServerMemory {
 			presence: newPresence(),
 			lastMatch: null,
 			reserved: new Set(),
+			refusedBans: new Map(),
 			listsAt: 0,
 			syncAt: 0,
 			liveKey: '',
@@ -257,8 +268,7 @@ async function refreshIdentity(client: WardogsClient, m: ServerMemory, now: numb
 	// How many player slots the server holds back for reserved players lives in its config document
 	// (MaxReservedSlots), which every build serves; the status route only reports the public cap.
 	try {
-		const cfg = (await ACTIONS.config.run(client, {})) as { text: string };
-		next.reservedSlots = reservedSlotsHeld(cfg.text);
+		next.reservedSlots = reservedSlotsHeld((await readConfig(client)).text);
 	} catch (err) {
 		retrySoon();
 		holdFor(m, err);
@@ -421,9 +431,13 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 			players = ((await ACTIONS.players.run(client, {})) as { players: Player[] }).players;
 	} catch (err) {
 		await observationFailed(env, m, ts, started, err);
+		observations.inc({ outcome: 'failed' });
+		observationSeconds.observe((Date.now() - started) / 1000);
 		return;
 	}
 	const latencyMs = Date.now() - started;
+	observations.inc({ outcome: 'ok' });
+	observationSeconds.observe(latencyMs / 1000);
 	const wasOffline = m.failures >= OFFLINE_AFTER_FAILURES;
 	// Any failure may have been a restart onto a new build: re-read the identity on recovery.
 	const hadFailed = m.failures > 0;
@@ -469,7 +483,7 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 		!wasOffline &&
 		gapMs <= 2 * Math.max(m.playersIntervalMs, 1000) + 1000;
 	const diff: PresenceDiff = players
-		? diffPresence(m.presence, players)
+		? diffPresence(m.presence, players, started)
 		: { joined: [], left: [], stayed: [], factioned: [] };
 	const joined = joinsTrusted ? diff.joined : [];
 	// Players pick a faction after joining; rules that wait for it see the change here. A joiner
@@ -491,10 +505,10 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 	// trusted: a recent look, so they were on throughout), held as pending. It banks the moment
 	// the server is filled (the rule's line, else the limit the server reports) with the player
 	// still on; leaving first forfeits it, so sitting on an empty server that never fills earns
-	// nothing. In between, pending waits.
+	// nothing. In between, pending waits. A server that reports no limit never fills on its own.
 	const seed = seedRule(rows);
 	if (players && seed) {
-		const fullAt = seed.fullAt ?? m.status?.maxPlayers ?? Infinity;
+		const fullAt = seed.fullAt ?? (m.status?.maxPlayers || Infinity);
 		if (players.length >= fullAt)
 			for (const { session } of diff.stayed) {
 				session.seedMs += session.pendingSeedMs;
@@ -596,7 +610,11 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 	emit({ type: 'live', live: liveView(m) });
 	if (intents) wakeDelivery();
 
-	// Housekeeping, each part on its own, and only while this process still owns the worker.
+	// Housekeeping, each part on its own, and only while this process still owns the worker. A
+	// player the lists want banned here, seen on the list: banned now, not at the sync's retry.
+	const seen = players?.map((p) => p.steamId) ?? [];
+	if (isOwner() && seen.length && m.refusedBans.size)
+		await stage('bans', m, () => banOnSight(env, server, m.org, client, seen, m.refusedBans));
 	if (look)
 		await stage('match', m, () =>
 			withOwnedTransaction(env, (tx) => reconcileMatch(tx, m, ts, look, matchEnd))
@@ -736,6 +754,7 @@ async function keepLists(
 			lane: 'held'
 		});
 		if (synced.observed) m.reserved = new Set(synced.observed.reserved);
+		if (synced.refusedBans) m.refusedBans = new Map(synced.refusedBans.map((r) => [r.steamId, r]));
 	}
 }
 

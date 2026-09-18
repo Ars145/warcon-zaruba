@@ -19,11 +19,12 @@ import { adminAc, defaultStatements, userAc } from 'better-auth/plugins/admin/ac
 import { sveltekitCookies } from 'better-auth/svelte-kit';
 import { getRequestEvent } from '$app/server';
 import { writeAudit } from './audit';
-import { assertMayDeleteSelf, auditSelfDelete, eraseUserTraces } from './erasure';
+import { auditSelfDelete, beforeSelfDelete, eraseUserTraces } from './erasure';
 import { discordEnabled, type Env } from './env';
 import { ApiError, CLIENT_IP_HEADER } from './http';
 import { warconSessions } from './auth-plugin';
 import { refreshAuthComplete, startGrace } from './enrolment';
+import { refuseMemberBeforeOwner } from './users';
 
 export const authConfigured = (env: Partial<Env> | undefined) => Boolean(env?.BETTER_AUTH_SECRET);
 
@@ -174,7 +175,7 @@ function build(env: Env) {
 			// pseudonymises the audit trail afterwards.
 			deleteUser: {
 				enabled: true,
-				beforeDelete: (u) => assertMayDeleteSelf(env, u),
+				beforeDelete: (u) => beforeSelfDelete(env, u),
 				afterDelete: async (u, request) => {
 					await eraseUserTraces(env, u);
 					if (request) await auditSelfDelete(env, request, u);
@@ -225,15 +226,24 @@ function build(env: Env) {
 			cookieCache: { enabled: false }
 		},
 		databaseHooks: {
+			user: {
+				create: {
+					// Password, passkey, Steam and Discord accounts are all made through here.
+					before: async (u) => {
+						await refuseMemberBeforeOwner(env, (u as { role?: unknown }).role);
+					}
+				}
+			},
 			session: {
 				create: {
+					// The address is read for throttling and never kept: a session is stored without it.
+					before: async (session) => ({ data: { ...session, ipAddress: null } }),
 					after: async (session) => {
 						await writeAudit(env, null, {
 							actor: { id: session.userId, username: '' },
 							category: 'auth',
 							action: 'login',
 							outcome: 'ok',
-							ip: session.ipAddress ?? '',
 							userAgent: session.userAgent ?? ''
 						}).catch((err) => console.error('audit login', err));
 						// The sign-in rules: start the grace clock on the first sign-in and re-check the

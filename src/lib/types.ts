@@ -59,6 +59,14 @@ export interface ServerInfo {
 	manager: boolean;
 	sortOrder: number;
 	demo: boolean;
+	/** the org owner's switches for the public pages; see $lib/features for what is actually on */
+	publicStatus: boolean;
+	publicLeaderboards: boolean;
+	/** the public status page also carries the last kills */
+	publicKills: boolean;
+	/** what the site owner allows this server's organisation */
+	allowPublicStatus: boolean;
+	allowPublicLeaderboards: boolean;
 }
 
 export interface CatalogItem {
@@ -281,6 +289,11 @@ export interface OrgView {
 	/** the site owner's per-org override, if any */
 	customServerLimit: number | null;
 	suspended: { at: string; reason: string } | null;
+	/** site-owner allowances for the public surfaces ($lib/features) */
+	allowPublicStatus: boolean;
+	allowPublicLeaderboards: boolean;
+	/** the org's Discord invite link for its public pages; '' = none */
+	discordInviteUrl: string;
 	createdBy: { username: string; name: string } | null;
 	createdAt: string | null;
 }
@@ -379,7 +392,8 @@ export interface DossierSession {
 	cash: number;
 }
 
-export interface PlayerCombat {
+/** A player's kill-feed record across some servers: what the dossier and a public career show. */
+export interface CombatSummary {
 	kills: number;
 	deaths: number;
 	headshots: number;
@@ -392,6 +406,8 @@ export interface PlayerCombat {
 	causes: { cause: string; kills: number }[];
 	victims: { steamId: string; name: string; kills: number }[];
 	nemeses: { steamId: string; name: string; deaths: number }[];
+}
+export interface PlayerCombat extends CombatSummary {
 	/** the last kills and deaths involving the player, newest first */
 	recent: (KillView & { serverId: string; serverName: string })[];
 }
@@ -487,6 +503,12 @@ export interface WebhookView {
 	/** keeps a live status card per covered server in the channel, edited in place */
 	statusEnabled: boolean;
 	statusStyle: StatusStyle;
+	/** seconds between edits of one card, 30-300 */
+	statusIntervalS: number;
+	/** which links the card carries (each public one only while that page is on for the server) */
+	linkStatus: boolean;
+	linkLeaderboard: boolean;
+	linkPanel: boolean;
 	statusSentAt: string | null;
 	lastSentAt: string | null;
 	lastStatus: number | null;
@@ -582,12 +604,14 @@ export interface ReservedSlotState {
 	managed: boolean;
 	/** last name seen on the org's servers, else the Steam persona, else null */
 	name: string | null;
-	/** the note on the org list entry, if any */
+	/** the note on the list entry, if any */
 	note: string;
-	/** when the org list entry lifts itself, null for a permanent slot */
-	expiresAt: string | null;
 	/** a slot the org hands its members, not an entry someone added */
 	member: boolean;
+	/** the list a managed slot comes from: the organisation's, or this server's own */
+	scope: 'org' | 'server';
+	/** when the panel lifts the slot; null for a permanent one (or one not managed) */
+	expiresAt: string | null;
 }
 
 /** Per-server view of which bans and reserved slots the org lists manage; for the players page. */

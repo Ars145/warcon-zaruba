@@ -11,7 +11,6 @@ import { webhooks, type WebhookRow } from './db/schema';
 import {
 	deleteDiscord,
 	invalidateWebhookCache,
-	orgServerIds,
 	postDiscord,
 	WEBHOOK_EVENTS,
 	type PostResult,
@@ -20,8 +19,10 @@ import {
 import type { WebhookView } from '$lib/types';
 import { isStatusStyle, type StatusStyle } from '$lib/status-styles';
 import { gateway } from './gateway';
+import { parseServerScope } from './server-scope';
 import { servers } from './db/schema';
-import { statusMessage } from './webhook-status-core';
+import { cardLinks, clampInterval, statusMessage } from './webhook-status-core';
+import { effectiveFeatures } from '$lib/features';
 
 export { WEBHOOK_EVENTS, WEBHOOK_EVENT_LABELS } from './webhook-delivery';
 
@@ -81,14 +82,6 @@ async function removeStatusMessages(
 	for (const id of ids) await deleteDiscord(env, row, id);
 }
 
-async function parseServers(env: Env, orgId: string, raw: unknown): Promise<string[] | null> {
-	if (raw === null || raw === undefined) return null;
-	const wanted = Array.isArray(raw) ? raw.map((v) => str(v, 64)).filter(Boolean) : [];
-	if (!wanted.length) return null;
-	const known = await orgServerIds(env, orgId, wanted);
-	return known.length ? known : null;
-}
-
 const shape = (w: WebhookRow): WebhookView => ({
 	id: w.id,
 	label: w.label,
@@ -98,6 +91,10 @@ const shape = (w: WebhookRow): WebhookView => ({
 	enabled: w.enabled,
 	statusEnabled: w.statusEnabled,
 	statusStyle: w.statusStyle,
+	statusIntervalS: w.statusIntervalS,
+	linkStatus: w.linkStatus,
+	linkLeaderboard: w.linkLeaderboard,
+	linkPanel: w.linkPanel,
 	statusSentAt: w.statusSentAt ? w.statusSentAt.toISOString() : null,
 	lastSentAt: w.lastSentAt ? w.lastSentAt.toISOString() : null,
 	lastStatus: w.lastStatus,
@@ -135,8 +132,14 @@ export async function createWebhook(
 	const statusEnabled = !!body.statusEnabled;
 	const statusStyle = body.statusStyle === undefined ? 'banner' : parseStyle(body.statusStyle);
 	const events = parseEvents(body.events, statusEnabled);
-	const serverIds = await parseServers(env, org.id, body.serverIds);
+	const serverIds = await parseServerScope(env, org.id, body.serverIds);
 	const label = str(body.label, 60) || 'Discord';
+	const card = {
+		statusIntervalS: clampInterval(body.statusIntervalS),
+		linkStatus: body.linkStatus === undefined ? true : !!body.linkStatus,
+		linkLeaderboard: body.linkLeaderboard === undefined ? true : !!body.linkLeaderboard,
+		linkPanel: !!body.linkPanel
+	};
 	const [row] = await env.db
 		.insert(webhooks)
 		.values({
@@ -150,6 +153,7 @@ export async function createWebhook(
 			enabled: body.enabled === undefined ? true : !!body.enabled,
 			statusEnabled,
 			statusStyle,
+			...card,
 			createdBy: user.id
 		})
 		.returning();
@@ -169,7 +173,8 @@ export async function createWebhook(
 			events,
 			serverIds,
 			statusEnabled,
-			statusStyle
+			statusStyle,
+			...card
 		}
 	});
 	return shape(row);
@@ -205,6 +210,10 @@ export async function updateWebhook(
 	}
 	if (body.statusStyle !== undefined)
 		changes.statusStyle = set.statusStyle = parseStyle(body.statusStyle);
+	if (body.statusIntervalS !== undefined)
+		changes.statusIntervalS = set.statusIntervalS = clampInterval(body.statusIntervalS);
+	for (const key of ['linkStatus', 'linkLeaderboard', 'linkPanel'] as const)
+		if (body[key] !== undefined) changes[key] = set[key] = !!body[key];
 	const statusEnabled = set.statusEnabled ?? row.statusEnabled;
 	if (body.events !== undefined)
 		changes.events = set.events = parseEvents(body.events, statusEnabled);
@@ -214,7 +223,7 @@ export async function updateWebhook(
 			'Pick at least one kind of event to mirror, or keep the live status message on.'
 		);
 	if (body.serverIds !== undefined)
-		changes.serverIds = set.serverIds = await parseServers(env, org.id, body.serverIds);
+		changes.serverIds = set.serverIds = await parseServerScope(env, org.id, body.serverIds);
 	if (body.enabled !== undefined) {
 		changes.enabled = set.enabled = !!body.enabled;
 		if (!set.enabled) dropMessage = true;
@@ -330,7 +339,7 @@ export async function sendTestCard(
 	if (only && only.length && !only.includes(serverId))
 		throw new ApiError(400, 'This webhook does not cover that server.');
 	const [server] = await env.db
-		.select({ id: servers.id, name: servers.name })
+		.select()
 		.from(servers)
 		.where(and(eq(servers.id, serverId), eq(servers.orgId, org.id)))
 		.limit(1);
@@ -342,9 +351,10 @@ export async function sendTestCard(
 			orgName: org.name,
 			origin: env.ORIGIN,
 			now: Date.now(),
-			style: row.statusStyle
+			style: row.statusStyle,
+			links: cardLinks(env.ORIGIN, server.id, row, effectiveFeatures(org, server))
 		},
-		server,
+		{ id: server.id, name: server.name },
 		live
 	);
 	const result = await postDiscord(env, row, {
