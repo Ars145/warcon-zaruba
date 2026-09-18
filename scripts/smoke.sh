@@ -117,7 +117,7 @@ check user-list-forbidden-anon 'Sign in required' "$(req $J3 GET /api/users)"
 check bob-login '303' "$(form $J3 '/sign-in?/password' 'username=bob&password=bobs-long-password')"
 check bob-no-servers '"servers":[]' "$(req $J3 GET /api/servers)"
 check bob-not-owner 'Owner access required' "$(req $J3 GET /api/users)"
-check bob-users-page-403 '403' "$(pagecode $J3 /users)"
+check bob-users-page-403 '403' "$(pagecode $J3 /admin/users)"
 check bob-server-404 'Server not found' "$(req $J3 GET /api/servers/$SID/rcon/status)"
 GB="{\"grants\":[{\"serverId\":\"$SID\",\"roleId\":\"$RID_VIEWER\"}]}"
 check grant-viewer '"roleName":"viewer"' "$(req $J1 PUT /api/users/$UID_BOB/grants "$GB")"
@@ -312,7 +312,7 @@ check trigger-firecount '"fireCount":' "$(req $J1 GET /api/servers/$SID/triggers
 req $J1 DELETE /api/servers/$SID/triggers/$TID2 >/dev/null; req $J1 DELETE /api/servers/$SID/triggers/$TID3 >/dev/null
 
 echo "== pages (owner)"
-for p in / /audit /users /servers /orgs "/orgs/$ORG" "/orgs/$ORG/bans" "/orgs/$ORG/reserved" /account "/server/$SID" "/server/$SID/players" "/server/$SID/players/$P1" "/server/$SID/bans" "/server/$SID/automation" "/server/$SID/rotation" "/server/$SID/slots" "/server/$SID/config" "/server/$SID/log" "/audit?outcome=denied&q=kick"; do check "page $p" '200' "$(pagecode $J1 "$p")"; done
+for p in / /audit /admin/users /servers /orgs "/orgs/$ORG" "/orgs/$ORG/bans" "/orgs/$ORG/reserved" /account "/server/$SID" "/server/$SID/players" "/server/$SID/players/$P1" "/server/$SID/bans" "/server/$SID/automation" "/server/$SID/rotation" "/server/$SID/slots" "/server/$SID/config" "/server/$SID/log" "/audit?outcome=denied&q=kick"; do check "page $p" '200' "$(pagecode $J1 "$p")"; done
 check page-unknown-server '404' "$(pagecode $J1 /server/nope)"
 check server-delete '"ok":true' "$(req $J1 DELETE /api/servers/$SID2)"
 check page-sessions 'this session' "$(curl -s -b $J1 $B/account)"
