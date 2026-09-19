@@ -1,223 +1,755 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ru">
-<head>
-<meta charset="utf-8">
-<style>
-@font-face {
-  font-family: 'Caveat';
-  font-style: normal;
-  font-weight: 600;
-  font-display: swap;
-  src: url("asset:Caveat-cyrillic-ext.woff2") format('woff2');
-  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
-}
-@font-face {
-  font-family: 'Caveat';
-  font-style: normal;
-  font-weight: 600;
-  font-display: swap;
-  src: url("asset:Caveat-cyrillic.woff2") format('woff2');
-  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
-}
-@font-face {
-  font-family: 'Caveat';
-  font-style: normal;
-  font-weight: 600;
-  font-display: swap;
-  src: url("asset:Caveat-latin-ext.woff2") format('woff2');
-  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
-}
-@font-face {
-  font-family: 'Caveat';
-  font-style: normal;
-  font-weight: 600;
-  font-display: swap;
-  src: url("asset:Caveat-latin.woff2") format('woff2');
-  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-}
-@font-face {
-  font-family: 'Caveat';
-  font-style: normal;
-  font-weight: 700;
-  font-display: swap;
-  src: url("asset:Caveat-cyrillic-ext.woff2") format('woff2');
-  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
-}
-@font-face {
-  font-family: 'Caveat';
-  font-style: normal;
-  font-weight: 700;
-  font-display: swap;
-  src: url("asset:Caveat-cyrillic.woff2") format('woff2');
-  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
-}
-@font-face {
-  font-family: 'Caveat';
-  font-style: normal;
-  font-weight: 700;
-  font-display: swap;
-  src: url("asset:Caveat-latin-ext.woff2") format('woff2');
-  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
-}
-@font-face {
-  font-family: 'Caveat';
-  font-style: normal;
-  font-weight: 700;
-  font-display: swap;
-  src: url("asset:Caveat-latin.woff2") format('woff2');
-  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-}
-@font-face{font-family:"Inter";src:url("asset:Inter-400.woff2") format("woff2");font-weight:400;font-display:block}
-@font-face{font-family:"Inter";src:url("asset:Inter-500.woff2") format("woff2");font-weight:500;font-display:block}
-@font-face{font-family:"Inter";src:url("asset:Inter-600.woff2") format("woff2");font-weight:600;font-display:block}
-@font-face{font-family:"Inter";src:url("asset:Inter-700.woff2") format("woff2");font-weight:700;font-display:block}
-html{background:#000}
-body{margin:0;background:#000;color:#fff;-webkit-font-smoothing:antialiased}
-/* Inter covers latin, cyrillic and greek. The Noto families come from the image
+	<head>
+		<meta charset="utf-8" />
+		<style>
+			@font-face {
+				font-family: 'Caveat';
+				font-style: normal;
+				font-weight: 600;
+				font-display: swap;
+				src: url('asset:Caveat-cyrillic-ext.woff2') format('woff2');
+				unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+			}
+			@font-face {
+				font-family: 'Caveat';
+				font-style: normal;
+				font-weight: 600;
+				font-display: swap;
+				src: url('asset:Caveat-cyrillic.woff2') format('woff2');
+				unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+			}
+			@font-face {
+				font-family: 'Caveat';
+				font-style: normal;
+				font-weight: 600;
+				font-display: swap;
+				src: url('asset:Caveat-latin-ext.woff2') format('woff2');
+				unicode-range:
+					U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329,
+					U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113,
+					U+2C60-2C7F, U+A720-A7FF;
+			}
+			@font-face {
+				font-family: 'Caveat';
+				font-style: normal;
+				font-weight: 600;
+				font-display: swap;
+				src: url('asset:Caveat-latin.woff2') format('woff2');
+				unicode-range:
+					U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308,
+					U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+			}
+			@font-face {
+				font-family: 'Caveat';
+				font-style: normal;
+				font-weight: 700;
+				font-display: swap;
+				src: url('asset:Caveat-cyrillic-ext.woff2') format('woff2');
+				unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+			}
+			@font-face {
+				font-family: 'Caveat';
+				font-style: normal;
+				font-weight: 700;
+				font-display: swap;
+				src: url('asset:Caveat-cyrillic.woff2') format('woff2');
+				unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+			}
+			@font-face {
+				font-family: 'Caveat';
+				font-style: normal;
+				font-weight: 700;
+				font-display: swap;
+				src: url('asset:Caveat-latin-ext.woff2') format('woff2');
+				unicode-range:
+					U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329,
+					U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113,
+					U+2C60-2C7F, U+A720-A7FF;
+			}
+			@font-face {
+				font-family: 'Caveat';
+				font-style: normal;
+				font-weight: 700;
+				font-display: swap;
+				src: url('asset:Caveat-latin.woff2') format('woff2');
+				unicode-range:
+					U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308,
+					U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+			}
+			@font-face {
+				font-family: 'Inter';
+				src: url('asset:Inter-400.woff2') format('woff2');
+				font-weight: 400;
+				font-display: block;
+			}
+			@font-face {
+				font-family: 'Inter';
+				src: url('asset:Inter-500.woff2') format('woff2');
+				font-weight: 500;
+				font-display: block;
+			}
+			@font-face {
+				font-family: 'Inter';
+				src: url('asset:Inter-600.woff2') format('woff2');
+				font-weight: 600;
+				font-display: block;
+			}
+			@font-face {
+				font-family: 'Inter';
+				src: url('asset:Inter-700.woff2') format('woff2');
+				font-weight: 700;
+				font-display: block;
+			}
+			html {
+				background: #000;
+			}
+			body {
+				margin: 0;
+				background: #000;
+				color: #fff;
+				-webkit-font-smoothing: antialiased;
+			}
+			/* Inter covers latin, cyrillic and greek. The Noto families come from the image
    (fonts-noto-*): 6% of the names seen in a week carry CJK, dingbats or emoji. */
-body,#card{font-family:"Inter","Noto Sans","Noto Sans CJK SC","Noto Sans Symbols 2","Noto Color Emoji",sans-serif}
-</style>
-</head>
-<body>
-<div id="card" style="width:1920px;background:#000;color:#fff;font-family:'Inter',sans-serif;position:relative;overflow:hidden">
+			body,
+			#card {
+				font-family:
+					'Inter', 'Noto Sans', 'Noto Sans CJK SC', 'Noto Sans Symbols 2', 'Noto Color Emoji',
+					sans-serif;
+			}
+		</style>
+	</head>
+	<body>
+		<div
+			id="card"
+			style="
+				width: 1920px;
+				background: #000;
+				color: #fff;
+				font-family: 'Inter', sans-serif;
+				position: relative;
+				overflow: hidden;
+			"
+		>
+			<section style="position: relative; padding: 48px 64px 40px; overflow: hidden">
+				<img
+					src="asset:hero.webp"
+					alt=""
+					style="position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover"
+				/>
+				<div
+					style="
+						position: absolute;
+						inset: 0;
+						background: linear-gradient(
+							180deg,
+							rgba(0, 0, 0, 0.72) 0%,
+							rgba(0, 0, 0, 0.55) 38%,
+							rgba(0, 0, 0, 0.88) 78%,
+							#000 100%
+						);
+					"
+				></div>
+				<div
+					style="
+						position: absolute;
+						inset: 0;
+						background: linear-gradient(
+							90deg,
+							rgba(0, 0, 0, 0.85) 0%,
+							rgba(0, 0, 0, 0.25) 55%,
+							rgba(0, 0, 0, 0.6) 100%
+						);
+					"
+				></div>
 
-  <section style="position:relative;padding:48px 64px 40px;overflow:hidden">
-    <img src="asset:hero.webp" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover">
-    <div style="position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,.72) 0%,rgba(0,0,0,.55) 38%,rgba(0,0,0,.88) 78%,#000 100%)"></div>
-    <div style="position:absolute;inset:0;background:linear-gradient(90deg,rgba(0,0,0,.85) 0%,rgba(0,0,0,.25) 55%,rgba(0,0,0,.6) 100%)"></div>
+				<div
+					style="
+						position: relative;
+						display: flex;
+						align-items: flex-start;
+						justify-content: space-between;
+						gap: 48px;
+					"
+				>
+					<div style="display: flex; align-items: center; gap: 26px; min-width: 0">
+						<img
+							src="asset:logo-wardogs.png"
+							alt="WARDOGS"
+							style="height: 52px; width: auto; display: block"
+						/>
+						<div style="width: 1px; height: 58px; background: rgba(255, 255, 255, 0.22)"></div>
+						<div style="display: flex; flex-direction: column; gap: 4px; min-width: 0">
+							<span
+								style="
+									font-size: 40px;
+									line-height: 1.05;
+									font-weight: 700;
+									color: #ff7d00;
+									letter-spacing: 0.14em;
+									text-transform: uppercase;
+									white-space: nowrap;
+								"
+								>{{ serverName }}</span
+							>
+						</div>
+					</div>
+					<div
+						style="
+							display: flex;
+							flex-direction: column;
+							align-items: flex-end;
+							gap: 10px;
+							flex-shrink: 0;
+						"
+					>
+						<span
+							style="
+								font-family: 'Caveat', cursive;
+								font-size: 46px;
+								line-height: 0.9;
+								color: #fff;
+								transform: rotate(-4deg);
+							"
+							>Медленно,</span
+						>
+						<span
+							style="
+								font-family: 'Caveat', cursive;
+								font-size: 36px;
+								line-height: 0.9;
+								color: #ff7d00;
+								transform: rotate(-4deg);
+								margin-right: 18px;
+							"
+							>но верно!</span
+						>
+						<span
+							style="
+								margin-top: 10px;
+								font-size: 15px;
+								font-weight: 500;
+								color: rgba(255, 255, 255, 0.7);
+								font-variant-numeric: tabular-nums;
+							"
+							>Матч завершён {{ endedAtLabel }}</span
+						>
+					</div>
+				</div>
 
-    <div style="position:relative;display:flex;align-items:flex-start;justify-content:space-between;gap:48px">
-      <div style="display:flex;align-items:center;gap:26px;min-width:0">
-        <img src="asset:logo-wardogs.png" alt="WARDOGS" style="height:52px;width:auto;display:block">
-        <div style="width:1px;height:58px;background:rgba(255,255,255,.22)"></div>
-        <div style="display:flex;flex-direction:column;gap:4px;min-width:0">
-          <span style="font-size:40px;line-height:1.05;font-weight:700;color:#ff7d00;letter-spacing:.14em;text-transform:uppercase;white-space:nowrap">{{ serverName }}</span>
-          
-        </div>
-      </div>
-      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:10px;flex-shrink:0">
-        <span style="font-family:'Caveat',cursive;font-size:46px;line-height:.9;color:#fff;transform:rotate(-4deg)">Медленно,</span>
-        <span style="font-family:'Caveat',cursive;font-size:36px;line-height:.9;color:#ff7d00;transform:rotate(-4deg);margin-right:18px">но верно!</span>
-        <span style="margin-top:10px;font-size:15px;font-weight:500;color:rgba(255,255,255,.7);font-variant-numeric:tabular-nums">Матч завершён {{ endedAtLabel }}</span>
-      </div>
-    </div>
+				<div
+					style="
+						position: relative;
+						margin-top: 46px;
+						display: flex;
+						align-items: flex-end;
+						justify-content: space-between;
+						gap: 48px;
+						flex-wrap: wrap;
+					"
+				>
+					<div style="min-width: 0">
+						<p
+							style="
+								margin: 0 0 10px;
+								font-size: 16px;
+								font-weight: 600;
+								letter-spacing: 0.18em;
+								text-transform: uppercase;
+								color: #ff7d00;
+							"
+						>
+							Итоги боя
+						</p>
+						<h1
+							style="
+								margin: 0;
+								font-size: 92px;
+								line-height: 0.98;
+								font-weight: 700;
+								color: #fff;
+								letter-spacing: -0.01em;
+							"
+						>
+							{{ mapName }}
+						</h1>
+						<p
+							style="
+								margin: 14px 0 0;
+								font-size: 28px;
+								font-weight: 500;
+								color: rgba(255, 255, 255, 0.82);
+							"
+						>
+							{{ mode }}
+						</p>
+					</div>
+					<div style="display: flex; gap: 12px; flex-wrap: wrap">
+						<sc-for list="{{ metaChips }}" as="chip" hint-placeholder-count="3">
+							<div
+								style="
+									min-width: 186px;
+									padding: 16px 20px;
+									border-radius: 12px;
+									background: rgba(10, 10, 11, 0.72);
+									border: 1px solid rgba(255, 255, 255, 0.1);
+									backdrop-filter: blur(6px);
+								"
+							>
+								<p
+									style="
+										margin: 0 0 6px;
+										font-size: 14px;
+										font-weight: 500;
+										color: rgba(255, 255, 255, 0.6);
+										letter-spacing: 0.04em;
+									"
+								>
+									{{ chip.label }}
+								</p>
+								<p
+									style="
+										margin: 0;
+										font-size: 30px;
+										font-weight: 700;
+										color: #fff;
+										font-variant-numeric: tabular-nums;
+										line-height: 1;
+									"
+								>
+									{{ chip.value }}
+								</p>
+							</div>
+						</sc-for>
+					</div>
+				</div>
+			</section>
 
-    <div style="position:relative;margin-top:46px;display:flex;align-items:flex-end;justify-content:space-between;gap:48px;flex-wrap:wrap">
-      <div style="min-width:0">
-        <p style="margin:0 0 10px;font-size:16px;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:#ff7d00">Итоги боя</p>
-        <h1 style="margin:0;font-size:92px;line-height:.98;font-weight:700;color:#fff;letter-spacing:-.01em">{{ mapName }}</h1>
-        <p style="margin:14px 0 0;font-size:28px;font-weight:500;color:rgba(255,255,255,.82)">{{ mode }}</p>
-      </div>
-      <div style="display:flex;gap:12px;flex-wrap:wrap">
-        <sc-for list="{{ metaChips }}" as="chip" hint-placeholder-count="3">
-          <div style="min-width:186px;padding:16px 20px;border-radius:12px;background:rgba(10,10,11,.72);border:1px solid rgba(255,255,255,.1);backdrop-filter:blur(6px)">
-            <p style="margin:0 0 6px;font-size:14px;font-weight:500;color:rgba(255,255,255,.6);letter-spacing:.04em">{{ chip.label }}</p>
-            <p style="margin:0;font-size:30px;font-weight:700;color:#fff;font-variant-numeric:tabular-nums;line-height:1">{{ chip.value }}</p>
-          </div>
-        </sc-for>
-      </div>
-    </div>
-  </section>
+			<section style="padding: 0 64px; margin-top: -6px">
+				<div
+					style="display:grid;grid-template-columns:repeat({{ factionCols }},minmax(0,1fr));gap:20px"
+				>
+					<sc-for list="{{ factions }}" as="f" hint-placeholder-count="3">
+						<div
+							style="position:relative;overflow:hidden;border-radius:20px;padding:26px 30px;background:#101011;border:1px solid {{ f.border }}"
+						>
+							<div
+								style="position:absolute;left:0;top:0;bottom:0;width:6px;background:{{ f.color }}"
+							></div>
+							<div
+								style="
+									display: flex;
+									align-items: center;
+									justify-content: space-between;
+									gap: 20px;
+								"
+							>
+								<div style="min-width: 0">
+									<div style="display: flex; align-items: center; gap: 12px; margin-bottom: 10px">
+										<span
+											style="
+												font-size: 30px;
+												font-weight: 700;
+												color: #fff;
+												white-space: nowrap;
+												overflow: hidden;
+												text-overflow: ellipsis;
+												max-width: 300px;
+											"
+											>{{ f.name }}</span
+										>
+										<sc-if value="{{ f.winner }}" hint-placeholder-val="{{ true }}">
+											<span
+												style="
+													flex-shrink: 0;
+													padding: 5px 14px;
+													border-radius: 999px;
+													background: #ff7d00;
+													color: #111;
+													font-size: 14px;
+													font-weight: 700;
+													letter-spacing: 0.1em;
+												"
+												>ПОБЕДА</span
+											>
+										</sc-if>
+									</div>
+									<p
+										style="
+											margin: 0;
+											font-size: 17px;
+											font-weight: 500;
+											color: rgba(255, 255, 255, 0.6);
+										"
+									>
+										Игроков на стороне:
+										<span style="color: #fff; font-weight: 600; font-variant-numeric: tabular-nums"
+											>{{ f.players }}</span
+										>
+									</p>
+								</div>
+								<span
+									style="
+										font-size: 68px;
+										line-height: 1;
+										font-weight: 700;
+										font-variant-numeric: tabular-nums;
+										background: linear-gradient(
+											160deg,
+											#ffe0b4 0%,
+											#ff9f42 34%,
+											#ff7d00 58%,
+											#c25a00 74%,
+											#ffca8c 100%
+										);
+										-webkit-background-clip: text;
+										background-clip: text;
+										color: transparent;
+									"
+									>{{ f.score }}</span
+								>
+							</div>
+							<div
+								style="
+									margin-top: 20px;
+									height: 8px;
+									border-radius: 999px;
+									background: rgba(255, 255, 255, 0.08);
+									overflow: hidden;
+								"
+							>
+								<div style="height:100%;width:{{ f.pct }};background:{{ f.color }}"></div>
+							</div>
+						</div>
+					</sc-for>
+				</div>
+				<sc-if value="{{ hasWinner }}" hint-placeholder-val="{{ true }}">
+					<p
+						style="
+							margin: 22px 0 0;
+							font-size: 24px;
+							font-weight: 600;
+							color: rgba(255, 255, 255, 0.7);
+						"
+					>
+						Победитель боя:
+						<span
+							style="
+								font-size: 30px;
+								font-weight: 700;
+								background: linear-gradient(
+									160deg,
+									#ffe0b4 0%,
+									#ff9f42 34%,
+									#ff7d00 58%,
+									#c25a00 74%,
+									#ffca8c 100%
+								);
+								-webkit-background-clip: text;
+								background-clip: text;
+								color: transparent;
+							"
+							>{{ winnerName }}</span
+						>
+					</p>
+				</sc-if>
+				<sc-if value="{{ isDraw }}" hint-placeholder-val="{{ false }}">
+					<p
+						style="
+							margin: 22px 0 0;
+							font-size: 24px;
+							font-weight: 600;
+							color: rgba(255, 255, 255, 0.7);
+						"
+					>
+						Победитель не определён
+					</p>
+				</sc-if>
+			</section>
 
-  <section style="padding:0 64px;margin-top:-6px">
-    <div style="display:grid;grid-template-columns:repeat({{ factionCols }},minmax(0,1fr));gap:20px">
-      <sc-for list="{{ factions }}" as="f" hint-placeholder-count="3">
-        <div style="position:relative;overflow:hidden;border-radius:20px;padding:26px 30px;background:#101011;border:1px solid {{ f.border }}">
-          <div style="position:absolute;left:0;top:0;bottom:0;width:6px;background:{{ f.color }}"></div>
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:20px">
-            <div style="min-width:0">
-              <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
-                <span style="font-size:30px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:300px">{{ f.name }}</span>
-                <sc-if value="{{ f.winner }}" hint-placeholder-val="{{ true }}">
-                  <span style="flex-shrink:0;padding:5px 14px;border-radius:999px;background:#ff7d00;color:#111;font-size:14px;font-weight:700;letter-spacing:.1em">ПОБЕДА</span>
-                </sc-if>
-              </div>
-              <p style="margin:0;font-size:17px;font-weight:500;color:rgba(255,255,255,.6)">Игроков на стороне: <span style="color:#fff;font-weight:600;font-variant-numeric:tabular-nums">{{ f.players }}</span></p>
-            </div>
-            <span style="font-size:68px;line-height:1;font-weight:700;font-variant-numeric:tabular-nums;background:linear-gradient(160deg,#ffe0b4 0%,#ff9f42 34%,#ff7d00 58%,#c25a00 74%,#ffca8c 100%);-webkit-background-clip:text;background-clip:text;color:transparent">{{ f.score }}</span>
-          </div>
-          <div style="margin-top:20px;height:8px;border-radius:999px;background:rgba(255,255,255,.08);overflow:hidden">
-            <div style="height:100%;width:{{ f.pct }};background:{{ f.color }}"></div>
-          </div>
-        </div>
-      </sc-for>
-    </div>
-    <sc-if value="{{ hasWinner }}" hint-placeholder-val="{{ true }}">
-      <p style="margin:22px 0 0;font-size:24px;font-weight:600;color:rgba(255,255,255,.7)">Победитель боя: <span style="font-size:30px;font-weight:700;background:linear-gradient(160deg,#ffe0b4 0%,#ff9f42 34%,#ff7d00 58%,#c25a00 74%,#ffca8c 100%);-webkit-background-clip:text;background-clip:text;color:transparent">{{ winnerName }}</span></p>
-    </sc-if>
-    <sc-if value="{{ isDraw }}" hint-placeholder-val="{{ false }}">
-      <p style="margin:22px 0 0;font-size:24px;font-weight:600;color:rgba(255,255,255,.7)">Победитель не определён</p>
-    </sc-if>
-  </section>
+			<sc-if value="{{ hasAwards }}" hint-placeholder-val="{{ true }}">
+				<section style="padding: 36px 64px 0">
+					<h2 style="margin: 0 0 18px; font-size: 30px; font-weight: 700; color: #fff">
+						Номинации
+					</h2>
+					<div
+						style="display:grid;grid-template-columns:repeat({{ awardCols }},minmax(0,1fr));gap:20px"
+					>
+						<sc-for list="{{ awards }}" as="a" hint-placeholder-count="3">
+							<div
+								style="
+									display: flex;
+									align-items: center;
+									justify-content: space-between;
+									gap: 20px;
+									padding: 24px 28px;
+									border-radius: 18px;
+									background: linear-gradient(90deg, #1c1c1e, #101011);
+									border: 1px solid #2b2b2b;
+								"
+							>
+								<div style="min-width: 0">
+									<p
+										style="
+											margin: 0 0 10px;
+											font-size: 15px;
+											font-weight: 600;
+											letter-spacing: 0.12em;
+											text-transform: uppercase;
+											color: #ff7d00;
+										"
+									>
+										{{ a.title }}
+									</p>
+									<p
+										style="
+											margin: 0 0 6px;
+											font-size: 28px;
+											font-weight: 700;
+											color: #fff;
+											white-space: nowrap;
+											overflow: hidden;
+											text-overflow: ellipsis;
+										"
+									>
+										{{ a.name }}
+									</p>
+									<p
+										style="
+											margin: 0;
+											font-size: 16px;
+											font-weight: 500;
+											color: rgba(255, 255, 255, 0.55);
+											white-space: nowrap;
+											overflow: hidden;
+											text-overflow: ellipsis;
+										"
+									>
+										{{ a.sub }}
+									</p>
+								</div>
+								<span
+									style="
+										flex-shrink: 0;
+										font-size: 48px;
+										line-height: 1;
+										font-weight: 700;
+										color: #fff;
+										font-variant-numeric: tabular-nums;
+									"
+									>{{ a.value }}</span
+								>
+							</div>
+						</sc-for>
+					</div>
+				</section>
+			</sc-if>
 
-  <sc-if value="{{ hasAwards }}" hint-placeholder-val="{{ true }}">
-  <section style="padding:36px 64px 0">
-    <h2 style="margin:0 0 18px;font-size:30px;font-weight:700;color:#fff">Номинации</h2>
-    <div style="display:grid;grid-template-columns:repeat({{ awardCols }},minmax(0,1fr));gap:20px">
-      <sc-for list="{{ awards }}" as="a" hint-placeholder-count="3">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:20px;padding:24px 28px;border-radius:18px;background:linear-gradient(90deg,#1c1c1e,#101011);border:1px solid #2b2b2b">
-          <div style="min-width:0">
-            <p style="margin:0 0 10px;font-size:15px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:#ff7d00">{{ a.title }}</p>
-            <p style="margin:0 0 6px;font-size:28px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ a.name }}</p>
-            <p style="margin:0;font-size:16px;font-weight:500;color:rgba(255,255,255,.55);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ a.sub }}</p>
-          </div>
-          <span style="flex-shrink:0;font-size:48px;line-height:1;font-weight:700;color:#fff;font-variant-numeric:tabular-nums">{{ a.value }}</span>
-        </div>
-      </sc-for>
-    </div>
-  </section>
-  </sc-if>
+			<section style="padding: 36px 64px 56px">
+				<div
+					style="
+						background: #0d0d0e;
+						border: 1px solid rgba(255, 255, 255, 0.08);
+						border-radius: 20px;
+						padding: 26px 28px 24px;
+					"
+				>
+					<div
+						style="
+							display: flex;
+							align-items: baseline;
+							justify-content: space-between;
+							gap: 16px;
+							margin-bottom: 20px;
+						"
+					>
+						<h2 style="margin: 0; font-size: 30px; font-weight: 700; color: #fff">Скорборд</h2>
+						<span style="font-size: 16px; font-weight: 500; color: rgba(255, 255, 255, 0.5)"
+							>{{ scoreboardNote }}</span
+						>
+					</div>
+					<div style="display:grid;grid-template-columns:{{ sbCols }};gap:20px">
+						<sc-for list="{{ columns }}" as="col" hint-placeholder-count="2">
+							<div>
+								<div
+									style="
+										display: grid;
+										grid-template-columns: 52px minmax(220px, 1.6fr) 150px 96px 96px 88px 120px;
+										gap: 10px;
+										padding: 0 16px 12px;
+										border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+									"
+								>
+									<span style="font-size: 15px; font-weight: 500; color: rgba(255, 255, 255, 0.45)"
+										>#</span
+									>
+									<span style="font-size: 15px; font-weight: 500; color: rgba(255, 255, 255, 0.45)"
+										>Игрок</span
+									>
+									<span style="font-size: 15px; font-weight: 500; color: rgba(255, 255, 255, 0.45)"
+										>Фракция</span
+									>
+									<span
+										style="
+											font-size: 15px;
+											font-weight: 500;
+											color: rgba(255, 255, 255, 0.45);
+											text-align: right;
+										"
+										>Убийства</span
+									>
+									<span
+										style="
+											font-size: 15px;
+											font-weight: 500;
+											color: rgba(255, 255, 255, 0.45);
+											text-align: right;
+										"
+										>Смерти</span
+									>
+									<span
+										style="
+											font-size: 15px;
+											font-weight: 500;
+											color: rgba(255, 255, 255, 0.45);
+											text-align: right;
+										"
+										>K/D</span
+									>
+									<span
+										style="
+											font-size: 15px;
+											font-weight: 500;
+											color: rgba(255, 255, 255, 0.45);
+											text-align: right;
+										"
+										>Кэш</span
+									>
+								</div>
+								<div style="display: flex; flex-direction: column; gap: 8px; margin-top: 12px">
+									<sc-for list="{{ col.rows }}" as="r" hint-placeholder-count="10">
+										<div
+											style="display:grid;grid-template-columns:52px minmax(220px,1.6fr) 150px 96px 96px 88px 120px;gap:10px;align-items:center;padding:13px 16px;border-radius:10px;background:{{ r.bg }};border:1px solid {{ r.border }}"
+										>
+											<span
+												style="font-size:20px;font-weight:600;color:{{ r.rankColor }};font-variant-numeric:tabular-nums"
+												>{{ r.rank }}</span
+											>
+											<div style="display: flex; align-items: center; gap: 10px; min-width: 0">
+												<span
+													style="
+														font-size: 20px;
+														font-weight: 600;
+														color: #fff;
+														white-space: nowrap;
+														overflow: hidden;
+														text-overflow: ellipsis;
+													"
+													>{{ r.name }}</span
+												>
+												<sc-if value="{{ r.newcomer }}" hint-placeholder-val="{{ false }}">
+													<span
+														style="
+															flex-shrink: 0;
+															padding: 3px 10px;
+															border-radius: 999px;
+															background: rgba(255, 125, 0, 0.16);
+															border: 1px solid rgba(255, 125, 0, 0.45);
+															color: #ff9500;
+															font-size: 13px;
+															font-weight: 600;
+															letter-spacing: 0.04em;
+														"
+														>новичок</span
+													>
+												</sc-if>
+											</div>
+											<div style="display: flex; align-items: center; gap: 8px; min-width: 0">
+												<span
+													style="width:8px;height:8px;border-radius:999px;flex-shrink:0;background:{{ r.factionColor }}"
+												></span>
+												<span
+													style="
+														font-size: 17px;
+														font-weight: 500;
+														color: rgba(255, 255, 255, 0.62);
+														white-space: nowrap;
+														overflow: hidden;
+														text-overflow: ellipsis;
+													"
+													>{{ r.faction }}</span
+												>
+											</div>
+											<span
+												style="
+													font-size: 20px;
+													font-weight: 700;
+													color: #fff;
+													text-align: right;
+													font-variant-numeric: tabular-nums;
+												"
+												>{{ r.kills }}</span
+											>
+											<span
+												style="
+													font-size: 20px;
+													font-weight: 500;
+													color: rgba(255, 255, 255, 0.72);
+													text-align: right;
+													font-variant-numeric: tabular-nums;
+												"
+												>{{ r.deaths }}</span
+											>
+											<span
+												style="
+													font-size: 20px;
+													font-weight: 600;
+													color: #fff;
+													text-align: right;
+													font-variant-numeric: tabular-nums;
+												"
+												>{{ r.kd }}</span
+											>
+											<span
+												style="
+													font-size: 20px;
+													font-weight: 600;
+													color: #ff9500;
+													text-align: right;
+													font-variant-numeric: tabular-nums;
+												"
+												>{{ r.cash }}</span
+											>
+										</div>
+									</sc-for>
+								</div>
+							</div>
+						</sc-for>
+					</div>
+				</div>
+			</section>
 
-  <section style="padding:36px 64px 56px">
-    <div style="background:#0d0d0e;border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:26px 28px 24px">
-      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin-bottom:20px">
-        <h2 style="margin:0;font-size:30px;font-weight:700;color:#fff">Скорборд</h2>
-        <span style="font-size:16px;font-weight:500;color:rgba(255,255,255,.5)">{{ scoreboardNote }}</span>
-      </div>
-      <div style="display:grid;grid-template-columns:{{ sbCols }};gap:20px">
-        <sc-for list="{{ columns }}" as="col" hint-placeholder-count="2">
-          <div>
-            <div style="display:grid;grid-template-columns:52px minmax(220px,1.6fr) 150px 96px 96px 88px 120px;gap:10px;padding:0 16px 12px;border-bottom:1px solid rgba(255,255,255,.1)">
-              <span style="font-size:15px;font-weight:500;color:rgba(255,255,255,.45)">#</span>
-              <span style="font-size:15px;font-weight:500;color:rgba(255,255,255,.45)">Игрок</span>
-              <span style="font-size:15px;font-weight:500;color:rgba(255,255,255,.45)">Фракция</span>
-              <span style="font-size:15px;font-weight:500;color:rgba(255,255,255,.45);text-align:right">Убийства</span>
-              <span style="font-size:15px;font-weight:500;color:rgba(255,255,255,.45);text-align:right">Смерти</span>
-              <span style="font-size:15px;font-weight:500;color:rgba(255,255,255,.45);text-align:right">K/D</span>
-              <span style="font-size:15px;font-weight:500;color:rgba(255,255,255,.45);text-align:right">Кэш</span>
-            </div>
-            <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px">
-              <sc-for list="{{ col.rows }}" as="r" hint-placeholder-count="10">
-                <div style="display:grid;grid-template-columns:52px minmax(220px,1.6fr) 150px 96px 96px 88px 120px;gap:10px;align-items:center;padding:13px 16px;border-radius:10px;background:{{ r.bg }};border:1px solid {{ r.border }}">
-                  <span style="font-size:20px;font-weight:600;color:{{ r.rankColor }};font-variant-numeric:tabular-nums">{{ r.rank }}</span>
-                  <div style="display:flex;align-items:center;gap:10px;min-width:0">
-                    <span style="font-size:20px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ r.name }}</span>
-                    <sc-if value="{{ r.newcomer }}" hint-placeholder-val="{{ false }}">
-                      <span style="flex-shrink:0;padding:3px 10px;border-radius:999px;background:rgba(255,125,0,.16);border:1px solid rgba(255,125,0,.45);color:#ff9500;font-size:13px;font-weight:600;letter-spacing:.04em">новичок</span>
-                    </sc-if>
-                  </div>
-                  <div style="display:flex;align-items:center;gap:8px;min-width:0">
-                    <span style="width:8px;height:8px;border-radius:999px;flex-shrink:0;background:{{ r.factionColor }}"></span>
-                    <span style="font-size:17px;font-weight:500;color:rgba(255,255,255,.62);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ r.faction }}</span>
-                  </div>
-                  <span style="font-size:20px;font-weight:700;color:#fff;text-align:right;font-variant-numeric:tabular-nums">{{ r.kills }}</span>
-                  <span style="font-size:20px;font-weight:500;color:rgba(255,255,255,.72);text-align:right;font-variant-numeric:tabular-nums">{{ r.deaths }}</span>
-                  <span style="font-size:20px;font-weight:600;color:#fff;text-align:right;font-variant-numeric:tabular-nums">{{ r.kd }}</span>
-                  <span style="font-size:20px;font-weight:600;color:#ff9500;text-align:right;font-variant-numeric:tabular-nums">{{ r.cash }}</span>
-                </div>
-              </sc-for>
-            </div>
-          </div>
-        </sc-for>
-      </div>
-    </div>
-  </section>
-
-  <footer style="display:flex;align-items:center;justify-content:space-between;gap:32px;padding:26px 64px 34px;border-top:1px solid rgba(255,255,255,.08);background:#000">
-    <span style="font-size:18px;font-weight:500;color:rgba(255,255,255,.5)">{{ footerLine }}</span>
-    <img src="asset:logo-zaruba.png" alt="ZARUBA SERVER" style="height:76px;width:auto;display:block">
-  </footer>
-
-</div>
-</body>
+			<footer
+				style="
+					display: flex;
+					align-items: center;
+					justify-content: space-between;
+					gap: 32px;
+					padding: 26px 64px 34px;
+					border-top: 1px solid rgba(255, 255, 255, 0.08);
+					background: #000;
+				"
+			>
+				<span style="font-size: 18px; font-weight: 500; color: rgba(255, 255, 255, 0.5)"
+					>{{ footerLine }}</span
+				>
+				<img
+					src="asset:logo-zaruba.png"
+					alt="ZARUBA SERVER"
+					style="height: 76px; width: auto; display: block"
+				/>
+			</footer>
+		</div>
+	</body>
 </html>

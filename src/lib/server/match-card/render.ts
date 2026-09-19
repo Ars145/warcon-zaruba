@@ -57,8 +57,7 @@ export function resetTemplateCache(): void {
 const escapeHtml = (s: string): string =>
 	s.replace(
 		/[&<>"']/g,
-		(c) =>
-			({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string
+		(c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string
 	);
 
 type Scope = Record<string, unknown>;

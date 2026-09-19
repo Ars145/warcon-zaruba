@@ -454,8 +454,7 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 	// Keep the outgoing scoreboard before the new one lands on top of it: a boundary is only
 	// visible once the next match is already being reported, and the card describes the one
 	// that ended. Faction colours come from here too — the stored match carries none.
-	if (m.players.length && m.status)
-		m.lastLook = { players: m.players, scores: m.status.scores };
+	if (m.players.length && m.status) m.lastLook = { players: m.players, scores: m.status.scores };
 	m.failures = 0;
 	m.holdUntil = 0;
 	m.ok = true;
@@ -632,9 +631,7 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 	if (look) {
 		let closed: number | null = null;
 		await stage('match', m, async () => {
-			closed = await withOwnedTransaction(env, (tx) =>
-				reconcileMatch(tx, m, ts, look, matchEnd)
-			);
+			closed = await withOwnedTransaction(env, (tx) => reconcileMatch(tx, m, ts, look, matchEnd));
 		});
 		// Drawing and sending the card takes seconds; the observation must not wait for it, and
 		// only the process that closed the row reports it, so one match is one card.
