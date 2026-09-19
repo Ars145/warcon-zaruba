@@ -37,7 +37,7 @@ import {
 	type Observed
 } from './lists-sync';
 import type { RefusedBan } from './lists-plan';
-import { reportMatch } from './match-card';
+import { keepFinalLook, reportMatch, type FinalLook } from './match-card';
 import {
 	closeAllSessions,
 	diffPresence,
@@ -94,12 +94,11 @@ export interface ServerMemory {
 	/** the previous look at the match (map, scores, clock); null until one is remembered */
 	lastMatch: MatchLook | null;
 	/**
-	 * The scoreboard and faction colours as they stood before this observation: what the match
-	 * result card reports. By the time a boundary is seen the live ones already belong to the
-	 * next match, its counters reset. Players and status are polled on their own cadences
-	 * (2 s and 5 s by default), so this trails the true end of the match by a few seconds.
+	 * The scoreboard of the match in progress, as the match result card will report it: the last
+	 * look that still had kills on it, kept through the end-of-match screen (see keepFinalLook).
+	 * Cleared when a boundary consumes it.
 	 */
-	lastLook: { players: Player[]; scores: FactionScore[] } | null;
+	lastLook: FinalLook | null;
 	reserved: Set<string>;
 	/** bans the lists want here that the game refused (the player was not on): applied on sight */
 	refusedBans: Map<string, RefusedBan>;
@@ -451,10 +450,6 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 	// Any failure may have been a restart onto a new build: re-read the identity on recovery.
 	const hadFailed = m.failures > 0;
 	const prevPlayersAt = m.playersAt;
-	// Keep the outgoing scoreboard before the new one lands on top of it: a boundary is only
-	// visible once the next match is already being reported, and the card describes the one
-	// that ended. Faction colours come from here too — the stored match carries none.
-	if (m.players.length && m.status) m.lastLook = { players: m.players, scores: m.status.scores };
 	m.failures = 0;
 	m.holdUntil = 0;
 	m.ok = true;
@@ -468,6 +463,9 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 	if (players) {
 		m.players = players;
 		m.playersAt = started;
+		// What the match result card will report, held back from the end-of-match screen's nought
+		// scoreboard. Faction colours come from here too: the stored match carries none.
+		if (m.status) m.lastLook = keepFinalLook(m.lastLook, players, m.status.scores);
 	}
 	m.tier = tierOf(m, started);
 	// The match boundary is read from memory before anything is written, so the rules and the
@@ -636,10 +634,14 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 		// Drawing and sending the card takes seconds; the observation must not wait for it, and
 		// only the process that closed the row reports it, so one match is one card.
 		const before = m.lastLook;
-		if (closed !== null && before && isOwner())
-			void stage('match card', m, () =>
-				reportMatch(env, server.id, closed as number, before, m.status?.maxPlayers ?? 0)
-			);
+		if (closed !== null) {
+			// The match it described is over; the next one starts its own memory.
+			m.lastLook = null;
+			if (before && isOwner())
+				void stage('match card', m, () =>
+					reportMatch(env, server.id, closed as number, before, m.status?.maxPlayers ?? 0)
+				);
+		}
 	}
 	if (isOwner()) await stage('lists', m, () => keepLists(env, m, client, started, ts));
 	if (diff.joined.length && steamEnabled(env))
