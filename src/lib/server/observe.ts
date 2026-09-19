@@ -37,6 +37,7 @@ import {
 	type Observed
 } from './lists-sync';
 import type { RefusedBan } from './lists-plan';
+import { reportMatch } from './match-card';
 import {
 	closeAllSessions,
 	diffPresence,
@@ -628,10 +629,21 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 	const seen = players?.map((p) => p.steamId) ?? [];
 	if (isOwner() && seen.length && m.refusedBans.size)
 		await stage('bans', m, () => banOnSight(env, server, m.org, client, seen, m.refusedBans));
-	if (look)
-		await stage('match', m, () =>
-			withOwnedTransaction(env, (tx) => reconcileMatch(tx, m, ts, look, matchEnd))
-		);
+	if (look) {
+		let closed: number | null = null;
+		await stage('match', m, async () => {
+			closed = await withOwnedTransaction(env, (tx) =>
+				reconcileMatch(tx, m, ts, look, matchEnd)
+			);
+		});
+		// Drawing and sending the card takes seconds; the observation must not wait for it, and
+		// only the process that closed the row reports it, so one match is one card.
+		const before = m.lastLook;
+		if (closed !== null && before && isOwner())
+			void stage('match card', m, () =>
+				reportMatch(env, server.id, closed as number, before, m.status?.maxPlayers ?? 0)
+			);
+	}
 	if (isOwner()) await stage('lists', m, () => keepLists(env, m, client, started, ts));
 	if (diff.joined.length && steamEnabled(env))
 		void getProfiles(
@@ -777,7 +789,7 @@ async function reconcileMatch(
 	ts: Date,
 	look: MatchLook,
 	ended: MatchEnd | null
-): Promise<void> {
+): Promise<number | null> {
 	const serverId = m.server.id;
 	const [current] = await db
 		.select({ id: matches.id, map: matches.map, peakPlayers: matches.peakPlayers })
@@ -815,4 +827,6 @@ async function reconcileMatch(
 			.set({ peakPlayers: m.status!.playerCount })
 			.where(eq(matches.id, current.id));
 	}
+	// The row that was just closed, for whoever reports the result.
+	return current && end ? current.id : null;
 }

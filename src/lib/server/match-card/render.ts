@@ -270,7 +270,10 @@ export async function closeCardBrowser(): Promise<void> {
 }
 
 /** Photographs the card. Throws if Chromium is missing or the page never settles. */
-export async function renderMatchCard(card: MatchResultCard, rowLimit?: number): Promise<Buffer> {
+export async function renderMatchCard(
+	card: MatchResultCard,
+	rowLimit?: number
+): Promise<Uint8Array<ArrayBuffer>> {
 	const html = cardHtml(card, rowLimit);
 	const page = await (await getBrowser()).newPage();
 	try {
@@ -279,7 +282,7 @@ export async function renderMatchCard(card: MatchResultCard, rowLimit?: number):
 		await page.evaluateHandle('document.fonts.ready');
 		const el = await page.$('#card');
 		if (!el) throw new Error('the match card template has no #card element');
-		return (await el.screenshot({ type: 'png' })) as Buffer;
+		return new Uint8Array(await el.screenshot({ type: 'png' }));
 	} finally {
 		await page.close().catch(() => {});
 	}
