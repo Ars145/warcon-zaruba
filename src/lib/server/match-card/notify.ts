@@ -5,34 +5,12 @@
 // webhook that asked for match results.
 import type { Env } from '../env';
 import type { WebhookRow } from '../db/schema';
-import {
-	discordCall,
-	enabledWebhooks,
-	orgOfServer,
-	recordResult,
-	type Embed
-} from '../webhook-delivery';
+import { discordCall, enabledWebhooks, orgOfServer, recordResult } from '../webhook-delivery';
 import type { MatchResultCard } from './data';
 
-const MATCH_COLOR = 0xff7d00;
-
-/** The caption under the image: everything the picture already says, for search and for phones. */
-export function buildMatchEmbed(appName: string, card: MatchResultCard, fileName: string): Embed {
-	const scores = card.factions.map((f) => `${f.name} ${f.score}`).join(' · ');
-	const lines = [
-		`**${card.match.mapName}** · ${card.match.mode}`,
-		card.winner ? `Победитель: **${card.winner}**` : 'Победитель не определён',
-		scores
-	].filter(Boolean);
-	return {
-		title: `Итоги боя · ${card.serverName}`,
-		description: lines.join('\n').slice(0, 2000),
-		color: MATCH_COLOR,
-		timestamp: card.endedAt,
-		image: { url: `attachment://${fileName}` },
-		footer: { text: appName }
-	};
-}
+/** The file name carries the map and the hour; nothing else names this message. */
+export const cardFileName = (card: MatchResultCard): string =>
+	`match-${card.match.mapId || 'result'}-${card.endedAt.slice(0, 19).replace(/[:T-]/g, '')}.png`;
 
 function wants(hook: WebhookRow, serverId: string): boolean {
 	if (!((hook.events as string[]) || []).includes('matches')) return false;
@@ -56,18 +34,18 @@ export async function notifyMatchResult(
 		const hooks = (await enabledWebhooks(env, orgId)).filter((h) => wants(h, serverId));
 		if (!hooks.length) return 0;
 
-		const fileName = `match-${card.match.mapId || 'result'}-${card.endedAt.slice(0, 19).replace(/[:T]/g, '')}.png`;
-		const embed = buildMatchEmbed(env.APP_NAME || 'Warcon', card, fileName);
+		const fileName = cardFileName(card);
 		let sent = 0;
 		for (const hook of hooks) {
+			// The picture alone: no content, no embed. An embed would only repeat what the card
+			// already says, and it renders the image at thumbnail width instead of full.
 			// One FormData per webhook: a body can only be read once.
 			const form = new FormData();
 			form.append(
 				'payload_json',
 				JSON.stringify({
 					username: env.APP_NAME || 'Warcon',
-					allowed_mentions: { parse: [] },
-					embeds: [embed]
+					allowed_mentions: { parse: [] }
 				})
 			);
 			form.append('files[0]', new Blob([png], { type: 'image/png' }), fileName);
