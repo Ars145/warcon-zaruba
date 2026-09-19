@@ -17,7 +17,8 @@ export const WEBHOOK_EVENTS = [
 	'players',
 	'management',
 	'auth',
-	'teamkills'
+	'teamkills',
+	'matches'
 ] as const;
 export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number];
 export const WEBHOOK_EVENT_LABELS: Record<WebhookEvent, string> = {
@@ -27,7 +28,8 @@ export const WEBHOOK_EVENT_LABELS: Record<WebhookEvent, string> = {
 	players: 'Player notes and watchlist changes',
 	management: 'Servers, members, invite links, accounts',
 	auth: 'Sign-ins and sign-in failures',
-	teamkills: 'Team kills (from the kill feed)'
+	teamkills: 'Team kills (from the kill feed)',
+	matches: 'Match results (a card drawn when a match ends)'
 };
 
 /** Which event class an audit row belongs to. */
@@ -64,7 +66,7 @@ export function invalidateWebhookCache(orgId?: string): void {
 	else orgWebhooks.clear();
 }
 
-async function enabledWebhooks(env: Env, orgId: string): Promise<WebhookRow[]> {
+export async function enabledWebhooks(env: Env, orgId: string): Promise<WebhookRow[]> {
 	const hit = orgWebhooks.get(orgId);
 	if (hit && hit.until > Date.now()) return hit.rows;
 	const rows = await env.db
@@ -75,7 +77,7 @@ async function enabledWebhooks(env: Env, orgId: string): Promise<WebhookRow[]> {
 	return rows;
 }
 
-async function orgOfServer(env: Env, serverId: string): Promise<string | null> {
+export async function orgOfServer(env: Env, serverId: string): Promise<string | null> {
 	const hit = serverOrg.get(serverId);
 	if (hit && hit.until > Date.now()) return hit.orgId;
 	const [row] = await env.db
@@ -288,12 +290,12 @@ const UNKNOWN_MESSAGE = 10008;
  * for edits and deletes). The URL is the credential, so it is decrypted here and nowhere else.
  * Never throws.
  */
-async function discordCall(
+export async function discordCall(
 	env: Env,
 	hook: Pick<WebhookRow, 'urlEnc'>,
 	method: 'POST' | 'PATCH' | 'DELETE',
 	path: string,
-	body?: Record<string, unknown>
+	body?: Record<string, unknown> | FormData
 ): Promise<PostResult> {
 	let url: string;
 	try {
@@ -302,11 +304,14 @@ async function discordCall(
 		return { ok: false, status: 0, error: err instanceof Error ? err.message : String(err) };
 	}
 	try {
+		// FormData carries an attachment; fetch writes its own multipart content-type, boundary
+		// and all, so neither header nor serialisation is ours to set.
+		const multipart = body instanceof FormData;
 		const res = await fetch(url + path, {
 			method,
-			headers: body ? { 'content-type': 'application/json' } : undefined,
-			body: body ? JSON.stringify(body) : undefined,
-			signal: AbortSignal.timeout(10_000)
+			headers: body && !multipart ? { 'content-type': 'application/json' } : undefined,
+			body: multipart ? body : body ? JSON.stringify(body) : undefined,
+			signal: AbortSignal.timeout(multipart ? 30_000 : 10_000)
 		});
 		if (res.status === 429) {
 			const data = (await res.json().catch(() => ({}))) as { retry_after?: number };

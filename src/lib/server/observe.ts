@@ -37,6 +37,7 @@ import {
 	type Observed
 } from './lists-sync';
 import type { RefusedBan } from './lists-plan';
+import { reportMatch } from './match-card';
 import {
 	closeAllSessions,
 	diffPresence,
@@ -55,7 +56,7 @@ import { liveView, writeLive } from './live';
 import { observations, observationSeconds } from './metrics';
 import { nextDue, withHold } from './poller-schedule';
 import { cashByFaction } from '$lib/cash';
-import type { Features, LiveView, Player, Status } from '$lib/types';
+import type { FactionScore, Features, LiveView, Player, Status } from '$lib/types';
 
 export type Tier = LiveView['tier'];
 
@@ -92,6 +93,13 @@ export interface ServerMemory {
 	presence: Presence;
 	/** the previous look at the match (map, scores, clock); null until one is remembered */
 	lastMatch: MatchLook | null;
+	/**
+	 * The scoreboard and faction colours as they stood before this observation: what the match
+	 * result card reports. By the time a boundary is seen the live ones already belong to the
+	 * next match, its counters reset. Players and status are polled on their own cadences
+	 * (2 s and 5 s by default), so this trails the true end of the match by a few seconds.
+	 */
+	lastLook: { players: Player[]; scores: FactionScore[] } | null;
 	reserved: Set<string>;
 	/** bans the lists want here that the game refused (the player was not on): applied on sight */
 	refusedBans: Map<string, RefusedBan>;
@@ -157,6 +165,7 @@ export function memoryFor(server: ServerRow, org: OrgRow): ServerMemory {
 			playersAt: 0,
 			presence: newPresence(),
 			lastMatch: null,
+			lastLook: null,
 			reserved: new Set(),
 			refusedBans: new Map(),
 			listsAt: 0,
@@ -442,6 +451,10 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 	// Any failure may have been a restart onto a new build: re-read the identity on recovery.
 	const hadFailed = m.failures > 0;
 	const prevPlayersAt = m.playersAt;
+	// Keep the outgoing scoreboard before the new one lands on top of it: a boundary is only
+	// visible once the next match is already being reported, and the card describes the one
+	// that ended. Faction colours come from here too — the stored match carries none.
+	if (m.players.length && m.status) m.lastLook = { players: m.players, scores: m.status.scores };
 	m.failures = 0;
 	m.holdUntil = 0;
 	m.ok = true;
@@ -615,10 +628,19 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 	const seen = players?.map((p) => p.steamId) ?? [];
 	if (isOwner() && seen.length && m.refusedBans.size)
 		await stage('bans', m, () => banOnSight(env, server, m.org, client, seen, m.refusedBans));
-	if (look)
-		await stage('match', m, () =>
-			withOwnedTransaction(env, (tx) => reconcileMatch(tx, m, ts, look, matchEnd))
-		);
+	if (look) {
+		let closed: number | null = null;
+		await stage('match', m, async () => {
+			closed = await withOwnedTransaction(env, (tx) => reconcileMatch(tx, m, ts, look, matchEnd));
+		});
+		// Drawing and sending the card takes seconds; the observation must not wait for it, and
+		// only the process that closed the row reports it, so one match is one card.
+		const before = m.lastLook;
+		if (closed !== null && before && isOwner())
+			void stage('match card', m, () =>
+				reportMatch(env, server.id, closed as number, before, m.status?.maxPlayers ?? 0)
+			);
+	}
 	if (isOwner()) await stage('lists', m, () => keepLists(env, m, client, started, ts));
 	if (diff.joined.length && steamEnabled(env))
 		void getProfiles(
@@ -764,7 +786,7 @@ async function reconcileMatch(
 	ts: Date,
 	look: MatchLook,
 	ended: MatchEnd | null
-): Promise<void> {
+): Promise<number | null> {
 	const serverId = m.server.id;
 	const [current] = await db
 		.select({ id: matches.id, map: matches.map, peakPlayers: matches.peakPlayers })
@@ -802,4 +824,6 @@ async function reconcileMatch(
 			.set({ peakPlayers: m.status!.playerCount })
 			.where(eq(matches.id, current.id));
 	}
+	// The row that was just closed, for whoever reports the result.
+	return current && end ? current.id : null;
 }

@@ -8,7 +8,14 @@ RUN bun run build
 
 FROM oven/bun:1-slim
 WORKDIR /app
-ENV NODE_ENV=production PORT=3000 HOST=0.0.0.0
+ENV NODE_ENV=production PORT=3000 HOST=0.0.0.0 CHROMIUM_PATH=/usr/bin/chromium
+# The worker photographs the match result card in Chromium. The image carries no fonts of its
+# own, and 6% of the names seen in a week are CJK, dingbats or emoji, so the Noto families are
+# not optional: without them those names render as empty boxes.
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends \
+		chromium fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji \
+	&& rm -rf /var/lib/apt/lists/*
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production && rm -rf ~/.bun/install/cache
 COPY --from=build /app/build ./build
