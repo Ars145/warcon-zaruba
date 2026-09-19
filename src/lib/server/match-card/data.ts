@@ -19,6 +19,33 @@ import type { FactionScore, Player } from '$lib/types';
 /** A player good enough to win "best K/D": fewer kills than this and the ratio is noise. */
 export const TOP_KD_MIN_KILLS = 10;
 
+/** The scoreboard and the faction colours as they stood while a match was still being played. */
+export interface FinalLook {
+	players: Player[];
+	scores: FactionScore[];
+}
+
+const totalKills = (players: Player[]): number => players.reduce((n, p) => n + p.kills, 0);
+
+/**
+ * Which look to remember as the result of the match now in progress.
+ *
+ * The per-player scoreboard resets when the end-of-match screen appears, tens of seconds before
+ * the map changes and the status says the match is over — everyone shows nought and sits on the
+ * neutral `White` side until the next match starts. So a list with no kills in it at all is that
+ * screen, not a result, and the one before it stands. A player leaving never empties the board,
+ * and a genuinely new match starts from a cleared memory, so both keep updating normally.
+ */
+export function keepFinalLook(
+	stored: FinalLook | null,
+	players: Player[],
+	scores: FactionScore[]
+): FinalLook | null {
+	if (!players.length) return stored;
+	if (stored && totalKills(players) === 0 && totalKills(stored.players) > 0) return stored;
+	return { players, scores };
+}
+
 export interface CardHero {
 	steamId: string;
 	name: string;

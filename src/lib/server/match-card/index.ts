@@ -5,7 +5,7 @@ import { buildMatchCard } from './data';
 import { renderMatchCard } from './render';
 import { notifyMatchResult } from './notify';
 
-export { buildMatchCard, type MatchResultCard } from './data';
+export { buildMatchCard, keepFinalLook, type FinalLook, type MatchResultCard } from './data';
 export { renderMatchCard, cardHtml, closeCardBrowser } from './render';
 export { notifyMatchResult } from './notify';
 

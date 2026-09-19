@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'bun:test';
-import { buildAwards, buildFactions, buildScoreboard, kdOf, TOP_KD_MIN_KILLS } from './data';
+import {
+	buildAwards,
+	buildFactions,
+	buildScoreboard,
+	kdOf,
+	keepFinalLook,
+	TOP_KD_MIN_KILLS
+} from './data';
 import { cardHtml, renderVals } from './render';
 import type { MatchResultCard } from './data';
 import type { Player } from '$lib/types';
@@ -21,6 +28,42 @@ describe('kdOf', () => {
 	});
 	it('rounds to two decimals', () => {
 		expect(kdOf(7, 3)).toBe(2.33);
+	});
+});
+
+describe('keepFinalLook', () => {
+	const scores = [{ name: 'Manticore', colorHex: '#1DD65C', score: 100 }];
+	const played = [
+		player({ name: 'BR', steamId: '1', faction: 'Manticore', kills: 44, deaths: 5 }),
+		player({ name: 'Tomato', steamId: '2', faction: 'Valkyra', kills: 30, deaths: 6 })
+	];
+	// What /v1/players answers while the end-of-match screen is up: everyone neutral, all nought.
+	const endScreen = played.map((p) => ({ ...p, faction: 'White', kills: 0, deaths: 0, cash: 0 }));
+
+	it('holds the played scoreboard through the end-of-match screen', () => {
+		const stored = keepFinalLook(null, played, scores);
+		expect(keepFinalLook(stored, endScreen, scores)).toBe(stored);
+		// the screen lasts tens of seconds: every look in it must be refused, not just the first
+		expect(keepFinalLook(keepFinalLook(stored, endScreen, scores), endScreen, scores)).toBe(stored);
+	});
+
+	it('takes the new match once its memory has been cleared', () => {
+		const fresh = keepFinalLook(null, endScreen, scores);
+		expect(fresh?.players[0].kills).toBe(0);
+		const going = keepFinalLook(fresh, played, scores);
+		expect(going?.players[0].kills).toBe(44);
+	});
+
+	it('follows an ordinary update, including a player leaving', () => {
+		const stored = keepFinalLook(null, played, scores);
+		const oneLeft = keepFinalLook(stored, [played[1]], scores);
+		expect(oneLeft?.players).toHaveLength(1);
+		expect(oneLeft?.players[0].name).toBe('Tomato');
+	});
+
+	it('keeps what it has when the server empties', () => {
+		const stored = keepFinalLook(null, played, scores);
+		expect(keepFinalLook(stored, [], scores)).toBe(stored);
 	});
 });
 
