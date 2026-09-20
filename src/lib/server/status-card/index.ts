@@ -9,18 +9,16 @@ import type { LiveView } from '$lib/types';
 import { discordCall, type PostResult } from '../webhook-delivery';
 import { buildStatusCard, statusCardKey } from './data';
 import { banner, renderStatusCard } from './render';
-import { bannerUrlOf, statusFiles, statusPayload } from './message';
+import { statusFiles, statusPayload } from './message';
 
 export { buildStatusCard, statusCardKey, TOP_ROWS } from './data';
 export { renderStatusCard, statusHtml, statusVals } from './render';
-export { statusPayload, statusFiles, bannerUrlOf, COMPONENTS_V2 } from './message';
+export { statusPayload, statusFiles, COMPONENTS_V2 } from './message';
 
 /** What one live message needs remembered between passes, keyed by webhook id and server id. */
 interface Held {
 	key: string;
 	pictures: { scores: Uint8Array<ArrayBuffer>; top: Uint8Array<ArrayBuffer> };
-	/** the banner's url in the message as it stands, so an edit need not re-upload it */
-	bannerUrl: string | null;
 }
 const held = new Map<string, Held>();
 
@@ -51,11 +49,10 @@ export async function statusCardFor(
 	const key = statusCardKey(card);
 	const before = held.get(cacheKey);
 	const pictures = before && before.key === key ? before.pictures : await renderStatusCard(card);
-	const bannerUrl = before?.bannerUrl ?? null;
-	held.set(cacheKey, { key, pictures, bannerUrl });
-	const { files, attachments } = statusFiles(pictures, bannerUrl ? null : banner());
+	held.set(cacheKey, { key, pictures });
+	const { files, attachments } = statusFiles(pictures, banner());
 	return {
-		payload: { ...statusPayload(card, { bannerUrl }), attachments },
+		payload: { ...statusPayload(card), attachments },
 		key,
 		files,
 		attachments,
@@ -84,12 +81,7 @@ export async function sendStatusCard(
 	const path = messageId
 		? `/messages/${encodeURIComponent(messageId)}?with_components=true`
 		: '?wait=true&with_components=true';
-	const result = await discordCall(env, hook, messageId ? 'PATCH' : 'POST', path, form);
-	// Under Components V2 the banner is not an attachment of the message, it is the gallery's
-	// first item; carrying its url forward is what keeps the next edit from uploading it again.
-	const entry = held.get(shot.cacheKey);
-	if (entry) entry.bannerUrl = result.ok ? bannerUrlOf(result.message) : null;
-	return result;
+	return discordCall(env, hook, messageId ? 'PATCH' : 'POST', path, form);
 }
 
 /** Test-only, and for a server whose card was taken down. */

@@ -53,7 +53,7 @@ const card: StatusCard = {
 };
 
 const { scores, top } = await renderStatusCard(card);
-writeFileSync('status-scores.png', scores);
-writeFileSync('status-top.png', top);
-console.log(`status-scores.png: ${scores.length} bytes, status-top.png: ${top.length} bytes`);
+writeFileSync('status-scores.webp', scores);
+writeFileSync('status-top.webp', top);
+console.log(`status-scores.webp: ${scores.length} bytes, status-top.webp: ${top.length} bytes`);
 await closeCardBrowser();
