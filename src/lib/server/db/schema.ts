@@ -659,7 +659,7 @@ export const webhooks = pgTable(
 		/** keep a live status message per covered server, edited in place; see webhook-status.ts */
 		statusEnabled: boolean('status_enabled').notNull().default(false),
 		/** how the cards look; see $lib/status-styles */
-		statusStyle: text('status_style', { enum: ['banner', 'compact', 'scoreboard'] })
+		statusStyle: text('status_style', { enum: ['banner', 'compact', 'scoreboard', 'card'] })
 			.notNull()
 			.default('banner'),
 		/** seconds between edits of one card (30-300); the per-server spacing applies on top */

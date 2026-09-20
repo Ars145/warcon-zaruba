@@ -17,7 +17,7 @@ const CARD_WIDTH = 1920;
  * Where template.html and its fonts live: beside the built client in a container, in static/
  * while developing. Set MATCH_CARD_ASSETS to override.
  */
-function assetsDir(): string {
+export function assetsDir(): string {
 	const candidates = [
 		process.env.MATCH_CARD_ASSETS,
 		join(process.cwd(), 'build', 'client', 'match-card'),
@@ -33,25 +33,30 @@ const MIME: Record<string, string> = {
 	webp: 'image/webp'
 };
 
-let templateCache: string | null = null;
+const templateCache = new Map<string, string>();
 
-/** The template with every `asset:name` replaced by the file itself, read once. */
-function template(): string {
-	if (templateCache) return templateCache;
+/**
+ * The named template with every `asset:name` replaced by the file itself, read once. The status
+ * card's own document lives in the same directory so that both share one set of fonts.
+ */
+export function template(file = 'template.html'): string {
+	const cached = templateCache.get(file);
+	if (cached) return cached;
 	const dir = assetsDir();
-	const raw = readFileSync(join(dir, 'template.html'), 'utf8');
-	templateCache = raw.replace(/asset:([\w.-]+)/g, (_, name: string) => {
+	const raw = readFileSync(join(dir, file), 'utf8');
+	const filled = raw.replace(/asset:([\w.-]+)/g, (_, name: string) => {
 		const ext = name.split('.').pop() ?? '';
 		const mime = MIME[ext];
 		if (!mime) throw new Error(`match card asset ${name} has no known MIME type`);
 		return `data:${mime};base64,${readFileSync(join(dir, name)).toString('base64')}`;
 	});
-	return templateCache;
+	templateCache.set(file, filled);
+	return filled;
 }
 
-/** Test seam: drop the memoised template (and let a test point at its own directory). */
+/** Test seam: drop the memoised templates (and let a test point at its own directory). */
 export function resetTemplateCache(): void {
-	templateCache = null;
+	templateCache.clear();
 }
 
 const escapeHtml = (s: string): string =>
@@ -69,7 +74,7 @@ const lookup = (scope: Scope, path: string): unknown =>
  * Fills one template fragment against a scope. `sc-for` and `sc-if` are matched with their own
  * closing tag by counting nested opens, so a list of cards inside a list of columns still pairs up.
  */
-function fill(tpl: string, scope: Scope): string {
+export function fill(tpl: string, scope: Scope): string {
 	let out = '';
 	let i = 0;
 	while (i < tpl.length) {
@@ -268,21 +273,37 @@ export async function closeCardBrowser(): Promise<void> {
 	if (b) await b.close().catch(() => {});
 }
 
+/**
+ * Photographs one element per selector on a single page. Throws if Chromium is missing, the page
+ * never settles, or a selector matches nothing — a card with a piece missing is worse than none.
+ */
+export async function shoot(
+	html: string,
+	selectors: string[],
+	width: number
+): Promise<Uint8Array<ArrayBuffer>[]> {
+	const page = await (await getBrowser()).newPage();
+	try {
+		await page.setViewport({ width, height: 1080, deviceScaleFactor: 1 });
+		await page.setContent(html, { waitUntil: 'load', timeout: 20_000 });
+		await page.evaluateHandle('document.fonts.ready');
+		const shots: Uint8Array<ArrayBuffer>[] = [];
+		for (const selector of selectors) {
+			const el = await page.$(selector);
+			if (!el) throw new Error(`the card template has no ${selector} element`);
+			shots.push(new Uint8Array(await el.screenshot({ type: 'png' })));
+		}
+		return shots;
+	} finally {
+		await page.close().catch(() => {});
+	}
+}
+
 /** Photographs the card. Throws if Chromium is missing or the page never settles. */
 export async function renderMatchCard(
 	card: MatchResultCard,
 	rowLimit?: number
 ): Promise<Uint8Array<ArrayBuffer>> {
-	const html = cardHtml(card, rowLimit);
-	const page = await (await getBrowser()).newPage();
-	try {
-		await page.setViewport({ width: CARD_WIDTH, height: 1080, deviceScaleFactor: 1 });
-		await page.setContent(html, { waitUntil: 'load', timeout: 20_000 });
-		await page.evaluateHandle('document.fonts.ready');
-		const el = await page.$('#card');
-		if (!el) throw new Error('the match card template has no #card element');
-		return new Uint8Array(await el.screenshot({ type: 'png' }));
-	} finally {
-		await page.close().catch(() => {});
-	}
+	const [png] = await shoot(cardHtml(card, rowLimit), ['#card'], CARD_WIDTH);
+	return png;
 }

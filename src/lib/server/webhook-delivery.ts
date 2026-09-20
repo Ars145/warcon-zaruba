@@ -279,6 +279,8 @@ export interface PostResult {
 	retryAfterMs?: number;
 	/** the id of the message Discord created or edited */
 	messageId?: string;
+	/** the message Discord answered with; the status card reads its media urls back out */
+	message?: unknown;
 	/** Discord no longer has the message we tried to edit or delete (someone removed it) */
 	unknownMessage?: boolean;
 }
@@ -340,11 +342,13 @@ export async function discordCall(
 			};
 		}
 		let messageId: string | undefined;
+		let message: unknown;
 		if (res.status !== 204) {
 			const data = (await res.json().catch(() => ({}))) as { id?: unknown };
 			if (typeof data.id === 'string') messageId = data.id;
+			message = data;
 		}
-		return { ok: true, status: res.status, error: '', messageId };
+		return { ok: true, status: res.status, error: '', messageId, message };
 	} catch (err) {
 		return {
 			ok: false,
