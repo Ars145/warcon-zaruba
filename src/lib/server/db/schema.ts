@@ -574,6 +574,12 @@ export const steamProfiles = pgTable('steam_profiles', {
 	daysSinceLastBan: integer('days_since_last_ban'),
 	communityBanned: boolean('community_banned').notNull().default(false),
 	economyBan: text('economy_ban').notNull().default('none'),
+	/** unknown, public, private, or partial (only the first 200 friends checked) */
+	friendsState: text('friends_state').notNull().default('unknown'),
+	friendsTotal: integer('friends_total').notNull().default(0),
+	friendsChecked: integer('friends_checked').notNull().default(0),
+	bannedFriends: integer('banned_friends').notNull().default(0),
+	friendsCheckedAt: ts('friends_checked_at'),
 	fetchedAt: ts('fetched_at').notNull().defaultNow(),
 	error: text('error').notNull().default('')
 });
@@ -614,6 +620,7 @@ export const triggers = pgTable(
 				'broadcast',
 				'empty_reset',
 				'risk_kick',
+				'ping_kick',
 				'restart_notice',
 				'team_kill',
 				'seed_reward',

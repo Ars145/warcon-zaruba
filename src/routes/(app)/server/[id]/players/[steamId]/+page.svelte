@@ -543,8 +543,8 @@
 				<p class="text-[13px] text-mist-400">Nothing stands out.</p>
 			{/if}
 			<p class="note">
-				Advisory only, from the Steam Web API, this organisation's ban lists and the watchlist. It
-				cannot see aim, position or input.
+				Advisory only, from the Steam Web API, recorded game stats, this organisation's ban lists
+				and the watchlist. It cannot see aim, position or input.
 				{#if !d.steamEnabled}<span class="text-warn"
 						>Steam lookup is off (set STEAM_API_KEY), so account age and VAC status are unknown.</span
 					>{/if}
@@ -583,6 +583,15 @@
 				<div class="kv">
 					<span class="text-mist-400">Game bans</span>
 					<span class={d.steam.gameBans ? 'text-danger' : ''}>{d.steam.gameBans}</span>
+				</div>
+				<div class="kv">
+					<span class="text-mist-400">Steam friends</span>
+					<span>
+						{#if d.steam.friendsState === 'private'}private list
+						{:else if d.steam.friendsState === 'unknown'}unavailable
+						{:else}{d.steam.bannedFriends} banned among {d.steam.friendsChecked} checked{#if d.steam.friendsState === 'partial'}
+								of {d.steam.friendsTotal}{/if}{/if}
+					</span>
 				</div>
 				{#if d.steam.communityBanned || d.steam.economyBan !== 'none'}
 					<div class="kv">

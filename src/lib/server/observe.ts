@@ -21,6 +21,7 @@ import {
 	evaluateTriggers,
 	invalidateTriggers,
 	needsRiskInputs,
+	needsRiskPerformance,
 	riskInputs,
 	matchBoundary,
 	seedRule,
@@ -508,8 +509,8 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 	const rows = m.status ? await enabledTriggers(env, server.id) : [];
 	const risk =
 		joined.length && needsRiskInputs(rows)
-			? await riskInputs(env, server, joined)
-			: { signals: new Map(), profiles: new Map() };
+			? await riskInputs(env, server, joined, needsRiskPerformance(rows))
+			: { signals: new Map(), profiles: new Map(), performance: new Map() };
 
 	// Seed time: while a seeding rule is on and the server is at or under its threshold, everyone
 	// still on earns the time since the previous look at the list (on the same terms as a join is
@@ -560,6 +561,8 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 						server,
 						status: m.status,
 						players: m.players,
+						playersObserved: players !== null,
+						playersIntervalMs: m.playersIntervalMs,
 						joined,
 						factioned,
 						firstVisit,
@@ -571,6 +574,7 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 								: new Map([...m.presence.open.values()].map((s) => [s.steamId, s.seedMs])),
 						signals: risk.signals,
 						profiles: risk.profiles,
+						performance: risk.performance,
 						startedAt: m.startedAt,
 						matchEnd,
 						ts
@@ -615,6 +619,9 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 		// Nothing was committed, but the presence map may have moved: reload it next time so the
 		// joins are seen (and their triggers evaluated) again.
 		m.presence = newPresence();
+		// A ping rule advances its cached streak before the transaction. Reload the persisted state
+		// after a failed write so a failed enqueue cannot suppress its eventual kick.
+		invalidateTriggers(server.id);
 		if (err instanceof LostOwnership) throw err;
 		console.warn(`[warcon] observation of ${server.name} not saved:`, publicMessage(err));
 	}

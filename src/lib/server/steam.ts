@@ -1,8 +1,8 @@
 // Steam Web API lookups (persona, avatar, account age, VAC and game bans), cached in the
 // steam_profiles table. One key for the whole panel (STEAM_API_KEY); nothing is fetched without it.
-import { inArray, sql } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import type { Env } from './env';
-import { ApiError, str } from './http';
+import { ApiError, forLog, str } from './http';
 import { steamProfiles, type SteamProfileRow } from './db/schema';
 
 export type { SteamProfileRow };
@@ -11,6 +11,31 @@ export type { SteamProfileRow };
 export const STEAM_MAX_AGE_MS = 24 * 3600_000;
 const CHUNK = 100;
 const BACKOFF_MS = 60_000;
+const FRIEND_LIMIT = 200;
+const FRIEND_WORKERS = 8;
+const FRIEND_UNKNOWN_RETRY_MS = 3600_000;
+/** a friends list moves slowly, and each look costs up to three calls that cannot be batched */
+const FRIEND_MAX_AGE_MS = 7 * 24 * 3600_000;
+/**
+ * The most friends-list calls in a day. Steam allows a key 100,000 calls a day, and the profile
+ * and ban lookups the kick rules depend on come first.
+ */
+const FRIEND_DAILY_CALLS = 20_000;
+let friendDay = 0;
+let friendCalls = 0;
+const friendBudget = (calls: number): boolean => {
+	const day = Math.floor(Date.now() / (24 * 3600_000));
+	if (day !== friendDay) [friendDay, friendCalls] = [day, 0];
+	if (friendCalls + calls > FRIEND_DAILY_CALLS) return false;
+	friendCalls += calls;
+	return true;
+};
+const friendInFlight = new Set<string>();
+
+const friendsStale = (row: SteamProfileRow, now: number): boolean =>
+	!row.friendsCheckedAt ||
+	now - row.friendsCheckedAt.getTime() >=
+		(row.friendsState === 'unknown' ? FRIEND_UNKNOWN_RETRY_MS : FRIEND_MAX_AGE_MS);
 
 export const steamEnabled = (env: Pick<Env, 'STEAM_API_KEY'>): boolean => !!env.STEAM_API_KEY;
 export const isSteamId = (v: unknown): v is string => typeof v === 'string' && /^\d{17}$/.test(v);
@@ -42,6 +67,105 @@ interface BanJson {
 	DaysSinceLastBan?: number;
 	NumberOfGameBans?: number;
 	EconomyBan?: string;
+}
+
+type FriendState = 'unknown' | 'public' | 'private' | 'partial';
+interface FriendEvidence {
+	state: FriendState;
+	total: number;
+	checked: number;
+	banned: number;
+}
+
+/** A private friends list is a documented 401, not a broken Steam key. Other failures are unknown. */
+async function friendEvidence(key: string, steamId: string): Promise<FriendEvidence> {
+	const unknown: FriendEvidence = { state: 'unknown', total: 0, checked: 0, banned: 0 };
+	if (Date.now() < backoffUntil) return unknown;
+	try {
+		const url = `https://api.steampowered.com/ISteamUser/GetFriendList/v1/?key=${encodeURIComponent(key)}&steamid=${steamId}&relationship=friend`;
+		const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
+		if (response.status === 401) return { ...unknown, state: 'private' };
+		if (response.status === 429 || response.status >= 500) backoffUntil = Date.now() + BACKOFF_MS;
+		if (!response.ok) return unknown;
+		const body = (await response.json()) as {
+			friendslist?: { friends?: { steamid: string }[] };
+		};
+		if (!body.friendslist) return unknown;
+		const friends = [
+			...new Set((body.friendslist.friends ?? []).map((f) => f.steamid).filter(isSteamId))
+		];
+		const sample = friends.slice(0, FRIEND_LIMIT);
+		let banned = 0;
+		for (let i = 0; i < sample.length; i += CHUNK) {
+			const bans = await steamGet<{ players?: BanJson[] }>(
+				'ISteamUser/GetPlayerBans/v1/',
+				key,
+				sample.slice(i, i + CHUNK)
+			);
+			banned += (bans.players ?? []).filter(
+				(p) => (p.NumberOfVACBans ?? 0) > 0 || (p.NumberOfGameBans ?? 0) > 0
+			).length;
+		}
+		return {
+			state: sample.length < friends.length ? 'partial' : 'public',
+			total: friends.length,
+			checked: sample.length,
+			banned
+		};
+	} catch {
+		return unknown;
+	}
+}
+
+async function refreshFriendEvidence(
+	env: Env,
+	rows: SteamProfileRow[]
+): Promise<SteamProfileRow[]> {
+	const out = [...rows];
+	const todo = rows
+		.map((row, i) => ({ row, i }))
+		.filter(
+			({ row }) => !row.error && !friendInFlight.has(row.steamId) && friendsStale(row, Date.now())
+		);
+	for (const { row } of todo) friendInFlight.add(row.steamId);
+	let next = 0;
+	await Promise.all(
+		Array.from({ length: Math.min(FRIEND_WORKERS, todo.length) }, async () => {
+			while (next < todo.length) {
+				const { row, i } = todo[next++];
+				try {
+					// Out of budget: left as it is, without a write, for a later day.
+					if (!friendBudget(1 + FRIEND_LIMIT / CHUNK)) continue;
+					const evidence = await friendEvidence(env.STEAM_API_KEY!, row.steamId);
+					if (evidence.state === 'unknown') {
+						if (row.friendsState === 'unknown')
+							await env.db
+								.update(steamProfiles)
+								.set({ friendsCheckedAt: new Date() })
+								.where(eq(steamProfiles.steamId, row.steamId));
+						continue;
+					}
+					const [updated] = await env.db
+						.update(steamProfiles)
+						.set({
+							friendsState: evidence.state,
+							friendsTotal: evidence.total,
+							friendsChecked: evidence.checked,
+							bannedFriends: evidence.banned,
+							friendsCheckedAt: new Date()
+						})
+						.where(eq(steamProfiles.steamId, row.steamId))
+						.returning();
+					if (updated) out[i] = updated;
+				} catch (err) {
+					console.warn('[warcon] Steam friends cache', forLog(err));
+				} finally {
+					friendInFlight.delete(row.steamId);
+				}
+			}
+		})
+	);
+	return out;
 }
 
 async function steamGet<T>(path: string, key: string, ids: string[]): Promise<T> {
@@ -158,7 +282,7 @@ export async function cachedProfiles(
 export async function getProfiles(
 	env: Env,
 	ids: string[],
-	opts: { refresh?: boolean; maxAgeMs?: number } = {}
+	opts: { refresh?: boolean; maxAgeMs?: number; awaitFriends?: boolean } = {}
 ): Promise<Map<string, SteamProfileRow>> {
 	const unique = [...new Set(ids.filter(isSteamId))];
 	const map = new Map<string, SteamProfileRow>();
@@ -183,12 +307,18 @@ export async function getProfiles(
 		const row = map.get(id);
 		return opts.refresh || !row || row.fetchedAt.getTime() < cutoff;
 	});
-	if (!stale.length) return map;
-	try {
-		for (const row of await fetchSteam(env, stale)) map.set(row.steamId, row);
-	} catch (err) {
-		if (opts.refresh) throw err;
-		console.warn('[warcon] steam lookup', err instanceof Error ? err.message : err);
-	}
+	if (stale.length)
+		try {
+			for (const row of await fetchSteam(env, stale)) map.set(row.steamId, row);
+		} catch (err) {
+			if (opts.refresh) throw err;
+			console.warn('[warcon] steam lookup', err instanceof Error ? err.message : err);
+		}
+	// The friends lists are looked at behind the answer, so nothing that reads a profile waits on
+	// a call per player; only a refresh someone asked for waits for them.
+	const rows = [...map.values()];
+	if (opts.awaitFriends)
+		for (const row of await refreshFriendEvidence(env, rows)) map.set(row.steamId, row);
+	else void refreshFriendEvidence(env, rows).catch(() => {});
 	return map;
 }
