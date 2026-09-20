@@ -12,11 +12,11 @@ import type { StatusCard } from '../src/lib/server/status-card/data';
 const card: StatusCard = {
 	serverName: 'ZARUBA WARDOGS #1',
 	orgName: 'Zaruba',
-	mapId: 'Europe',
+
 	mapName: 'Ozeti',
 	mode: 'King of the Hill',
 	lighting: 'DayLateGray',
-	zone: 'Eastern',
+	zone: 'ZoneAlternator.Ozeti.River.Circle',
 	online: 78,
 	maxPlayers: 98,
 	reservedSlots: 2,

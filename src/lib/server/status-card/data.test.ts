@@ -16,10 +16,11 @@ const player = (p: Partial<Player> & { name: string }): Player => ({
 
 const status = (over: Partial<Status> = {}): Status => ({
 	serverName: '★ ZARUBA ★',
-	map: 'Europe',
+	// the status reports the display name, not the art folder: verified on the live server
+	map: 'Ozeti',
 	experiences: ['Ozeti_KOTH_01'],
 	lighting: 'DayLateGray',
-	alternator: 'Eastern',
+	alternator: 'ZoneAlternator.Ozeti.River.Circle',
 	scoreTick: 20,
 	scoreTickMin: null,
 	scoreTickMax: null,
@@ -75,9 +76,8 @@ describe('buildStatusCard', () => {
 		expect(c.factions[1].leading).toBe(false);
 	});
 
-	it('uses the panel map name, not the folder', () => {
+	it('takes the map name the status already reports', () => {
 		expect(card().mapName).toBe('Ozeti');
-		expect(card().mapId).toBe('Europe');
 	});
 
 	it('leads nobody while the board is still at nought', () => {
@@ -143,6 +143,18 @@ describe('statusPayload', () => {
 		expect(p.content).toBeUndefined();
 		expect(p.embeds).toBeUndefined();
 		expect((p.components as Array<{ type: number }>)[0].type).toBe(17);
+	});
+
+	it('gives each picture a gallery of its own, or Discord tiles them into a grid', () => {
+		const inner = (
+			statusPayload(card(), { bannerUrl: null }).components as Array<{
+				components: Array<{ type: number; items?: unknown[] }>;
+			}>
+		)[0].components;
+		const galleries = inner.filter((c) => c.type === 12);
+		expect(galleries).toHaveLength(3);
+		expect(galleries.every((g) => g.items?.length === 1)).toBe(true);
+		expect(inner.slice(0, 3).every((c) => c.type === 12)).toBe(true);
 	});
 
 	it('names the banner as an upload until it has a url to be carried by', () => {
@@ -223,7 +235,7 @@ describe('statusVals', () => {
 			rows: Array<{ faction: string; topClass: string }>;
 		};
 		expect(v.modeLine).toBe('King of the Hill · 78/98');
-		expect(v.scoresFoot).toBe('до 100 очков · DayLateGray · Eastern');
+		expect(v.scoresFoot).toBe('до 100 очков · DayLateGray · Ozeti River Circle');
 		expect(v.rows[0].faction).toBe('без стороны');
 		expect(v.rows[0].topClass).toBe('top');
 	});
