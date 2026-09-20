@@ -3,6 +3,7 @@ import { apiJson, param, readJson, route } from '$lib/server/http';
 import { requireListsRole } from '$lib/server/access';
 import { parseKind, removeEntry, updateEntry } from '$lib/server/lists';
 
+/** Changes the reason or the expiry of an entry on the org's list. */
 export const PATCH = route(async (event) => {
 	const env = getEnv();
 	const kind = parseKind(param(event, 'kind'));
@@ -12,6 +13,7 @@ export const PATCH = route(async (event) => {
 		event.request,
 		user,
 		org,
+		null,
 		kind,
 		param(event, 'steamId'),
 		await readJson(event.request)

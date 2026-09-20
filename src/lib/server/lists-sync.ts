@@ -11,6 +11,7 @@
 // one process from interleaving.
 import { and, eq, gt, inArray, isNotNull, isNull, lte, notInArray, or, sql } from 'drizzle-orm';
 import type { Env } from './env';
+import { renderBanMessage } from '$lib/ban-message';
 import { publicMessage } from './http';
 import { writeAudit } from './audit';
 import { ACTIONS } from './actions';
@@ -105,7 +106,7 @@ export async function withServerLock<T>(
 export async function desiredFor(
 	env: Env,
 	server: Pick<ServerRow, 'id' | 'orgId'>,
-	org: Pick<OrgRow, 'membersReserved'>,
+	org: Pick<OrgRow, 'membersReserved' | 'banMessage'>,
 	now = new Date()
 ): Promise<PlanInput['desired']> {
 	const rows = await env.db
@@ -114,8 +115,18 @@ export async function desiredFor(
 		.innerJoin(lists, eq(lists.id, serverLists.listId))
 		.innerJoin(listEntries, eq(listEntries.listId, lists.id))
 		.where(and(eq(serverLists.serverId, server.id), isNull(listEntries.removedAt)));
+	// A ban goes to the game as the org's ban message, not the bare reason. Only the adds read it:
+	// a ban already on the server keeps the text it was placed with.
 	const active = activeEntries(
-		rows.map((r) => ({ ...r.e, kind: r.kind, serverId: r.listServerId })),
+		rows.map((r) => ({
+			...r.e,
+			kind: r.kind,
+			serverId: r.listServerId,
+			reason:
+				r.kind === 'ban'
+					? renderBanMessage(org.banMessage, { ...r.e, entryId: r.e.id })
+					: r.e.reason
+		})),
 		now
 	);
 	const { bans, reserved } = desiredOf(active);
@@ -843,18 +854,14 @@ export async function fanOut(env: Env, org: OrgRow): Promise<ListSyncSummary> {
 			return Promise.race([work, timer]);
 		})
 	);
-	return {
-		servers: results.map(
-			({ serverId, serverName, ok, added, removed, failed, pending, error }) => ({
-				serverId,
-				serverName,
-				ok,
-				added,
-				removed,
-				failed,
-				pending,
-				error
-			})
-		)
-	};
+	return { servers: results.map(summaryOf) };
+}
+
+/**
+ * What an API answer says of a sync: where it landed, in counts. The rest of a SyncResult is the
+ * worker's own (the server's lists, and the refused bans with their reasons) and never leaves.
+ */
+export function summaryOf(r: SyncResult): ListSyncServer {
+	const { serverId, serverName, ok, added, removed, failed, pending, error } = r;
+	return { serverId, serverName, ok, added, removed, failed, pending, error };
 }

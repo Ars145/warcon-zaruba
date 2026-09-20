@@ -274,7 +274,7 @@ check reserve-expiry-add '"expiresAt"' "$(req $J1 POST /api/orgs/$ORG/lists/rese
 check reserve-expiry-applied '76561198100000702' "$(req $J1 GET /api/servers/$SID/rcon/reserved)"
 # PATCH: a slot given out permanently can be put on a term afterwards (and back)
 req $J1 POST /api/orgs/$ORG/lists/reserve/entries '{"steamId":"76561198100000703","reason":"donor"}' >/dev/null
-check patch-no-field 'expiresAt is required' "$(req $J1 PATCH /api/orgs/$ORG/lists/reserve/entries/76561198100000703 '{}')"
+check patch-no-field 'Nothing to change' "$(req $J1 PATCH /api/orgs/$ORG/lists/reserve/entries/76561198100000703 '{}')"
 check patch-past 'future' "$(req $J1 PATCH /api/orgs/$ORG/lists/reserve/entries/76561198100000703 '{"expiresAt":"2020-01-01T00:00:00Z"}')"
 check patch-unknown 'not on the' "$(req $J1 PATCH /api/orgs/$ORG/lists/reserve/entries/76561198100000704 "{\"expiresAt\":\"$EXP\"}")"
 check patch-set "${EXP%Z}" "$(req $J1 PATCH /api/orgs/$ORG/lists/reserve/entries/76561198100000703 "{\"expiresAt\":\"$EXP\"}")"
