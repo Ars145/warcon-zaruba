@@ -35,16 +35,14 @@ export interface MessagePieces {
 const ago = (epochSeconds: number): string => `<t:${epochSeconds}:R>`;
 
 export function statusPayload(card: StatusCard, pieces: MessagePieces): Record<string, unknown> {
+	// One gallery per picture, not one gallery of three: Discord tiles a gallery's items into a
+	// grid, which puts the banner down the left at full height and squeezes the other two into
+	// thumbnails beside it. A gallery holding a single item draws it across the whole message.
 	const body: Array<Record<string, unknown>> = [
-		{
-			type: MEDIA_GALLERY,
-			items: [
-				{ media: { url: pieces.bannerUrl ?? `attachment://${BANNER_FILE}` } },
-				{ media: { url: `attachment://${SCORES_FILE}` } },
-				{ media: { url: `attachment://${TOP_FILE}` } }
-			]
-		}
-	];
+		pieces.bannerUrl ?? `attachment://${BANNER_FILE}`,
+		`attachment://${SCORES_FILE}`,
+		`attachment://${TOP_FILE}`
+	].map((url) => ({ type: MEDIA_GALLERY, items: [{ media: { url } }] }));
 	if (card.joinCode)
 		body.push({
 			type: TEXT_DISPLAY,
@@ -90,6 +88,7 @@ export function statusFiles(
 export function bannerUrlOf(message: unknown): string | null {
 	const container = (message as { components?: Array<{ components?: unknown[] }> })
 		?.components?.[0];
+	// The banner is the first gallery's only item; the scores and the top follow in their own.
 	const gallery = container?.components?.[0] as
 		{ items?: Array<{ media?: { url?: string } }> } | undefined;
 	return gallery?.items?.[0]?.media?.url ?? null;

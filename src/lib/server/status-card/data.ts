@@ -7,7 +7,7 @@
 // Two figures the game does not give us on live builds: there is no match clock (`matchSeconds`
 // is always null) and no score cap (`scoreCap` likewise), so the card shows neither a timer nor a
 // "first to" read from the server — the cap is the game's constant from $lib/match.
-import { MAP_DISPLAY } from '$lib/format';
+import { zoneLabel } from '$lib/format';
 import { scoreCapOf } from '$lib/match';
 import { modeLabel } from '../webhook-status-core';
 import type { LiveView, Player } from '$lib/types';
@@ -37,8 +37,7 @@ export interface StatusFaction {
 export interface StatusCard {
 	serverName: string;
 	orgName: string;
-	/** the art folder's spelling, for the footer */
-	mapId: string;
+	/** as the status reports it, which is already the display name (Ozeti, not Europe) */
 	mapName: string;
 	mode: string;
 	lighting: string;
@@ -110,11 +109,11 @@ export function buildStatusCard(
 	return {
 		serverName,
 		orgName,
-		mapId: s.map,
-		mapName: MAP_DISPLAY[s.map] ?? s.map,
+		mapName: s.map,
 		mode: modeLabel(s.experiences),
 		lighting: s.lighting,
-		zone: s.alternator,
+		// `ZoneAlternator.Ozeti.River.Circle` as the game sends it is not a caption.
+		zone: zoneLabel(s.alternator),
 		online: s.playerCount,
 		maxPlayers: s.maxPlayers,
 		reservedSlots: live.reservedSlots,
