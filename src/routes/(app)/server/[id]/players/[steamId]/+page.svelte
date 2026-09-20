@@ -13,7 +13,7 @@
 	import { describeSync, STATE_TONE } from '$lib/lists';
 	import SortHeader from '$lib/components/SortHeader.svelte';
 	import { TableSort } from '$lib/table.svelte';
-	import type { DossierView, ListSyncSummary } from '$lib/types';
+	import type { DossierView, ListSyncServer, ListSyncSummary } from '$lib/types';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -126,6 +126,23 @@
 		}, '');
 	}
 
+	// A ban goes on the server's own list, so the panel keeps the reason and who placed it.
+	async function banHere() {
+		const sure = await confirmDialog(`Ban ${d.name} (${d.steamId}) on ${data.server.name}?`, {
+			okLabel: 'Do it',
+			danger: true
+		});
+		if (!sure) return;
+		await run(async () => {
+			const res = await api<{ sync: ListSyncServer }>(
+				'POST',
+				`/api/servers/${encodeURIComponent(id)}/lists/ban/entries`,
+				{ steamId: d.steamId, reason: reason.trim() }
+			);
+			toast(describeSync({ servers: [res.sync] }, `Banned ${d.name}.`), 'ok', 8000);
+		}, '');
+	}
+
 	const minutes = (m: number) => (m >= 90 ? `${(m / 60).toFixed(1)} h` : `${m} min`);
 	const kd = (k: number, dd: number) => (dd ? (k / dd).toFixed(2) : k ? `${k}.00` : '—');
 	const RISK_TONE = { low: 'ok', medium: 'warn', high: 'err' } as const;
@@ -141,8 +158,6 @@
 		'player.watch': 'watchlist'
 	};
 </script>
-
-<svelte:head><title>{d.name} · {data.server.name} · {data.appName}</title></svelte:head>
 
 <div class="mb-4 flex flex-wrap items-center gap-3">
 	<div class="min-w-0">
@@ -428,16 +443,7 @@
 							act('kick', { steamId: d.steamId, reason: reason.trim() }, `Kick ${d.name}?`)}
 						>Kick</button
 					>
-					<button
-						class="btn btn-danger"
-						disabled={busy || !bans}
-						onclick={() =>
-							act(
-								'ban',
-								{ steamId: d.steamId, reason: reason.trim() },
-								`Ban ${d.name} (${d.steamId})? This persists in the server's config.`
-							)}>Ban</button
-					>
+					<button class="btn btn-danger" disabled={busy || !bans} onclick={banHere}>Ban</button>
 				</div>
 			</div>
 		{/if}

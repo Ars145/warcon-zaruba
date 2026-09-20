@@ -2,11 +2,13 @@
 	// Ban a player: across the whole organisation (the org ban list, pushed to every server) or on
 	// one server only. Used from the org ban list page, the players page and the dossier.
 	import { untrack } from 'svelte';
-	import { api, rconPost, errorMessage } from '$lib/api';
+	import { page } from '$app/state';
+	import { api, errorMessage } from '$lib/api';
 	import { toast } from '$lib/toast.svelte';
+	import { DEFAULT_BAN_MESSAGE, renderBanMessage } from '$lib/ban-message';
 	import { describeSync, EXPIRY_OPTIONS, expiryIso, REASON_PRESETS } from '$lib/lists';
 	import { isSteamId, steamProfiles, type SteamProfile } from '$lib/steam-profiles';
-	import type { ListSyncSummary } from '$lib/types';
+	import type { ListSyncServer, ListSyncSummary } from '$lib/types';
 	import Modal from './Modal.svelte';
 	import SteamName from './SteamName.svelte';
 
@@ -17,6 +19,7 @@
 		name = '',
 		server = null,
 		canOrg,
+		banMessage = null,
 		onclose,
 		ondone
 	}: {
@@ -29,6 +32,8 @@
 		server?: { id: string; name: string } | null;
 		/** may the user write to the org list? */
 		canOrg: boolean;
+		/** the org's ban message, where the page has it: the dialog then shows the text it makes */
+		banMessage?: string | null;
 		onclose: () => void;
 		ondone: (scope: 'org' | 'server') => unknown;
 	} = $props();
@@ -40,6 +45,20 @@
 	let custom = $state('');
 	let scope = $state<'org' | 'server'>(untrack(() => (canOrg ? 'org' : 'server')));
 	let busy = $state(false);
+
+	// What the player will be shown, once the org wraps the reason in more than the reason. The
+	// uid comes from the entry, which does not exist yet.
+	let shown = $derived.by(() => {
+		if (!banMessage || banMessage === DEFAULT_BAN_MESSAGE) return '';
+		const until = expiryIso(expiry, custom);
+		return renderBanMessage(banMessage.replace(/\{uid\}/gi, 'B-······'), {
+			entryId: '',
+			reason: reason.trim(),
+			addedByName: page.data.user?.username ?? '',
+			addedAt: new Date(),
+			expiresAt: until ? new Date(until) : null
+		});
+	});
 
 	let who = $derived(name ? `${name} (${steamId})` : steamId || 'a player');
 	// A typed id is looked up so the admin sees who they are about to ban.
@@ -53,7 +72,6 @@
 			if (previewId === want && want in r) preview = r[want];
 		});
 	});
-	let orgOnly = $derived(!server);
 
 	async function submit() {
 		const target = id.trim();
@@ -71,11 +89,19 @@
 				);
 				toast(describeSync(res.sync, `Banned ${target} across ${orgName}.`), 'ok', 8000);
 			} else if (server) {
-				const res = await rconPost<{ message?: string }>(server.id, 'ban', {
-					steamId: target,
-					reason: reason.trim()
-				});
-				toast(res?.message || `Banned ${target} on ${server.name}.`, 'ok');
+				const res = await api<{ sync: ListSyncServer }>(
+					'POST',
+					`/api/servers/${encodeURIComponent(server.id)}/lists/ban/entries`,
+					{ steamId: target, reason: reason.trim(), expiresAt: expiryIso(expiry, custom) }
+				);
+				// The game only bans a connected player; the list keeps the ban for when they join.
+				toast(
+					res.sync.ok && res.sync.failed
+						? `${target} is not on ${server.name} right now: they are banned the moment they join.`
+						: describeSync({ servers: [res.sync] }, `Banned ${target} on ${server.name}.`),
+					'ok',
+					8000
+				);
 			}
 			await ondone(scope);
 			onclose();
@@ -132,13 +158,17 @@
 					<span
 						><b>{server.name} only</b>
 						<span class="block text-[12.5px] text-mist-400"
-							>Written to this server's config; the panel does not manage it.</span
+							>Goes on this server's own ban list. If the player is not connected, they are banned
+							the moment they join.</span
 						></span
 					>
 				</label>
 			</fieldset>
 		{:else if server}
-			<p class="note">Written to {server.name}'s config.</p>
+			<p class="note">
+				Goes on {server.name}'s own ban list. If the player is not connected, they are banned the
+				moment they join.
+			</p>
 		{/if}
 
 		<label class="block"
@@ -160,25 +190,35 @@
 			{/each}
 		</div>
 
-		{#if scope === 'org' || orgOnly}
-			<div class="flex flex-wrap gap-3">
-				<label class="block sm:w-48"
-					><span class="field-label">Expires</span><select class="input" bind:value={expiry}>
-						{#each EXPIRY_OPTIONS as [value, label] (value)}
-							<option {value}>{label}</option>
-						{/each}
-					</select></label
+		<div class="flex flex-wrap gap-3">
+			<label class="block sm:w-48"
+				><span class="field-label">Expires</span><select class="input" bind:value={expiry}>
+					{#each EXPIRY_OPTIONS as [value, label] (value)}
+						<option {value}>{label}</option>
+					{/each}
+				</select></label
+			>
+			{#if expiry === 'custom'}
+				<label class="block sm:flex-1"
+					><span class="field-label">Until (local time)</span><input
+						class="input"
+						type="datetime-local"
+						bind:value={custom}
+						required
+					/></label
 				>
-				{#if expiry === 'custom'}
-					<label class="block sm:flex-1"
-						><span class="field-label">Until (local time)</span><input
-							class="input"
-							type="datetime-local"
-							bind:value={custom}
-							required
-						/></label
-					>
-				{/if}
+			{/if}
+		</div>
+
+		{#if shown}
+			<div>
+				<span class="field-label">The player is shown</span>
+				<div
+					class="rounded-ctl border border-black bg-ink-950 px-3.5 py-2.5 font-mono text-[12.5px] leading-relaxed break-words"
+				>
+					{shown}
+				</div>
+				<p class="note">From {orgName}'s ban message.</p>
 			</div>
 		{/if}
 

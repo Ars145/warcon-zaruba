@@ -43,6 +43,10 @@ What is in the box:
   happening: every second or two while someone has it open or people are on it, every half
   minute when it is empty. Pages get each observation as it happens over an event stream, and a
   command you send shows its effect on the next look. Browsers never talk to a game server.
+- **Past players**: the Players tab switches between who is on now and everyone who has played on
+  that server, searched by name, alias or SteamID64, with when they were last on, their sessions
+  and playtime. Anyone who can open the server can look; a row's Ban (for people who hold _Bans_)
+  lands the moment the player next joins, and Watch needs _Notes_.
 - **Analytics**: the worker keeps what the game does not: players online over time, cash in play
   per faction, uptime, time per map, busiest hours, player playtime and sessions, match history
   with results. Samples are written when something changes plus a heartbeat, and every figure is
@@ -399,10 +403,27 @@ roster marks these _here_. The organisation's Reserved
 slots tab has the same shape across every server: the roster with who is playing where, how far
 the list has been applied on each server, and the form that hands out a slot everywhere. Ban a player from the
 Players tab or a dossier and choose _every server in the organisation_ (the default, when you may
-edit the org list) or _this server only_. Org owners and
-anyone whose role on one of the org's servers includes _Org lists_ can edit the org lists, and
-_Reserved slots_ on a server covers its own list; a ban can carry a reason and
-an expiry, a reserved slot a note and an expiry.
+edit the org list) or _this server only_. A ban on this server only goes on a ban list of the
+server's own, marked _here_ on its Bans tab with the reason, who placed it and when it lifts. The
+game only bans a player who is connected, so a ban on someone who is away waits on the list
+(_on sight_) and is placed the moment they join. Select a ban the panel holds and choose **Edit**
+to change its reason or expiry; who placed it and when stay as they are. Org owners and
+anyone whose role on one of the org's servers includes _Org lists_ can edit the org lists;
+_Bans_ on a server covers its own ban list and _Reserved slots_ its own slots. A ban can carry a
+reason and an expiry, a reserved slot a note and an expiry. Everyone who can open the server sees who is banned, why and until when, so
+write a reason as something the player could be told; who placed a ban is shown to people who hold
+_Bans_ on the server or may edit the org lists.
+
+An org owner can set a **ban message** on the Ban list tab: the text a banned player is shown,
+built from the reason and facts about the ban, for example
+`{reason} | Expires {expires} | Appeal: discord.gg/yours | {uid}`. The placeholders are `{reason}`,
+`{duration}` (`Perm`, `7d`, `36h`), `{expires}` and `{banned}` (UTC, `never` for a permanent ban),
+`{uid}` (a short id shown in the ban list's ID column and found by its filter) and `{admin}` (the
+name of whoever placed the ban: the game shows its ban list to everyone who can open the server,
+so use it only if that name may be public). The message applies to org bans and to bans on one
+server's own list, from the moment it is saved; the list keeps the bare reason, and a ban already
+on a server keeps the text it was placed with, also when its reason or expiry is edited later.
+The default, `{reason}`, sends the reason alone.
 
 Each entry shows where it stands on every server: **applied** by the panel, **pending** the next
 sync, **failed** (hover for the server's answer), or **local**. Local means the player was already
@@ -448,7 +469,7 @@ The **Automation** tab on each server holds rules the poller evaluates on every 
 create them; every action they take is in the audit trail under the `trigger` category with the
 rule that fired, and can be mirrored to Discord. A rule acts with nobody at the controls, so
 saving or dry-running one needs, besides _Automation_, the capability for what it does: _Chat_ for
-the rules that message players, _Match control_ for the map reset, _Kick, kill, move_ for the two
+the rules that message players, _Match control_ for the map reset, _Kick, kill, move_ for the three
 that kick, and for the Seeding reward _Reserved slots_ or _Org lists_ (see its row). A custom role
 or API key with _Automation_ alone can read the rules and delete them.
 
@@ -458,6 +479,7 @@ or API key with _Automation_ alone can read the rules and delete them.
 | Scheduled broadcast    | Rotates through a list of messages every N minutes while at least M players are on, and optionally only until a ceiling, so a fill-the-server message stops once it has.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | Empty-server map reset | After the server has been empty for N minutes on a different map or mode, sets the chosen map as next and ends the match (or requests it directly when there is no rotation).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | Kick on connect risk   | Kicks joiners who match rules: VAC ban, game ban, Steam account younger than N days (optionally private profiles too), banned on another server in the org, or on the watchlist; or whose advisory risk score is high (or medium or worse), as the players table shows it. Reserved-slot players can be spared.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Name filter            | Kicks joiners whose name breaks the rule, or with _Alert only_ just records them (audit trail and Discord). A character policy: any, Latin letters (keeps José and Müller, optionally with Cyrillic, Greek, Arabic, Hebrew, Thai, Devanagari, Chinese, Japanese or Korean beside them) or ASCII only; digits, spaces and keyboard punctuation always pass, emoji and symbols only when allowed, and a name can be required to hold N letters. Blocked words: a built-in English list of slurs and hate terms, your own words (up to 200) and exceptions for names that would match but are fine. Words are caught through case, leetspeak, look-alike letters, stretching and spelling out (`n.a.z.i`). The kick reason takes `{why}` `{name}` `{server}`; `{why}` says what kind of fault it was, never the word. Reserved-slot players can be spared. Checked at the join, so a mid-session rename is caught on the next. Its dry run checks everyone who has played on the server, under each name they used.         |
 | Team kill limit        | Whispers a player from N team kills in their current session, and kicks them at M. Needs the [kill feed](#kill-feed); acted on as each kill arrives, not per poll.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | Match broadcast        | Announces the result when a match ends and the map as the next one starts, either message optional, with at least N players on. A match ends when the map changes or the faction scores fall back to zero (a faction reached the cap, or an admin ended the round; live builds send no score cap or match clock, so Warcon assumes the game's default of 100), so `{faction}` is whoever led at that moment, tied factions named together. Placeholders `{faction}` `{score}` `{scores}` `{cap}` `{previous}` `{map}` `{server}` `{players}` `{max}`. Sent one poll after the round ends.                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | Seeding reward         | Time a player spends on with at most N players counts as seed time, by default banked only once the server has filled (a count the rule sets, else the limit the server reports) with the player still on, so staying until the threshold and leaving, or a few minutes on an empty server, earns nothing (a switch on the rule counts every low minute instead); M minutes of it over the sessions that ended in the last D days earns a reserved slot for E days, with an optional whisper: on this server only (its own reserved-slot list, which needs the Reserved slots capability) or on every server in the organisation (the org list, which needs Org lists), chosen on the rule. The seeded server applies it at once and, for an org-wide slot, the other servers at their next sync; it lapses on its own and can be earned again; players who already hold a slot here are skipped. Seed time is kept on each session, so the dossier history, the leaderboard's Seed time column and the dry run show it. |
@@ -835,7 +857,7 @@ which call Better Auth server-side behind the login lockout and the audit trail.
 own `/api/auth/*` routes only the OAuth callback is reachable over HTTP; everything else answers 404.
 
 ```
-GET/POST /api/orgs  PATCH/DELETE /api/orgs/:id   PATCH {name} | {discordInviteUrl} | {membersReserved} | site owner: {serverLimit, suspended, reason, allowPublicStatus, allowPublicLeaderboards}
+GET/POST /api/orgs  PATCH/DELETE /api/orgs/:id   PATCH {name} | {discordInviteUrl} | {membersReserved} | {banMessage} | site owner: {serverLimit, suspended, reason, allowPublicStatus, allowPublicLeaderboards}
 GET  /api/orgs/:id/members  PATCH/DELETE /api/orgs/:id/members/:userId {role}  PUT .../:userId/grants {grants:[{serverId,roleId}]}
 GET/POST /api/orgs/:id/roles {name,capabilities[]}  PATCH/DELETE .../:roleId {name?,capabilities?}  POST .../:roleId/reset
 GET/POST /api/orgs/:id/keys {label,capabilities[],serverIds[]|null,expiresDays}  DELETE .../:keyId   (POST returns the token once)
@@ -858,10 +880,12 @@ GET/POST /api/servers/:id/triggers {kind,name,enabled,config}   PATCH/DELETE ...
 GET/POST /api/orgs/:id/webhooks {label,url,events,serverIds,enabled,statusEnabled,statusStyle,statusIntervalS,linkStatus,linkLeaderboard,linkPanel}   PATCH/DELETE .../:webhookId   POST .../:webhookId/test
 GET  /api/public/servers/:id   .../leaderboard (same query as above, page 20 at most)   .../players/:steamId      the public pages' JSON: no session, 404 while the page is off, limited per address
 GET  /api/orgs/:id/lists                                 the org's ban and reserved-slot lists, and the caller's role on them
-GET/POST /api/orgs/:id/lists/:kind/entries {steamId,reason,expiresAt}   DELETE .../entries/:steamId   (kind = ban | reserve; ?includeRemoved=1)
+GET/POST /api/orgs/:id/lists/:kind/entries {steamId,reason,expiresAt}   PATCH {reason,expiresAt} / DELETE .../entries/:steamId   (kind = ban | reserve; ?includeRemoved=1)
 POST /api/orgs/:id/lists/sync                            push the lists to every org server now
 GET  /api/orgs/:id/lists/import                          server entries not on the org list   POST {entries:[{kind,steamId,reason}]} adopts them (owner)
+GET  /api/servers/:id/players/seen?q=&since=&flag=&sort=&dir=&offset=&limit=   everyone who has played on this server, by name, alias or SteamID (View; 60 a minute)
 GET  /api/servers/:id/lists/state                        which bans / reserved slots here come from the org lists or this server's own   POST .../lists/sync
+POST /api/servers/:id/lists/ban/entries {steamId,reason,expiresAt}       ban on this server only, placed on sight if the player is away (Bans)   PATCH {reason,expiresAt} / DELETE .../entries/:steamId
 POST /api/servers/:id/lists/reserve/entries {steamId,reason,expiresAt}   reserve on this server only (Reserved slots)   DELETE .../entries/:steamId
 GET  /api/actions                     lists actions with the capability each needs
 GET  /api/audit?server=&actor=&action=&outcome=&q=&from=&to=&before=&limit=

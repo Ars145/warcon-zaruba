@@ -468,7 +468,8 @@ export type TriggerKind =
 	| 'restart_notice'
 	| 'team_kill'
 	| 'seed_reward'
-	| 'match_broadcast';
+	| 'match_broadcast'
+	| 'name_filter';
 
 export interface TriggerView {
 	id: string;
@@ -580,6 +581,8 @@ export interface ListSyncSummary {
 export interface OrgListsView {
 	role: 'owner' | 'editor';
 	membersReserved: boolean;
+	/** what a banned player is shown, see $lib/ban-message */
+	banMessage: string;
 	servers: {
 		id: string;
 		name: string;
@@ -596,6 +599,21 @@ export interface ImportCandidate {
 	steamId: string;
 	name: string | null;
 	servers: { serverId: string; serverName: string; reason: string; bannedBy: string }[];
+}
+
+/** One ban as the server's Bans page shows it. */
+export interface BanState {
+	state: ListEntryState;
+	managed: boolean;
+	/** the list a managed ban comes from: the organisation's, or this server's own */
+	scope: 'org' | 'server';
+	/** the reason on the list entry */
+	reason: string;
+	/** who added the entry; blank unless the reader manages bans here or edits the org's lists */
+	addedByName: string;
+	addedAt: string | null;
+	/** when the panel lifts the ban; null for a permanent one (or one not managed) */
+	expiresAt: string | null;
 }
 
 /** One reserved slot as the server's Reserved slots page shows it. */
@@ -620,7 +638,9 @@ export interface ServerListsState {
 	/** owners may import (adopt) local entries into the org list */
 	orgOwner: boolean;
 	orgId: string;
-	bans: Record<string, { state: ListEntryState; managed: boolean }>;
+	/** the org's ban message, for those who can ban here; null for everyone else */
+	banMessage: string | null;
+	bans: Record<string, BanState>;
 	reserved: Record<string, ReservedSlotState>;
 	sync: {
 		syncedAt: string | null;
