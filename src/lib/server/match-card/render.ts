@@ -280,7 +280,8 @@ export async function closeCardBrowser(): Promise<void> {
 export async function shoot(
 	html: string,
 	selectors: string[],
-	width: number
+	width: number,
+	format: { type: 'png' } | { type: 'webp'; quality: number } = { type: 'png' }
 ): Promise<Uint8Array<ArrayBuffer>[]> {
 	const page = await (await getBrowser()).newPage();
 	try {
@@ -291,7 +292,7 @@ export async function shoot(
 		for (const selector of selectors) {
 			const el = await page.$(selector);
 			if (!el) throw new Error(`the card template has no ${selector} element`);
-			shots.push(new Uint8Array(await el.screenshot({ type: 'png' })));
+			shots.push(new Uint8Array(await el.screenshot(format)));
 		}
 		return shots;
 	} finally {

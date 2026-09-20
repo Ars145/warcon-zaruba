@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { buildStatusCard, statusCardKey, TOP_ROWS } from './data';
-import { bannerUrlOf, COMPONENTS_V2, statusFiles, statusPayload } from './message';
+import { COMPONENTS_V2, statusFiles, statusPayload } from './message';
 import { statusVals } from './render';
 import type { LiveView, Player, Status } from '$lib/types';
 
@@ -138,7 +138,7 @@ describe('statusCardKey', () => {
 
 describe('statusPayload', () => {
 	it('is a Components V2 container with neither content nor embeds', () => {
-		const p = statusPayload(card(), { bannerUrl: null }) as Record<string, unknown>;
+		const p = statusPayload(card()) as Record<string, unknown>;
 		expect(p.flags).toBe(COMPONENTS_V2);
 		expect(p.content).toBeUndefined();
 		expect(p.embeds).toBeUndefined();
@@ -147,7 +147,7 @@ describe('statusPayload', () => {
 
 	it('gives each picture a gallery of its own, or Discord tiles them into a grid', () => {
 		const inner = (
-			statusPayload(card(), { bannerUrl: null }).components as Array<{
+			statusPayload(card()).components as Array<{
 				components: Array<{ type: number; items?: unknown[] }>;
 			}>
 		)[0].components;
@@ -157,19 +157,19 @@ describe('statusPayload', () => {
 		expect(inner.slice(0, 3).every((c) => c.type === 12)).toBe(true);
 	});
 
-	it('names the banner as an upload until it has a url to be carried by', () => {
-		const items = (bannerUrl: string | null) =>
-			(
-				(
-					statusPayload(card(), { bannerUrl }).components as Array<{
-						components: Array<{ items?: Array<{ media: { url: string } }> }>;
-					}>
-				)[0].components[0].items ?? []
-			).map((i) => i.media.url);
-		expect(items(null)[0]).toBe('attachment://banner.webp');
-		expect(items('https://cdn.discordapp.com/x/banner.webp')[0]).toBe(
-			'https://cdn.discordapp.com/x/banner.webp'
-		);
+	it('names every picture as an upload: none survives an edit as a url', () => {
+		const urls = (
+			statusPayload(card()).components as Array<{
+				components: Array<{ type: number; items?: Array<{ media: { url: string } }> }>;
+			}>
+		)[0].components
+			.filter((c) => c.type === 12)
+			.map((c) => c.items![0].media.url);
+		expect(urls).toEqual([
+			'attachment://banner.webp',
+			'attachment://scores.webp',
+			'attachment://top.webp'
+		]);
 	});
 
 	it('drops the join-code block on a build that serves no code', () => {
@@ -180,12 +180,12 @@ describe('statusPayload', () => {
 			)[0].components
 				.filter((x) => x.type === 10)
 				.map((x) => x.content ?? '');
-		expect(texts(statusPayload(card(), { bannerUrl: null })).join()).toContain('Код входа');
-		expect(texts(statusPayload(no, { bannerUrl: null })).join()).not.toContain('Код входа');
+		expect(texts(statusPayload(card())).join()).toContain('Код входа');
+		expect(texts(statusPayload(no)).join()).not.toContain('Код входа');
 	});
 
 	it('leaves both clocks to Discord', () => {
-		const p = statusPayload(card(), { bannerUrl: null });
+		const p = statusPayload(card());
 		const text = JSON.stringify(p);
 		expect(text).toContain(`<t:${card().startedAt}:R>`);
 		expect(text).toContain(`<t:${card().observedAt}:R>`);
@@ -198,30 +198,20 @@ describe('statusFiles', () => {
 		top: new Uint8Array([2]) as Uint8Array<ArrayBuffer>
 	};
 
-	it('uploads the banner only when there is no url for it', () => {
-		const withBanner = statusFiles(pics, new Uint8Array([3]) as Uint8Array<ArrayBuffer>);
-		expect(withBanner.files.map((f) => f.name)).toEqual(['banner.webp', 'scores.png', 'top.png']);
-		expect(statusFiles(pics, null).files.map((f) => f.name)).toEqual(['scores.png', 'top.png']);
+	const bannerBytes = new Uint8Array([3]) as Uint8Array<ArrayBuffer>;
+
+	it('sends all three every time, webp throughout', () => {
+		const { files } = statusFiles(pics, bannerBytes);
+		expect(files.map((f) => f.name)).toEqual(['banner.webp', 'scores.webp', 'top.webp']);
+		expect(files.every((f) => f.type === 'image/webp')).toBe(true);
 	});
 
 	it('numbers the attachments in the order the files go up', () => {
-		expect(statusFiles(pics, null).attachments).toEqual([
-			{ id: 0, filename: 'scores.png' },
-			{ id: 1, filename: 'top.png' }
+		expect(statusFiles(pics, bannerBytes).attachments).toEqual([
+			{ id: 0, filename: 'banner.webp' },
+			{ id: 1, filename: 'scores.webp' },
+			{ id: 2, filename: 'top.webp' }
 		]);
-	});
-});
-
-describe('bannerUrlOf', () => {
-	it('reads the gallery url back out, and shrugs at anything else', () => {
-		const msg = {
-			components: [
-				{ type: 17, components: [{ type: 12, items: [{ media: { url: 'https://cdn/x.webp' } }] }] }
-			]
-		};
-		expect(bannerUrlOf(msg)).toBe('https://cdn/x.webp');
-		expect(bannerUrlOf({})).toBeNull();
-		expect(bannerUrlOf(null)).toBeNull();
 	});
 });
 

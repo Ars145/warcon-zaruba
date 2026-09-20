@@ -57,6 +57,10 @@ export function banner(): Uint8Array<ArrayBuffer> {
 export async function renderStatusCard(
 	card: StatusCard
 ): Promise<{ scores: Uint8Array<ArrayBuffer>; top: Uint8Array<ArrayBuffer> }> {
-	const [scores, top] = await shoot(statusHtml(card), ['#scores', '#top'], CARD_WIDTH);
+	// webp, not png: these go up whole on every edit, and the table alone is 226 KB as a png.
+	const [scores, top] = await shoot(statusHtml(card), ['#scores', '#top'], CARD_WIDTH, {
+		type: 'webp',
+		quality: 92
+	});
 	return { scores, top };
 }
