@@ -12,6 +12,7 @@ import { memoryOf } from './observe';
 import { liveView } from './live';
 import { deleteDiscord, editDiscord, postDiscord, type PostResult } from './webhook-delivery';
 import { cardLinks, statusMessage, type StatusServer } from './webhook-status-core';
+import { sendStatusCard, statusCardFor } from './status-card';
 import { effectiveFeatures, type FeatureSet } from '$lib/features';
 
 export const STATUS_TICK_MS = 20_000;
@@ -155,11 +156,17 @@ async function refreshHook(
 		const key = `${hook.id}:${server.id}`;
 		const st = sent.get(key);
 		const m = memoryOf(server.id);
-		const { payload, key: substance } = statusMessage(
-			{ ...opts, links: cardLinks(env.ORIGIN, server.id, hook, server.features) },
-			server,
-			m && m.observedAt ? liveView(m) : null
-		);
+		const live = m && m.observedAt ? liveView(m) : null;
+		// The `card` style answers here with pictures instead of an embed; every other style,
+		// and a server with nothing to draw, falls through to the embed below unchanged.
+		const shot = await statusCardFor(hook, server.id, server.name, orgName, live);
+		const { payload, key: substance } =
+			shot ??
+			statusMessage(
+				{ ...opts, links: cardLinks(env.ORIGIN, server.id, hook, server.features) },
+				server,
+				live
+			);
 		let messageId: string | null = map[server.id] ?? null;
 		if (messageId && st && st.messageId === messageId) {
 			if (st.key === substance && now - st.at < HEARTBEAT_MS) continue;
@@ -168,12 +175,16 @@ async function refreshHook(
 		let result: PostResult | null = null;
 		let posted = false;
 		if (messageId) {
-			result = await editDiscord(env, hook, messageId, payload);
+			result = shot
+				? await sendStatusCard(env, hook, messageId, shot)
+				: await editDiscord(env, hook, messageId, payload);
 			// Someone removed it from the channel: start a new one rather than fail forever.
 			if (result.unknownMessage) messageId = null;
 		}
 		if (!messageId) {
-			result = await postDiscord(env, hook, payload);
+			result = shot
+				? await sendStatusCard(env, hook, null, shot)
+				: await postDiscord(env, hook, payload);
 			posted = true;
 			messageId = result.ok ? (result.messageId ?? null) : null;
 		}

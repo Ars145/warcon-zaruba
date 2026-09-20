@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="ru">
+	<head>
+		<meta charset="utf-8" />
+		<style>
+			@font-face {
+				font-family: 'Caveat';
+				font-style: normal;
+				font-weight: 600;
+				font-display: swap;
+				src: url('asset:Caveat-cyrillic-ext.woff2') format('woff2');
+				unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+			}
+			@font-face {
+				font-family: 'Caveat';
+				font-style: normal;
+				font-weight: 600;
+				font-display: swap;
+				src: url('asset:Caveat-cyrillic.woff2') format('woff2');
+				unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+			}
+			@font-face {
+				font-family: 'Caveat';
+				font-style: normal;
+				font-weight: 600;
+				font-display: swap;
+				src: url('asset:Caveat-latin-ext.woff2') format('woff2');
+				unicode-range:
+					U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329,
+					U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113,
+					U+2C60-2C7F, U+A720-A7FF;
+			}
+			@font-face {
+				font-family: 'Caveat';
+				font-style: normal;
+				font-weight: 600;
+				font-display: swap;
+				src: url('asset:Caveat-latin.woff2') format('woff2');
+				unicode-range:
+					U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308,
+					U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+			}
+			@font-face {
+				font-family: 'Caveat';
+				font-style: normal;
+				font-weight: 700;
+				font-display: swap;
+				src: url('asset:Caveat-cyrillic-ext.woff2') format('woff2');
+				unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+			}
+			@font-face {
+				font-family: 'Caveat';
+				font-style: normal;
+				font-weight: 700;
+				font-display: swap;
+				src: url('asset:Caveat-cyrillic.woff2') format('woff2');
+				unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+			}
+			@font-face {
+				font-family: 'Caveat';
+				font-style: normal;
+				font-weight: 700;
+				font-display: swap;
+				src: url('asset:Caveat-latin-ext.woff2') format('woff2');
+				unicode-range:
+					U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329,
+					U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113,
+					U+2C60-2C7F, U+A720-A7FF;
+			}
+			@font-face {
+				font-family: 'Caveat';
+				font-style: normal;
+				font-weight: 700;
+				font-display: swap;
+				src: url('asset:Caveat-latin.woff2') format('woff2');
+				unicode-range:
+					U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308,
+					U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+			}
+			@font-face {
+				font-family: 'Inter';
+				src: url('asset:Inter-400.woff2') format('woff2');
+				font-weight: 400;
+				font-display: block;
+			}
+			@font-face {
+				font-family: 'Inter';
+				src: url('asset:Inter-500.woff2') format('woff2');
+				font-weight: 500;
+				font-display: block;
+			}
+			@font-face {
+				font-family: 'Inter';
+				src: url('asset:Inter-600.woff2') format('woff2');
+				font-weight: 600;
+				font-display: block;
+			}
+			@font-face {
+				font-family: 'Inter';
+				src: url('asset:Inter-700.woff2') format('woff2');
+				font-weight: 700;
+				font-display: block;
+			}
+			html,
+			body {
+				margin: 0;
+				background: #000;
+				-webkit-font-smoothing: antialiased;
+			}
+			/* Inter covers latin, cyrillic and greek. The Noto families come from the image
+   (fonts-noto-*): 6% of the names seen in a week carry CJK, dingbats or emoji. */
+			body,
+			.card {
+				font-family:
+					'Inter', 'Noto Sans', 'Noto Sans CJK SC', 'Noto Sans Symbols 2', 'Noto Color Emoji',
+					sans-serif;
+				color: #f2f2f3;
+			}
+			.card {
+				width: 1200px;
+				box-sizing: border-box;
+				background: #0d0d0e;
+				padding: 34px 40px;
+			}
+			.head {
+				display: flex;
+				align-items: baseline;
+				justify-content: space-between;
+				gap: 24px;
+				margin-bottom: 28px;
+			}
+			.map {
+				font-size: 40px;
+				font-weight: 600;
+				letter-spacing: -0.01em;
+			}
+			.sub {
+				font-size: 22px;
+				color: #8a8a90;
+			}
+			.bar-row {
+				display: grid;
+				grid-template-columns: 190px 1fr 84px;
+				gap: 24px;
+				align-items: center;
+				margin-bottom: 18px;
+			}
+			.bar-row:last-of-type {
+				margin-bottom: 0;
+			}
+			.side {
+				font-size: 24px;
+				font-weight: 500;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			}
+			.track {
+				height: 20px;
+				border-radius: 10px;
+				background: #1a1a1c;
+				overflow: hidden;
+			}
+			.fill {
+				height: 20px;
+				border-radius: 10px;
+			}
+			.score {
+				font-size: 30px;
+				font-weight: 600;
+				text-align: right;
+				font-variant-numeric: tabular-nums;
+			}
+			.foot {
+				margin-top: 26px;
+				font-size: 18px;
+				color: #55555c;
+			}
+			.th,
+			.tr {
+				display: grid;
+				grid-template-columns: 56px 1fr 210px 96px 88px 150px;
+				gap: 16px;
+				align-items: center;
+			}
+			.th {
+				padding: 0 18px 12px;
+				font-size: 17px;
+				color: #55555c;
+			}
+			.tr {
+				padding: 13px 18px;
+				margin-bottom: 8px;
+				border-radius: 12px;
+				font-size: 23px;
+				background: linear-gradient(90deg, #1a1a1c, #121213);
+				border: 1px solid #2b2b2b;
+			}
+			.tr:last-child {
+				margin-bottom: 0;
+			}
+			.tr.top {
+				background: linear-gradient(90deg, rgba(255, 125, 0, 0.1), #121213);
+				border-color: rgba(255, 125, 0, 0.3);
+			}
+			.rank {
+				font-size: 21px;
+				color: #55555c;
+				font-variant-numeric: tabular-nums;
+			}
+			.tr.top .rank {
+				color: #ff9500;
+			}
+			.name {
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			}
+			.side-cell {
+				font-size: 19px;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			}
+			.num {
+				text-align: right;
+				font-variant-numeric: tabular-nums;
+			}
+			.dim {
+				color: #8a8a90;
+			}
+		</style>
+	</head>
+	<body>
+		<div class="card" id="scores">
+			<div class="head">
+				<div class="map">{{ mapName }}</div>
+				<div class="sub">{{ modeLine }}</div>
+			</div>
+			<sc-for list="{{ factions }}" as="f">
+				<div class="bar-row">
+					<div class="side" style="color: {{ f.colorHex }}">{{ f.name }}</div>
+					<div class="track">
+						<div class="fill" style="width: {{ f.pct }}%; background: {{ f.colorHex }}"></div>
+					</div>
+					<div class="score">{{ f.score }}</div>
+				</div>
+			</sc-for>
+			<div class="foot">{{ scoresFoot }}</div>
+		</div>
+		<div class="card" id="top">
+			<div class="th">
+				<div>#</div>
+				<div>Игрок</div>
+				<div>Сторона</div>
+				<div class="num">Убийств</div>
+				<div class="num">Смертей</div>
+				<div class="num">Кэш</div>
+			</div>
+			<sc-for list="{{ rows }}" as="r">
+				<div class="tr {{ r.topClass }}">
+					<div class="rank">{{ r.rank }}</div>
+					<div class="name">{{ r.name }}</div>
+					<div class="side-cell" style="color: {{ r.factionColor }}">{{ r.faction }}</div>
+					<div class="num">{{ r.kills }}</div>
+					<div class="num dim">{{ r.deaths }}</div>
+					<div class="num">{{ r.cash }}</div>
+				</div>
+			</sc-for>
+		</div>
+	</body>
+</html>
