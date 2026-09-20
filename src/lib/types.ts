@@ -345,6 +345,10 @@ export interface SteamView {
 	daysSinceLastBan: number | null;
 	communityBanned: boolean;
 	economyBan: string;
+	friendsState: string;
+	friendsTotal: number;
+	friendsChecked: number;
+	bannedFriends: number;
 	fetchedAt: string;
 	error: string;
 }
@@ -465,6 +469,7 @@ export type TriggerKind =
 	| 'broadcast'
 	| 'empty_reset'
 	| 'risk_kick'
+	| 'ping_kick'
 	| 'restart_notice'
 	| 'team_kill'
 	| 'seed_reward'
