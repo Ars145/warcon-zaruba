@@ -145,7 +145,7 @@ export async function stopPoller(): Promise<void> {
 	globalThis.__warconRenew = undefined;
 	stopDelivery();
 	stopStatusMirror();
-	stopReserveWatch(); // zaruba: couch reserve
+	await stopReserveWatch(); // zaruba: couch reserve
 	if (unregisterMetrics) unregisterMetrics();
 	unregisterMetrics = null;
 	scheduler = null;

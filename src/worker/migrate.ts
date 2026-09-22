@@ -24,11 +24,24 @@ const { client, db } = connect(target);
 await runMigrations(db, resolve(process.cwd(), 'drizzle'));
 console.log('[warcon] migrations applied');
 // zaruba: couch reserve
-const couchResult = await migrateReserveToCouch(db, {
-	COUCH_URL: process.env.COUCH_URL,
-	COUCH_DB: process.env.COUCH_DB,
-	COUCH_USER: process.env.COUCH_USER,
-	COUCH_PASSWORD: process.env.COUCH_PASSWORD
-});
-console.log(`[warcon] couch reserve backfill: ${couchResult.created} created, ${couchResult.skipped} already present`);
+const couchOrgId = process.env.COUCH_ORG_ID;
+if (!couchOrgId) {
+	console.error('Set COUCH_ORG_ID to the id of the organisation whose reserve list is couch-backed.');
+	process.exit(2);
+}
+const couchResult = await migrateReserveToCouch(
+	db,
+	{
+		COUCH_URL: process.env.COUCH_URL,
+		COUCH_DB: process.env.COUCH_DB,
+		COUCH_USER: process.env.COUCH_USER,
+		COUCH_PASSWORD: process.env.COUCH_PASSWORD
+	},
+	couchOrgId
+);
+console.log(
+	couchResult.alreadyDone
+		? '[warcon] couch reserve backfill: already ran, skipped'
+		: `[warcon] couch reserve backfill: ${couchResult.created} created, ${couchResult.skipped} already present`
+);
 await client.end();

@@ -152,11 +152,20 @@ export async function ensureDatabase(c: CouchConfig): Promise<void> {
 	if (res.status !== 201 && res.status !== 412) return failIfNotOk(res, `PUT /${c.db}`);
 }
 
-/** Idempotent: creating the same named index twice is a no-op on CouchDB's side. */
-export async function ensureIndex(c: CouchConfig, fields: string[], name: string): Promise<void> {
+/**
+ * Idempotent: creating the same named index on the same ddoc twice is a no-op on CouchDB's side.
+ * `ddoc` is required (not defaulted) because the Helm init job creates the same two indexes under
+ * the design doc `wardogs` and the names must match exactly for both to agree they're the same index.
+ */
+export async function ensureIndex(
+	c: CouchConfig,
+	fields: string[],
+	name: string,
+	ddoc: string
+): Promise<void> {
 	const res = await dbFetch(c, '/_index', {
 		method: 'POST',
-		body: JSON.stringify({ index: { fields }, name })
+		body: JSON.stringify({ index: { fields }, ddoc, name })
 	});
 	if (!res.ok) return failIfNotOk(res, `_index ${name}`);
 }

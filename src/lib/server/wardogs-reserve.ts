@@ -93,10 +93,33 @@ export function activeReserve(docs: ReserveDoc[], now: Date): ActiveReserveEntry
 	return out;
 }
 
+// zaruba: couch reserve — desiredFor (lists-sync.ts) calls this once per server, and fanOut/syncOrg
+// runs every one of an org's servers in parallel, so a naive implementation makes one CouchDB
+// _find per server on every sync. A short TTL memo coalesces those into one call per org sync: the
+// N concurrent callers within the window share the same in-flight promise. `now` is passed straight
+// through to activeReserve on every call (its filtering, not the cache, is what "now" means), so a
+// cached response computed a moment earlier for a slightly different `now` is fine — expiry is not
+// time-critical to the second.
+const RESERVE_CACHE_TTL_MS = 2000;
+let reserveCache: { promise: Promise<ReserveDoc[]>; expiresAt: number } | null = null;
+
+async function loadReserveDocs(env: Env): Promise<ReserveDoc[]> {
+	const nowMs = Date.now();
+	if (reserveCache && reserveCache.expiresAt > nowMs) return reserveCache.promise;
+	const c = couchConfig(env);
+	const promise = find<ReserveDoc>(c, { type: { $in: ['personal', 'clan', 'clanslot'] } });
+	reserveCache = { promise, expiresAt: nowMs + RESERVE_CACHE_TTL_MS };
+	// A failed fetch must not poison the cache for the TTL window: the next caller (in this same
+	// sync, or the next one) should retry rather than reuse a rejected promise.
+	promise.catch(() => {
+		if (reserveCache?.promise === promise) reserveCache = null;
+	});
+	return promise;
+}
+
 /** Loads every personal/clan/clanslot doc and reduces it to the active list. */
 export async function desiredReserve(env: Env, now = new Date()): Promise<ActiveReserveEntry[]> {
-	const c = couchConfig(env);
-	const docs = await find<ReserveDoc>(c, { type: { $in: ['personal', 'clan', 'clanslot'] } });
+	const docs = await loadReserveDocs(env);
 	return activeReserve(docs, now);
 }
 

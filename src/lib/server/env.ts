@@ -61,6 +61,8 @@ export interface Env {
 	COUCH_DB: string;
 	COUCH_USER: string;
 	COUCH_PASSWORD: string;
+	/** The one org whose reserve list is couch-backed; every other org keeps list_entries in Postgres. */
+	COUCH_ORG_ID: string;
 }
 
 export type Role = 'all' | 'web' | 'worker';
@@ -173,6 +175,8 @@ export async function initEnv(opts: { role?: Role } = {}): Promise<Env> {
 		COUCH_PASSWORD: processEnv.COUCH_PASSWORD
 	});
 	if (couchProblem) throw new Error(couchProblem);
+	const couchOrgProblem = couchOrgIdProblem(processEnv.COUCH_ORG_ID);
+	if (couchOrgProblem) throw new Error(couchOrgProblem);
 	const { client, db } = connect(databaseTarget());
 	const migrations = resolve(process.cwd(), 'drizzle');
 	if (role === 'all') await runMigrations(db, migrations);
@@ -216,7 +220,8 @@ export async function initEnv(opts: { role?: Role } = {}): Promise<Env> {
 		COUCH_URL: processEnv.COUCH_URL!,
 		COUCH_DB: processEnv.COUCH_DB!,
 		COUCH_USER: processEnv.COUCH_USER!,
-		COUCH_PASSWORD: processEnv.COUCH_PASSWORD!
+		COUCH_PASSWORD: processEnv.COUCH_PASSWORD!,
+		COUCH_ORG_ID: processEnv.COUCH_ORG_ID!
 	};
 	return cached;
 }
@@ -232,6 +237,16 @@ export function couchEnvProblem(env: {
 }): string | null {
 	if (!env.COUCH_URL || !env.COUCH_DB || !env.COUCH_USER || !env.COUCH_PASSWORD)
 		return 'Set COUCH_URL, COUCH_DB, COUCH_USER and COUCH_PASSWORD (the org reserve list lives in CouchDB, not Postgres).';
+	return null;
+}
+
+// zaruba: couch reserve — which single org is couch-backed. Unset must fail loudly rather than be
+// treated as "no org couch-backed": that would silently make every org's isCouchReserve check
+// compare against '', a value no real org id ever equals, and the couch reserve feature would look
+// like it works (no error) while quietly doing nothing.
+export function couchOrgIdProblem(value: string | undefined): string | null {
+	if (!value || !value.trim())
+		return 'Set COUCH_ORG_ID to the id of the organisation whose reserve list is couch-backed.';
 	return null;
 }
 

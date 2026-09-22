@@ -65,10 +65,15 @@ export function parseKind(v: unknown): Kind {
 	throw new ApiError(404, 'No such list.', 'not_found');
 }
 
-// zaruba: couch reserve — a plain boolean, not a `kind is 'reserve'` type predicate: entriesView
-// still has a genuine 'reserve' branch further down (members-reserved), so `kind` must not narrow
-// to 'ban' for the rest of that function the way an `if (kind === 'reserve') return` would.
-const isReserveKind = (kind: Kind): boolean => kind === 'reserve';
+// zaruba: couch reserve — only COUCH_ORG_ID's own reserve list is couch-backed; every other org's
+// reserve list keeps the Postgres list_entries path below untouched. Not a `kind is 'reserve'`
+// type predicate: `kind` must stay the full `Kind` type at every call site below, since each of
+// them falls through to generic list_entries code (for a non-couch org, or a non-reserve kind)
+// that switches on it. reserveStore.entriesView (reserve-store.ts) builds its own members-reserved
+// entries for the couch-backed org; the analogous branch further down in this function's own
+// entriesView is dead code for that org, reachable only for every other org's reserve list.
+const isCouchReserve = (env: Env, kind: Kind, orgId: string): boolean =>
+	kind === 'reserve' && orgId === env.COUCH_ORG_ID;
 
 /** The db or a transaction handle: the ensure* helpers run inside the caller's transaction. */
 type DbLike = Db | Parameters<Parameters<Db['transaction']>[0]>[0];
@@ -357,9 +362,7 @@ export async function entriesView(
 	kind: Kind,
 	opts: { includeRemoved?: boolean } = {}
 ): Promise<ListEntryView[]> {
-	// zaruba: couch reserve — isReserveKind (not a `kind === 'reserve'` type predicate) so `kind`
-	// stays `Kind` below: the function still has a 'reserve' branch (members-reserved) after this.
-	if (isReserveKind(kind)) return reserveStore.entriesView(env, org);
+	if (isCouchReserve(env, kind, org.id)) return reserveStore.entriesView(env, org);
 	const list = await listOf(env, org.id, kind);
 	const rows = await env.db
 		.select()
@@ -500,7 +503,7 @@ export async function addEntry(
 	kind: Kind,
 	body: Record<string, unknown>
 ): Promise<{ entry: ListEntryView; sync: ListSyncSummary }> {
-	if (kind === 'reserve') return reserveStore.addEntry(env, req, actor, org, body); // zaruba: couch reserve
+	if (isCouchReserve(env, kind, org.id)) return reserveStore.addEntry(env, req, actor, org, body); // zaruba: couch reserve
 	const steamId = requireSteamId(body.steamId);
 	const reason = str(body.reason, 200);
 	const expiresAt = parseExpiry(body.expiresAt);
@@ -547,7 +550,7 @@ export async function removeEntry(
 	kind: Kind,
 	steamIdIn: unknown
 ): Promise<{ sync: ListSyncSummary }> {
-	if (kind === 'reserve') return reserveStore.removeEntry(env, req, actor, org, steamIdIn); // zaruba: couch reserve
+	if (isCouchReserve(env, kind, org.id)) return reserveStore.removeEntry(env, req, actor, org, steamIdIn); // zaruba: couch reserve
 	const steamId = requireSteamId(steamIdIn);
 	const list = await listOf(env, org.id, kind);
 	const [row] = await env.db
@@ -706,7 +709,8 @@ export async function updateEntry(
 	body: Record<string, unknown>
 ): Promise<{ entry: { steamId: string; reason: string; expiresAt: string | null } }> {
 	// zaruba: couch reserve
-	if (kind === 'reserve' && !server) return reserveStore.updateEntry(env, req, actor, org, steamIdIn, body);
+	if (isCouchReserve(env, kind, org.id) && !server)
+		return reserveStore.updateEntry(env, req, actor, org, steamIdIn, body);
 	const steamId = requireSteamId(steamIdIn);
 	const set: { reason?: string; expiresAt?: Date | null } = {};
 	if ('reason' in body) set.reason = str(body.reason, 200);
@@ -841,9 +845,10 @@ export async function importEntries(
 		};
 	});
 	if (!picks.length) throw new ApiError(400, 'Nothing to import.');
-	// zaruba: couch reserve — the org reserve list lives in CouchDB now; there is nowhere here to
-	// adopt a server-observed reserved slot into.
-	if (picks.some((p) => p.kind === 'reserve'))
+	// zaruba: couch reserve — for COUCH_ORG_ID the reserve list lives in CouchDB now; there is
+	// nowhere here to adopt a server-observed reserved slot into. Every other org still keeps its
+	// reserve list in Postgres and imports normally.
+	if (picks.some((p) => isCouchReserve(env, p.kind, org.id)))
 		throw new ApiError(
 			400,
 			'Reserved-slot import is disabled: the reserved-slot list lives in CouchDB, not here.',

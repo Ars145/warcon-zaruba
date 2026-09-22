@@ -26,6 +26,7 @@ x-warcon: &warcon
     COUCH_DB: wardogs_reserve
     COUCH_USER: ${COUCH_USER:-warcon}
     COUCH_PASSWORD: ${COUCH_PASSWORD:?set COUCH_PASSWORD in .env}
+    COUCH_ORG_ID: ${COUCH_ORG_ID:?set COUCH_ORG_ID in .env}
   # Uncomment to reach an RCON listener bound to 127.0.0.1 on the Docker host:
   # extra_hosts:
   #   - 'host.docker.internal:host-gateway'

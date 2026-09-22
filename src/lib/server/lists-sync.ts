@@ -109,7 +109,7 @@ export async function desiredFor(
 	server: Pick<ServerRow, 'id' | 'orgId'>,
 	org: Pick<OrgRow, 'membersReserved' | 'banMessage'>,
 	now = new Date()
-): Promise<PlanInput['desired']> {
+): Promise<PlanInput['desired'] & { reserveError?: string }> {
 	// zaruba: couch reserve — the org's own reserve list (server_id null) is excluded here: its
 	// entries live in CouchDB now (below), not in list_entries. Bans and every server's own reserve
 	// list are untouched.
@@ -148,14 +148,26 @@ export async function desiredFor(
 		.innerJoin(lists, eq(lists.id, serverLists.listId))
 		.where(and(eq(serverLists.serverId, server.id), eq(lists.kind, 'reserve'), isNull(lists.serverId)))
 		.limit(1);
+	let reserveError: string | undefined;
 	if (reserveList) {
 		const banned = new Set(bans.map((b) => b.steamId));
 		const have = new Set(reserved.map((r) => r.steamId));
-		for (const c of await desiredReserve(env, now))
-			if (!banned.has(c.steamId) && !have.has(c.steamId)) {
-				reserved.push({ steamId: c.steamId, listId: reserveList.id, member: false });
-				have.add(c.steamId);
+		// zaruba: couch reserve — only COUCH_ORG_ID's reserve list has grants in CouchDB; every
+		// other org's reserve list is entirely list_entries (already folded into `reserved` above).
+		// A CouchDB outage here must fail only this org's couch-sourced additions, not the whole
+		// sync: bans, and the reserve entries already computed from list_entries, are unaffected.
+		if (server.orgId === env.COUCH_ORG_ID) {
+			try {
+				for (const c of await desiredReserve(env, now))
+					if (!banned.has(c.steamId) && !have.has(c.steamId)) {
+						reserved.push({ steamId: c.steamId, listId: reserveList.id, member: false });
+						have.add(c.steamId);
+					}
+			} catch (err) {
+				reserveError = err instanceof Error ? err.message : String(err);
+				console.error(`[warcon] couch reserve unavailable for org ${server.orgId}`, err);
 			}
+		}
 		if (org.membersReserved)
 			// Members who set a SteamID get a slot from the org's reserve list, unless the org has
 			// banned them or a CouchDB grant already covers them.
@@ -163,7 +175,7 @@ export async function desiredFor(
 				if (!banned.has(m.steamId) && !have.has(m.steamId))
 					reserved.push({ steamId: m.steamId, listId: reserveList.id, member: true });
 	}
-	return { bans, reserved };
+	return { bans, reserved, reserveError };
 }
 
 /** Members of the org who linked a SteamID on their account and are not disabled. */
@@ -468,6 +480,7 @@ async function run(
 		return {
 			...base,
 			ok: true,
+			error: desired.reserveError ? `Reserve list: ${desired.reserveError}` : '',
 			observed: flat(observed),
 			refusedBans: refusedBansAfter(desired.bans, state)
 		};
@@ -541,7 +554,8 @@ async function run(
 		added: outcome.added.length,
 		removed: outcome.removed.length,
 		failed: failedNow.length,
-		error: outcome.aborted ?? '',
+		error:
+			outcome.aborted ?? (desired.reserveError ? `Reserve list: ${desired.reserveError}` : ''),
 		observed: flat(outcome.observed),
 		refusedBans: refusedBansAfter(desired.bans, state, {
 			added: outcome.added,

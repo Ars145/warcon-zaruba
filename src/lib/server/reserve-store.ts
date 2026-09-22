@@ -16,6 +16,7 @@ import type { Env } from './env';
 import { requireSteamId } from './steam';
 import { gateway } from './gateway';
 import { namesFor, orgServerRefs, parseExpiry, standings } from './lists';
+import { memberSlots } from './lists-sync'; // zaruba: couch reserve
 import { couchConfig, deleteDoc, find, getDoc, putDoc } from './couch';
 import {
 	activeReserve,
@@ -54,7 +55,11 @@ export async function notesFor(
 			const p = docs.find(
 				(d): d is PersonalDoc => d.type === 'personal' && d.steamId === a.steamId
 			);
-			out.set(a.steamId, { reason: p?.reason ?? '', expiresAt: a.expiresAt });
+			// activeReserve only reports source 'personal' for a steamId when it found a personal
+			// doc for it, so p is always here; reason is required by PersonalDoc (not optional),
+			// so there is no missing-value case to fall back for.
+			if (!p) throw new Error(`reserve-store: no personal doc found for active grant ${a.steamId}.`);
+			out.set(a.steamId, { reason: p.reason, expiresAt: a.expiresAt });
 		} else {
 			out.set(a.steamId, { reason: a.clanTag ? `clan ${a.clanTag}` : 'clan', expiresAt: a.expiresAt });
 		}
@@ -65,17 +70,30 @@ export async function notesFor(
 /** The org's reserved-slot list: personal entries (editable) plus clan slots (synthetic, read-only). */
 export async function entriesView(env: Env, org: OrgRow): Promise<ListEntryView[]> {
 	const docs = await loadDocs(env);
-	const personals = docs.filter((d): d is PersonalDoc => d.type === 'personal');
+	const personalByPlayer = new Map(
+		docs.filter((d): d is PersonalDoc => d.type === 'personal').map((p) => [p.steamId, p])
+	);
 	const clans = new Map(docs.filter((d): d is ClanDoc => d.type === 'clan').map((c) => [c.clanId, c]));
-	const clanslots = docs.filter((d): d is ClanSlotDoc => d.type === 'clanslot');
+	const clanslotByPlayer = new Map(
+		docs.filter((d): d is ClanSlotDoc => d.type === 'clanslot').map((s) => [s.steamId, s])
+	);
 	const now = new Date();
-	const activeIds = new Set(activeReserve(docs, now).map((a) => a.steamId));
+	// One resolved entry per steamId, source already decided (a player with both an expired
+	// personal doc and an active clan slot resolves to 'clan' here — activeReserve drops the
+	// expired personal before picking a source, so this list is never keyed off the raw doc set).
+	const active = activeReserve(docs, now);
+
+	// zaruba: couch reserve — members-reserved slots for org.membersReserved, the couch-backed
+	// counterpart of the members branch in lists.ts entriesView (~L374-381), which this function's
+	// early return (lists.ts isCouchReserve) makes unreachable for this org. A member already
+	// covered by an active personal or clan grant above is not also listed as a member slot.
+	const members = org.membersReserved
+		? (await memberSlots(env, org.id)).filter((m) => !active.some((a) => a.steamId === m.steamId))
+		: [];
 
 	const srv = await orgServerRefs(env, org.id);
 	const serverIds = srv.map((s) => s.id);
-	const steamIds = [
-		...new Set([...personals.map((p) => p.steamId), ...clanslots.map((s) => s.steamId)])
-	];
+	const steamIds = [...new Set([...active.map((a) => a.steamId), ...members.map((m) => m.steamId)])];
 	const [names, byServer] = await Promise.all([
 		namesFor(env, serverIds, steamIds),
 		standings(env, KIND, serverIds, steamIds)
@@ -87,48 +105,67 @@ export async function entriesView(env: Env, org: OrgRow): Promise<ListEntryView[
 		});
 
 	const out: ListEntryView[] = [];
-	for (const p of personals) {
-		if (!activeIds.has(p.steamId)) continue; // expired: dropped here, nothing written to couch
-		out.push({
-			id: personalId(p.steamId),
-			kind: KIND,
-			steamId: p.steamId,
-			name: names.get(p.steamId) ?? null,
-			reason: p.reason,
-			expiresAt: p.expiresAt,
-			expired: false,
-			addedByName: '',
-			addedAt: p.addedAt,
-			removedAt: null,
-			removedByName: '',
-			removal: null,
-			member: false,
-			servers: perServer(p.steamId)
-		});
+	for (const a of active) {
+		if (a.source === 'personal') {
+			const p = personalByPlayer.get(a.steamId);
+			if (!p) throw new Error(`reserve-store: no personal doc found for active grant ${a.steamId}.`);
+			out.push({
+				id: personalId(a.steamId),
+				kind: KIND,
+				steamId: a.steamId,
+				name: names.get(a.steamId) ?? null,
+				reason: p.reason,
+				expiresAt: a.expiresAt,
+				expired: false,
+				addedByName: '',
+				addedAt: p.addedAt,
+				removedAt: null,
+				removedByName: '',
+				removal: null,
+				member: false,
+				servers: perServer(a.steamId)
+			});
+		} else {
+			const s = clanslotByPlayer.get(a.steamId);
+			if (!s) throw new Error(`reserve-store: no clanslot doc found for active grant ${a.steamId}.`);
+			const clan = clans.get(s.clanId);
+			out.push({
+				id: `clanslot:${s.clanId}:${a.steamId}`,
+				kind: KIND,
+				steamId: a.steamId,
+				name: names.get(a.steamId) ?? null,
+				reason: clan ? `clan ${clan.clanTag}` : 'clan',
+				expiresAt: a.expiresAt,
+				expired: false,
+				addedByName: '',
+				addedAt: s.assignedAt,
+				removedAt: null,
+				removedByName: '',
+				removal: null,
+				// Read-only in this panel (the platform owns clan slots): reusing the member-slot flag
+				// hides the remove control the same way membership-reserved slots do.
+				member: true,
+				servers: perServer(a.steamId)
+			});
+		}
 	}
-	const personalIds = new Set(personals.map((p) => p.steamId));
-	for (const s of clanslots) {
-		if (personalIds.has(s.steamId) || !activeIds.has(s.steamId)) continue;
-		const clan = clans.get(s.clanId);
+	for (const m of members)
 		out.push({
-			id: `clanslot:${s.clanId}:${s.steamId}`,
+			id: `member:${m.userId}`,
 			kind: KIND,
-			steamId: s.steamId,
-			name: names.get(s.steamId) ?? null,
-			reason: clan ? `clan ${clan.clanTag}` : 'clan',
-			expiresAt: clan?.expiresAt ?? null,
+			steamId: m.steamId,
+			name: names.get(m.steamId) ?? (m.username ? `@${m.username}` : null),
+			reason: m.username ? `member @${m.username}` : 'member',
+			expiresAt: null,
 			expired: false,
 			addedByName: '',
-			addedAt: s.assignedAt,
+			addedAt: m.since.toISOString(),
 			removedAt: null,
 			removedByName: '',
 			removal: null,
-			// Read-only in this panel (the platform owns clan slots): reusing the member-slot flag
-			// hides the remove control the same way membership-reserved slots do.
 			member: true,
-			servers: perServer(s.steamId)
+			servers: perServer(m.steamId)
 		});
-	}
 	return out;
 }
 

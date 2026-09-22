@@ -91,6 +91,16 @@ describe('activeReserve', () => {
 		const out = activeReserve(docs, now);
 		expect(out).toEqual([{ steamId: '1', expiresAt: ahead(5000), source: 'clan', clanTag: 'ZARUBA' }]);
 	});
+
+	test('an expired personal grant with an active clan slot falls back to the clan entry, not the expired personal', () => {
+		const docs = [
+			personal('1', ago(1000)),
+			clan('c1', ahead(5000), { clanTag: 'ZARUBA' }),
+			clanslot('c1', '1')
+		];
+		const out = activeReserve(docs, now);
+		expect(out).toEqual([{ steamId: '1', expiresAt: ahead(5000), source: 'clan', clanTag: 'ZARUBA' }]);
+	});
 });
 
 describe('pickWinner', () => {
