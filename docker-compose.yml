@@ -21,6 +21,11 @@ x-warcon: &warcon
     # The URL people open. Behind a reverse proxy set ORIGIN=https://... and ADDRESS_HEADER in .env (see README).
     ORIGIN: ${ORIGIN:-http://localhost:3000}
     RELAY_URL: http://worker:7700
+    # zaruba: couch reserve — the org reserve list; replicated multi-master with the platform's CouchDB.
+    COUCH_URL: http://couch:5984
+    COUCH_DB: wardogs_reserve
+    COUCH_USER: ${COUCH_USER:-warcon}
+    COUCH_PASSWORD: ${COUCH_PASSWORD:?set COUCH_PASSWORD in .env}
   # Uncomment to reach an RCON listener bound to 127.0.0.1 on the Docker host:
   # extra_hosts:
   #   - 'host.docker.internal:host-gateway'
@@ -34,6 +39,8 @@ services:
     restart: 'no'
     depends_on:
       db:
+        condition: service_healthy
+      couch:
         condition: service_healthy
 
   warcon:
@@ -77,5 +84,26 @@ services:
       timeout: 5s
       retries: 20
 
+  # zaruba: couch reserve — holds wardogs_reserve (the org reserve list), replicated multi-master
+  # with the platform's own CouchDB; the migrate service creates the database and its indexes.
+  couch:
+    image: couchdb:3.4.3
+    restart: unless-stopped
+    environment:
+      COUCHDB_USER: ${COUCH_USER:-warcon}
+      COUCHDB_PASSWORD: ${COUCH_PASSWORD:?set COUCH_PASSWORD in .env}
+    volumes:
+      - couch-data:/opt/couchdb/data
+    ports:
+      # The host's Caddy proxies /couch/* here for the platform's replicator; see
+      # docs/zaruba-couch-reserve.md.
+      - '127.0.0.1:5984:5984'
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://127.0.0.1:5984/_up']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
 volumes:
   warcon-db:
+  couch-data:

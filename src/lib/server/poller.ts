@@ -21,6 +21,7 @@ import { loadSettings, settings, settingsVersion } from './settings';
 import { watchedCount } from './interest';
 import { deliveryStats, outboxDepth, startDelivery, stopDelivery } from './outbox';
 import { startStatusMirror, stopStatusMirror } from './webhook-status';
+import { startReserveWatch, stopReserveWatch } from './wardogs-watch'; // zaruba: couch reserve
 import {
 	allMemory,
 	cadenceOf,
@@ -129,6 +130,7 @@ export function startPoller(env: Env, label = 'worker'): void {
 	globalThis.__warconRenew = scheduler.renewTimer;
 	startDelivery(env);
 	startStatusMirror(env);
+	startReserveWatch(env); // zaruba: couch reserve
 	if (unregisterMetrics) unregisterMetrics();
 	unregisterMetrics = metrics.registerCollector(collectWorkerMetrics);
 	globalThis.__warconPoller = setInterval(() => void beat(env), BEAT_MS);
@@ -143,6 +145,7 @@ export async function stopPoller(): Promise<void> {
 	globalThis.__warconRenew = undefined;
 	stopDelivery();
 	stopStatusMirror();
+	stopReserveWatch(); // zaruba: couch reserve
 	if (unregisterMetrics) unregisterMetrics();
 	unregisterMetrics = null;
 	scheduler = null;

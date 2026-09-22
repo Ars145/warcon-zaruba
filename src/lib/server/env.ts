@@ -55,6 +55,12 @@ export interface Env {
 	POLL_CONCURRENCY?: string;
 	/** Bearer for GET /metrics (Prometheus) on the web and worker processes; the endpoint is off when unset. */
 	METRICS_TOKEN?: string;
+	// zaruba: couch reserve — CouchDB holding the org reserve list (wardogs_reserve), replicated
+	// multi-master with the platform; see src/lib/server/couch.ts.
+	COUCH_URL: string;
+	COUCH_DB: string;
+	COUCH_USER: string;
+	COUCH_PASSWORD: string;
 }
 
 export type Role = 'all' | 'web' | 'worker';
@@ -159,6 +165,14 @@ export async function initEnv(opts: { role?: Role } = {}): Promise<Env> {
 		if (role === 'web' && !processEnv.RELAY_URL)
 			throw new Error('RELAY_URL (e.g. http://worker:7700) is required for the web role.');
 	}
+	// zaruba: couch reserve — required, no fallback: the org reserve list lives only in CouchDB.
+	const couchProblem = couchEnvProblem({
+		COUCH_URL: processEnv.COUCH_URL,
+		COUCH_DB: processEnv.COUCH_DB,
+		COUCH_USER: processEnv.COUCH_USER,
+		COUCH_PASSWORD: processEnv.COUCH_PASSWORD
+	});
+	if (couchProblem) throw new Error(couchProblem);
 	const { client, db } = connect(databaseTarget());
 	const migrations = resolve(process.cwd(), 'drizzle');
 	if (role === 'all') await runMigrations(db, migrations);
@@ -197,9 +211,28 @@ export async function initEnv(opts: { role?: Role } = {}): Promise<Env> {
 		TURNSTILE_SECRET_KEY: processEnv.TURNSTILE_SECRET_KEY,
 		GAME_TLS_INSECURE: processEnv.GAME_TLS_INSECURE,
 		POLL_SECONDS: processEnv.POLL_SECONDS,
-		POLL_CONCURRENCY: processEnv.POLL_CONCURRENCY
+		POLL_CONCURRENCY: processEnv.POLL_CONCURRENCY,
+		// zaruba: couch reserve
+		COUCH_URL: processEnv.COUCH_URL!,
+		COUCH_DB: processEnv.COUCH_DB!,
+		COUCH_USER: processEnv.COUCH_USER!,
+		COUCH_PASSWORD: processEnv.COUCH_PASSWORD!
 	};
 	return cached;
+}
+
+// zaruba: couch reserve — a message when any of the four is missing/blank, else null. Shared with
+// the migrate-time script, which builds its own config from process.env without going through
+// initEnv (see src/worker/couch-reserve-migrate.ts).
+export function couchEnvProblem(env: {
+	COUCH_URL?: string;
+	COUCH_DB?: string;
+	COUCH_USER?: string;
+	COUCH_PASSWORD?: string;
+}): string | null {
+	if (!env.COUCH_URL || !env.COUCH_DB || !env.COUCH_USER || !env.COUCH_PASSWORD)
+		return 'Set COUCH_URL, COUCH_DB, COUCH_USER and COUCH_PASSWORD (the org reserve list lives in CouchDB, not Postgres).';
+	return null;
 }
 
 /** The environment after initEnv() resolved (SvelteKit runs the init hook before any request). */

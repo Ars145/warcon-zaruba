@@ -962,3 +962,12 @@ export type ServerListStateRow = typeof serverListState.$inferSelect;
 export type ServerListSyncRow = typeof serverListSync.$inferSelect;
 export type ServerLiveRow = typeof serverLive.$inferSelect;
 export type OutboxRow = typeof outbox.$inferSelect;
+
+// zaruba: couch reserve — tiny generic key/value table, so the CouchDB watch loop's last _changes
+// seq survives a restart without overloading site_settings (whose values are bounded numbers, see
+// settings.ts). Nothing else uses this table.
+export const couchState = pgTable('couch_state', {
+	key: text('key').primaryKey(),
+	value: text('value').notNull()
+});
+export type CouchStateRow = typeof couchState.$inferSelect;

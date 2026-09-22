@@ -2,6 +2,7 @@
 // while any are pending, so run this (Compose's `migrate` service does) before web and worker.
 import { resolve } from 'node:path';
 import { connect, runMigrations } from '$lib/server/db';
+import { migrateReserveToCouch } from '../../scripts/migrate-reserve-to-couch'; // zaruba: couch reserve
 
 const url = process.env.DATABASE_URL;
 const target =
@@ -22,4 +23,12 @@ if (!target) {
 const { client, db } = connect(target);
 await runMigrations(db, resolve(process.cwd(), 'drizzle'));
 console.log('[warcon] migrations applied');
+// zaruba: couch reserve
+const couchResult = await migrateReserveToCouch(db, {
+	COUCH_URL: process.env.COUCH_URL,
+	COUCH_DB: process.env.COUCH_DB,
+	COUCH_USER: process.env.COUCH_USER,
+	COUCH_PASSWORD: process.env.COUCH_PASSWORD
+});
+console.log(`[warcon] couch reserve backfill: ${couchResult.created} created, ${couchResult.skipped} already present`);
 await client.end();

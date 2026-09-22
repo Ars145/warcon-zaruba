@@ -9,7 +9,7 @@
 // banned" is a success, "not banned" on delete is a success), so two replicas working the same
 // server at once do no harm; the in-process lock below only keeps the poller and an API call in
 // one process from interleaving.
-import { and, eq, gt, inArray, isNotNull, isNull, lte, notInArray, or, sql } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNotNull, isNull, lte, ne, notInArray, or, sql } from 'drizzle-orm';
 import type { Env } from './env';
 import { renderBanMessage } from '$lib/ban-message';
 import { publicMessage } from './http';
@@ -48,6 +48,7 @@ import {
 } from './lists-plan';
 import type { DbOrTx } from './db';
 import type { Ban, Features, ListSyncServer, ListSyncSummary } from '$lib/types';
+import { desiredReserve } from './wardogs-reserve'; // zaruba: couch reserve
 
 /** A failed add or remove is not retried for this long. */
 const RETRY_AFTER_MS = 5 * 60_000;
@@ -109,12 +110,21 @@ export async function desiredFor(
 	org: Pick<OrgRow, 'membersReserved' | 'banMessage'>,
 	now = new Date()
 ): Promise<PlanInput['desired']> {
+	// zaruba: couch reserve — the org's own reserve list (server_id null) is excluded here: its
+	// entries live in CouchDB now (below), not in list_entries. Bans and every server's own reserve
+	// list are untouched.
 	const rows = await env.db
 		.select({ e: listEntries, kind: lists.kind, listServerId: lists.serverId })
 		.from(serverLists)
 		.innerJoin(lists, eq(lists.id, serverLists.listId))
 		.innerJoin(listEntries, eq(listEntries.listId, lists.id))
-		.where(and(eq(serverLists.serverId, server.id), isNull(listEntries.removedAt)));
+		.where(
+			and(
+				eq(serverLists.serverId, server.id),
+				isNull(listEntries.removedAt),
+				or(ne(lists.kind, 'reserve'), isNotNull(lists.serverId))
+			)
+		);
 	// A ban goes to the game as the org's ban message, not the bare reason. Only the adds read it:
 	// a ban already on the server keeps the text it was placed with.
 	const active = activeEntries(
@@ -130,24 +140,28 @@ export async function desiredFor(
 		now
 	);
 	const { bans, reserved } = desiredOf(active);
-	if (org.membersReserved) {
-		// Members who set a SteamID get a slot from the org's reserve list, unless the org has
-		// banned them.
-		const [reserveList] = await env.db
-			.select({ id: lists.id })
-			.from(serverLists)
-			.innerJoin(lists, eq(lists.id, serverLists.listId))
-			.where(
-				and(eq(serverLists.serverId, server.id), eq(lists.kind, 'reserve'), isNull(lists.serverId))
-			)
-			.limit(1);
-		if (reserveList) {
-			const banned = new Set(bans.map((b) => b.steamId));
-			const have = new Set(reserved.map((r) => r.steamId));
+	// zaruba: couch reserve — the org's reserve list id, needed both for its CouchDB-backed entries
+	// and (as before) for the members-reserved addition below; one lookup serves both.
+	const [reserveList] = await env.db
+		.select({ id: lists.id })
+		.from(serverLists)
+		.innerJoin(lists, eq(lists.id, serverLists.listId))
+		.where(and(eq(serverLists.serverId, server.id), eq(lists.kind, 'reserve'), isNull(lists.serverId)))
+		.limit(1);
+	if (reserveList) {
+		const banned = new Set(bans.map((b) => b.steamId));
+		const have = new Set(reserved.map((r) => r.steamId));
+		for (const c of await desiredReserve(env, now))
+			if (!banned.has(c.steamId) && !have.has(c.steamId)) {
+				reserved.push({ steamId: c.steamId, listId: reserveList.id, member: false });
+				have.add(c.steamId);
+			}
+		if (org.membersReserved)
+			// Members who set a SteamID get a slot from the org's reserve list, unless the org has
+			// banned them or a CouchDB grant already covers them.
 			for (const m of await memberSlots(env, server.orgId))
 				if (!banned.has(m.steamId) && !have.has(m.steamId))
 					reserved.push({ steamId: m.steamId, listId: reserveList.id, member: true });
-		}
 	}
 	return { bans, reserved };
 }
@@ -189,6 +203,13 @@ export async function memberSlots(
  */
 export async function expireEntries(env: Env): Promise<{ lifted: number; orgIds: string[] }> {
 	const now = new Date();
+	// zaruba: couch reserve — org reserve lists are excluded: their expiry is a read-time filter in
+	// CouchDB (see wardogs-reserve.ts activeReserve), nothing is written there for it, and any rows
+	// still sitting in list_entries from before the migration are history, not live state.
+	const orgReserveListIds = env.db
+		.select({ id: lists.id })
+		.from(lists)
+		.where(and(eq(lists.kind, 'reserve'), isNull(lists.serverId)));
 	const rows = await env.db
 		.update(listEntries)
 		.set({ removedAt: now, removedByName: 'expiry', removal: 'expired' })
@@ -196,7 +217,8 @@ export async function expireEntries(env: Env): Promise<{ lifted: number; orgIds:
 			and(
 				isNull(listEntries.removedAt),
 				isNotNull(listEntries.expiresAt),
-				lte(listEntries.expiresAt, now)
+				lte(listEntries.expiresAt, now),
+				notInArray(listEntries.listId, orgReserveListIds)
 			)
 		)
 		.returning({ listId: listEntries.listId, steamId: listEntries.steamId });

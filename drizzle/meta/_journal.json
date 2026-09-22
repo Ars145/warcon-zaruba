@@ -204,6 +204,13 @@
       "when": 1789936870570,
       "tag": "0028_steam_friends",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1790110972645,
+      "tag": "0029_couch_state",
+      "breakpoints": true
     }
   ]
 }

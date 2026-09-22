@@ -38,6 +38,7 @@ import { DEFAULT_BAN_MESSAGE } from '$lib/ban-message';
 import { requireSteamId } from './steam';
 import { desiredFor, memberSlots, summaryOf } from './lists-sync';
 import { gateway } from './gateway';
+import * as reserveStore from './reserve-store'; // zaruba: couch reserve
 import type {
 	ImportCandidate,
 	ListEntryState,
@@ -63,6 +64,11 @@ export function parseKind(v: unknown): Kind {
 	if (v === 'ban' || v === 'reserve') return v;
 	throw new ApiError(404, 'No such list.', 'not_found');
 }
+
+// zaruba: couch reserve — a plain boolean, not a `kind is 'reserve'` type predicate: entriesView
+// still has a genuine 'reserve' branch further down (members-reserved), so `kind` must not narrow
+// to 'ban' for the rest of that function the way an `if (kind === 'reserve') return` would.
+const isReserveKind = (kind: Kind): boolean => kind === 'reserve';
 
 /** The db or a transaction handle: the ensure* helpers run inside the caller's transaction. */
 type DbLike = Db | Parameters<Parameters<Db['transaction']>[0]>[0];
@@ -351,6 +357,9 @@ export async function entriesView(
 	kind: Kind,
 	opts: { includeRemoved?: boolean } = {}
 ): Promise<ListEntryView[]> {
+	// zaruba: couch reserve — isReserveKind (not a `kind === 'reserve'` type predicate) so `kind`
+	// stays `Kind` below: the function still has a 'reserve' branch (members-reserved) after this.
+	if (isReserveKind(kind)) return reserveStore.entriesView(env, org);
 	const list = await listOf(env, org.id, kind);
 	const rows = await env.db
 		.select()
@@ -491,6 +500,7 @@ export async function addEntry(
 	kind: Kind,
 	body: Record<string, unknown>
 ): Promise<{ entry: ListEntryView; sync: ListSyncSummary }> {
+	if (kind === 'reserve') return reserveStore.addEntry(env, req, actor, org, body); // zaruba: couch reserve
 	const steamId = requireSteamId(body.steamId);
 	const reason = str(body.reason, 200);
 	const expiresAt = parseExpiry(body.expiresAt);
@@ -537,6 +547,7 @@ export async function removeEntry(
 	kind: Kind,
 	steamIdIn: unknown
 ): Promise<{ sync: ListSyncSummary }> {
+	if (kind === 'reserve') return reserveStore.removeEntry(env, req, actor, org, steamIdIn); // zaruba: couch reserve
 	const steamId = requireSteamId(steamIdIn);
 	const list = await listOf(env, org.id, kind);
 	const [row] = await env.db
@@ -694,6 +705,8 @@ export async function updateEntry(
 	steamIdIn: unknown,
 	body: Record<string, unknown>
 ): Promise<{ entry: { steamId: string; reason: string; expiresAt: string | null } }> {
+	// zaruba: couch reserve
+	if (kind === 'reserve' && !server) return reserveStore.updateEntry(env, req, actor, org, steamIdIn, body);
 	const steamId = requireSteamId(steamIdIn);
 	const set: { reason?: string; expiresAt?: Date | null } = {};
 	if ('reason' in body) set.reason = str(body.reason, 200);
@@ -828,6 +841,14 @@ export async function importEntries(
 		};
 	});
 	if (!picks.length) throw new ApiError(400, 'Nothing to import.');
+	// zaruba: couch reserve — the org reserve list lives in CouchDB now; there is nowhere here to
+	// adopt a server-observed reserved slot into.
+	if (picks.some((p) => p.kind === 'reserve'))
+		throw new ApiError(
+			400,
+			'Reserved-slot import is disabled: the reserved-slot list lives in CouchDB, not here.',
+			'reserve_import_disabled'
+		);
 	const candidates = await importCandidates(env, org);
 	const byKey = new Map(candidates.map((c) => [`${c.kind}:${c.steamId}`, c]));
 	const listRows = await orgLists(env, org.id);
@@ -1049,6 +1070,17 @@ export async function serverListsState(
 			s.note = role !== null || access.caps.has('slots.manage') ? e.reason : '';
 			s.expiresAt = iso(e.expiresAt);
 			if (e.listId === own.id) s.scope = 'server';
+		}
+		// zaruba: couch reserve — org-wide slots (scope 'org', the default) that list_entries above
+		// found nothing for: their note and expiry live in CouchDB now, not in list_entries.
+		const uncovered = slotIds.filter((id) => out.reserved[id].scope === 'org' && !out.reserved[id].expiresAt && !out.reserved[id].note);
+		if (uncovered.length) {
+			const couchNotes = await reserveStore.notesFor(env, uncovered);
+			for (const [steamId, n] of couchNotes) {
+				const s = out.reserved[steamId];
+				s.note = role !== null || access.caps.has('slots.manage') ? n.reason : '';
+				s.expiresAt = n.expiresAt;
+			}
 		}
 	}
 	return out;
