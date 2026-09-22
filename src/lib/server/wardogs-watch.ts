@@ -58,23 +58,24 @@ async function loop(env: Env): Promise<void> {
 	const c = couchConfig(env);
 	let since = await lastSeq(env);
 	while (!stopRequested) {
-		let batch: Awaited<ReturnType<typeof changes>>;
 		try {
-			batch = await changes(c, since);
+			const batch = await changes(c, since);
+			if (stopRequested) break;
+			if (batch.results.length) {
+				await resolveConflicts(env, batch.results);
+				for (const org of await reserveOrgs(env))
+					gateway()
+						.syncOrg(env, org)
+						.catch((err) => console.error(`[warcon] couch reserve sync ${org.name}`, err));
+			}
+			// The cursor moves only after the batch is handled, so a crash replays it instead of
+			// leaving its conflicts unresolved.
+			await saveSeq(env, batch.last_seq);
+			since = batch.last_seq;
 		} catch (err) {
 			console.error('[warcon] couch reserve watch', err);
 			await new Promise((r) => setTimeout(r, RETRY_MS));
-			continue;
 		}
-		if (stopRequested) break;
-		since = batch.last_seq;
-		await saveSeq(env, since);
-		if (!batch.results.length) continue;
-		await resolveConflicts(env, batch.results);
-		for (const org of await reserveOrgs(env))
-			gateway()
-				.syncOrg(env, org)
-				.catch((err) => console.error(`[warcon] couch reserve sync ${org.name}`, err));
 	}
 }
 
