@@ -58,10 +58,14 @@ export async function notesFor(
 			// activeReserve only reports source 'personal' for a steamId when it found a personal
 			// doc for it, so p is always here; reason is required by PersonalDoc (not optional),
 			// so there is no missing-value case to fall back for.
-			if (!p) throw new Error(`reserve-store: no personal doc found for active grant ${a.steamId}.`);
+			if (!p)
+				throw new Error(`reserve-store: no personal doc found for active grant ${a.steamId}.`);
 			out.set(a.steamId, { reason: p.reason, expiresAt: a.expiresAt });
 		} else {
-			out.set(a.steamId, { reason: a.clanTag ? `clan ${a.clanTag}` : 'clan', expiresAt: a.expiresAt });
+			out.set(a.steamId, {
+				reason: a.clanTag ? `clan ${a.clanTag}` : 'clan',
+				expiresAt: a.expiresAt
+			});
 		}
 	}
 	return out;
@@ -73,7 +77,9 @@ export async function entriesView(env: Env, org: OrgRow): Promise<ListEntryView[
 	const personalByPlayer = new Map(
 		docs.filter((d): d is PersonalDoc => d.type === 'personal').map((p) => [p.steamId, p])
 	);
-	const clans = new Map(docs.filter((d): d is ClanDoc => d.type === 'clan').map((c) => [c.clanId, c]));
+	const clans = new Map(
+		docs.filter((d): d is ClanDoc => d.type === 'clan').map((c) => [c.clanId, c])
+	);
 	const clanslotByPlayer = new Map(
 		docs.filter((d): d is ClanSlotDoc => d.type === 'clanslot').map((s) => [s.steamId, s])
 	);
@@ -93,7 +99,9 @@ export async function entriesView(env: Env, org: OrgRow): Promise<ListEntryView[
 
 	const srv = await orgServerRefs(env, org.id);
 	const serverIds = srv.map((s) => s.id);
-	const steamIds = [...new Set([...active.map((a) => a.steamId), ...members.map((m) => m.steamId)])];
+	const steamIds = [
+		...new Set([...active.map((a) => a.steamId), ...members.map((m) => m.steamId)])
+	];
 	const [names, byServer] = await Promise.all([
 		namesFor(env, serverIds, steamIds),
 		standings(env, KIND, serverIds, steamIds)
@@ -101,14 +109,20 @@ export async function entriesView(env: Env, org: OrgRow): Promise<ListEntryView[
 	const perServer = (steamId: string): ListServerStateView[] =>
 		srv.map((s) => {
 			const st = byServer.get(s.id)?.get(steamId);
-			return { serverId: s.id, serverName: s.name, state: st?.state ?? 'pending', error: st?.error ?? '' };
+			return {
+				serverId: s.id,
+				serverName: s.name,
+				state: st?.state ?? 'pending',
+				error: st?.error ?? ''
+			};
 		});
 
 	const out: ListEntryView[] = [];
 	for (const a of active) {
 		if (a.source === 'personal') {
 			const p = personalByPlayer.get(a.steamId);
-			if (!p) throw new Error(`reserve-store: no personal doc found for active grant ${a.steamId}.`);
+			if (!p)
+				throw new Error(`reserve-store: no personal doc found for active grant ${a.steamId}.`);
 			out.push({
 				id: personalId(a.steamId),
 				kind: KIND,
@@ -127,7 +141,8 @@ export async function entriesView(env: Env, org: OrgRow): Promise<ListEntryView[
 			});
 		} else {
 			const s = clanslotByPlayer.get(a.steamId);
-			if (!s) throw new Error(`reserve-store: no clanslot doc found for active grant ${a.steamId}.`);
+			if (!s)
+				throw new Error(`reserve-store: no clanslot doc found for active grant ${a.steamId}.`);
 			const clan = clans.get(s.clanId);
 			out.push({
 				id: `clanslot:${s.clanId}:${a.steamId}`,
@@ -268,11 +283,16 @@ export async function updateEntry(
 	const now = new Date();
 	const existing = await getDoc<PersonalDoc>(c, personalId(steamId));
 	if (!existing || !(existing.expiresAt === null || new Date(existing.expiresAt) > now))
-		throw new ApiError(404, `${steamId} is not on the reserved-slot list of ${org.name}.`, 'not_found');
+		throw new ApiError(
+			404,
+			`${steamId} is not on the reserved-slot list of ${org.name}.`,
+			'not_found'
+		);
 	const doc: PersonalDoc = {
 		...existing,
 		reason: 'reason' in set ? set.reason! : existing.reason,
-		expiresAt: 'expiresAt' in set ? (set.expiresAt ? set.expiresAt.toISOString() : null) : existing.expiresAt
+		expiresAt:
+			'expiresAt' in set ? (set.expiresAt ? set.expiresAt.toISOString() : null) : existing.expiresAt
 	};
 	await putDoc(c, doc);
 	await writeAudit(env, req, {
@@ -292,7 +312,9 @@ export async function updateEntry(
 		detail: {
 			kind: KIND,
 			...('reason' in set ? { reason: set.reason } : {}),
-			...('expiresAt' in set ? { expiresAt: set.expiresAt ? set.expiresAt.toISOString() : null } : {})
+			...('expiresAt' in set
+				? { expiresAt: set.expiresAt ? set.expiresAt.toISOString() : null }
+				: {})
 		}
 	});
 	return { entry: { steamId, reason: doc.reason, expiresAt: doc.expiresAt } };

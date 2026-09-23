@@ -101,7 +101,13 @@ function databaseTarget(): string | Bun.SQL.PostgresOrMySQLOptions {
 async function activeOrgReserveEntries(db: Db, orgId: string) {
 	const now = new Date();
 	return db
-		.select({ steamId: listEntries.steamId, reason: listEntries.reason, expiresAt: listEntries.expiresAt, addedAt: listEntries.addedAt, addedBy: listEntries.addedBy })
+		.select({
+			steamId: listEntries.steamId,
+			reason: listEntries.reason,
+			expiresAt: listEntries.expiresAt,
+			addedAt: listEntries.addedAt,
+			addedBy: listEntries.addedBy
+		})
 		.from(listEntries)
 		.innerJoin(lists, eq(lists.id, listEntries.listId))
 		.where(
@@ -138,7 +144,11 @@ export async function migrateReserveToCouch(
 	await setSecurity(c, [repl.user]);
 	await ensureValidateDesignDoc(c, VALIDATE_DOC_UPDATE);
 
-	const [marker] = await db.select().from(couchState).where(eq(couchState.key, BACKFILL_KEY)).limit(1);
+	const [marker] = await db
+		.select()
+		.from(couchState)
+		.where(eq(couchState.key, BACKFILL_KEY))
+		.limit(1);
 	if (marker) return { created: 0, skipped: 0, alreadyDone: true };
 
 	const rows = await activeOrgReserveEntries(db, orgId);
@@ -172,7 +182,10 @@ export async function migrateReserveToCouch(
 
 if (import.meta.main) {
 	const orgId = process.env.COUCH_ORG_ID;
-	if (!orgId) throw new Error('Set COUCH_ORG_ID to the id of the organisation whose reserve list is couch-backed.');
+	if (!orgId)
+		throw new Error(
+			'Set COUCH_ORG_ID to the id of the organisation whose reserve list is couch-backed.'
+		);
 	// zaruba: couch reserve — required, no fallback: without a dedicated replication user the
 	// platform would have to replicate as the admin, which is exactly what this is meant to avoid.
 	const replUser = process.env.COUCH_REPL_USER;

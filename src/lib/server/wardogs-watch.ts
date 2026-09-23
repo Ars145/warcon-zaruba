@@ -60,7 +60,9 @@ async function resolveConflicts(env: Env, results: CouchChange[]): Promise<void>
 			await resolveConflict(env, change.doc);
 		} catch (err) {
 			if (err instanceof CouchConflict) {
-				console.warn(`[warcon] couch reserve conflict on ${change.id} lost the race to another resolver`);
+				console.warn(
+					`[warcon] couch reserve conflict on ${change.id} lost the race to another resolver`
+				);
 				continue;
 			}
 			throw err;
@@ -158,7 +160,9 @@ async function loop(env: Env): Promise<void> {
 export function startReserveWatch(env: Env): void {
 	if (loopPromise) return;
 	stopRequested = false;
-	loopPromise = loop(env).catch((err) => console.error('[warcon] couch reserve watch stopped', err));
+	loopPromise = loop(env).catch((err) =>
+		console.error('[warcon] couch reserve watch stopped', err)
+	);
 }
 
 /**

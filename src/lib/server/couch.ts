@@ -55,7 +55,10 @@ const dbUrl = (c: CouchConfig) => `${serverUrl(c)}/${c.db}`;
 async function dbFetch(c: CouchConfig, path: string, init: RequestInit = {}): Promise<Response> {
 	const headers: Record<string, string> = { authorization: authHeader(c) };
 	if (init.body !== undefined) headers['content-type'] = 'application/json';
-	return fetch(`${dbUrl(c)}${path}`, { ...init, headers: { ...headers, ...(init.headers as Record<string, string> | undefined) } });
+	return fetch(`${dbUrl(c)}${path}`, {
+		...init,
+		headers: { ...headers, ...(init.headers as Record<string, string> | undefined) }
+	});
 }
 
 async function failIfNotOk(res: Response, what: string): Promise<never> {
@@ -63,7 +66,10 @@ async function failIfNotOk(res: Response, what: string): Promise<never> {
 }
 
 /** null on 404; throws on any other non-2xx. */
-export async function getDoc<T extends CouchDoc = CouchDoc>(c: CouchConfig, id: string): Promise<T | null> {
+export async function getDoc<T extends CouchDoc = CouchDoc>(
+	c: CouchConfig,
+	id: string
+): Promise<T | null> {
 	const res = await dbFetch(c, `/${encodeURIComponent(id)}`);
 	if (res.status === 404) return null;
 	if (!res.ok) return failIfNotOk(res, `GET ${id}`);
@@ -71,7 +77,10 @@ export async function getDoc<T extends CouchDoc = CouchDoc>(c: CouchConfig, id: 
 }
 
 /** Creates or updates a doc (include _rev on an update). Throws CouchConflict on 409. */
-export async function putDoc<T extends CouchDoc>(c: CouchConfig, doc: T): Promise<T & { _rev: string }> {
+export async function putDoc<T extends CouchDoc>(
+	c: CouchConfig,
+	doc: T
+): Promise<T & { _rev: string }> {
 	const res = await dbFetch(c, `/${encodeURIComponent(doc._id)}`, {
 		method: 'PUT',
 		body: JSON.stringify(doc)
@@ -214,7 +223,10 @@ export async function ensureReplicationUser(
 export async function setSecurity(c: CouchConfig, members: string[]): Promise<void> {
 	const res = await dbFetch(c, '/_security', {
 		method: 'PUT',
-		body: JSON.stringify({ admins: { names: [], roles: [] }, members: { names: members, roles: [] } })
+		body: JSON.stringify({
+			admins: { names: [], roles: [] },
+			members: { names: members, roles: [] }
+		})
 	});
 	if (!res.ok) return failIfNotOk(res, 'PUT _security');
 }

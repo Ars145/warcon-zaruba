@@ -58,7 +58,9 @@ function laterExpiry(a: string | null, b: string | null): string | null {
  * if either is permanent).
  */
 export function activeReserve(docs: ReserveDoc[], now: Date): ActiveReserveEntry[] {
-	const clans = new Map(docs.filter((d): d is ClanDoc => d.type === 'clan').map((c) => [c.clanId, c]));
+	const clans = new Map(
+		docs.filter((d): d is ClanDoc => d.type === 'clan').map((c) => [c.clanId, c])
+	);
 
 	const personalByPlayer = new Map<string, PersonalDoc>();
 	for (const d of docs) {
@@ -83,7 +85,11 @@ export function activeReserve(docs: ReserveDoc[], now: Date): ActiveReserveEntry
 		const personal = personalByPlayer.get(steamId);
 		const clan = clanByPlayer.get(steamId);
 		if (personal && clan) {
-			out.push({ steamId, expiresAt: laterExpiry(personal.expiresAt, clan.expiresAt), source: 'personal' });
+			out.push({
+				steamId,
+				expiresAt: laterExpiry(personal.expiresAt, clan.expiresAt),
+				source: 'personal'
+			});
 		} else if (personal) {
 			out.push({ steamId, expiresAt: personal.expiresAt, source: 'personal' });
 		} else if (clan) {

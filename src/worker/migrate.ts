@@ -26,7 +26,9 @@ console.log('[warcon] migrations applied');
 // zaruba: couch reserve
 const couchOrgId = process.env.COUCH_ORG_ID;
 if (!couchOrgId) {
-	console.error('Set COUCH_ORG_ID to the id of the organisation whose reserve list is couch-backed.');
+	console.error(
+		'Set COUCH_ORG_ID to the id of the organisation whose reserve list is couch-backed.'
+	);
 	process.exit(2);
 }
 const couchReplUser = process.env.COUCH_REPL_USER;

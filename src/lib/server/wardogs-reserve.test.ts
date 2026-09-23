@@ -15,7 +15,11 @@ const now = new Date('2026-09-09T12:00:00Z');
 const ago = (ms: number) => new Date(now.getTime() - ms).toISOString();
 const ahead = (ms: number) => new Date(now.getTime() + ms).toISOString();
 
-const personal = (steamId: string, expiresAt: string | null, extra: Partial<PersonalDoc> = {}): PersonalDoc => ({
+const personal = (
+	steamId: string,
+	expiresAt: string | null,
+	extra: Partial<PersonalDoc> = {}
+): PersonalDoc => ({
 	_id: `personal:${steamId}`,
 	_rev: '1-a',
 	type: 'personal',
@@ -38,7 +42,11 @@ const clan = (clanId: string, expiresAt: string, extra: Partial<ClanDoc> = {}): 
 	...extra
 });
 
-const clanslot = (clanId: string, steamId: string, extra: Partial<ClanSlotDoc> = {}): ClanSlotDoc => ({
+const clanslot = (
+	clanId: string,
+	steamId: string,
+	extra: Partial<ClanSlotDoc> = {}
+): ClanSlotDoc => ({
 	_id: `clanslot:${clanId}:${steamId}`,
 	_rev: '1-a',
 	type: 'clanslot',
@@ -89,7 +97,9 @@ describe('activeReserve', () => {
 	test('a clan slot with no personal grant shows as clan, with the clan tag', () => {
 		const docs = [clan('c1', ahead(5000), { clanTag: 'ZARUBA' }), clanslot('c1', '1')];
 		const out = activeReserve(docs, now);
-		expect(out).toEqual([{ steamId: '1', expiresAt: ahead(5000), source: 'clan', clanTag: 'ZARUBA' }]);
+		expect(out).toEqual([
+			{ steamId: '1', expiresAt: ahead(5000), source: 'clan', clanTag: 'ZARUBA' }
+		]);
 	});
 
 	test('an expired personal grant with an active clan slot falls back to the clan entry, not the expired personal', () => {
@@ -99,7 +109,9 @@ describe('activeReserve', () => {
 			clanslot('c1', '1')
 		];
 		const out = activeReserve(docs, now);
-		expect(out).toEqual([{ steamId: '1', expiresAt: ahead(5000), source: 'clan', clanTag: 'ZARUBA' }]);
+		expect(out).toEqual([
+			{ steamId: '1', expiresAt: ahead(5000), source: 'clan', clanTag: 'ZARUBA' }
+		]);
 	});
 });
 

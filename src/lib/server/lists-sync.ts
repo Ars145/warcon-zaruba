@@ -136,11 +136,7 @@ export async function desiredFor(
 			and(
 				eq(serverLists.serverId, server.id),
 				isNull(listEntries.removedAt),
-				or(
-					ne(lists.kind, 'reserve'),
-					isNotNull(lists.serverId),
-					ne(lists.orgId, env.COUCH_ORG_ID)
-				)
+				or(ne(lists.kind, 'reserve'), isNotNull(lists.serverId), ne(lists.orgId, env.COUCH_ORG_ID))
 			)
 		);
 	const active = activeEntries(
@@ -154,7 +150,9 @@ export async function desiredFor(
 		.select({ id: lists.id })
 		.from(serverLists)
 		.innerJoin(lists, eq(lists.id, serverLists.listId))
-		.where(and(eq(serverLists.serverId, server.id), eq(lists.kind, 'reserve'), isNull(lists.serverId)))
+		.where(
+			and(eq(serverLists.serverId, server.id), eq(lists.kind, 'reserve'), isNull(lists.serverId))
+		)
 		.limit(1);
 	let reserveError: string | undefined;
 	if (reserveList) {
@@ -233,7 +231,9 @@ export async function expireEntries(env: Env): Promise<{ lifted: number; orgIds:
 	const orgReserveListIds = env.db
 		.select({ id: lists.id })
 		.from(lists)
-		.where(and(eq(lists.kind, 'reserve'), isNull(lists.serverId), eq(lists.orgId, env.COUCH_ORG_ID)));
+		.where(
+			and(eq(lists.kind, 'reserve'), isNull(lists.serverId), eq(lists.orgId, env.COUCH_ORG_ID))
+		);
 	const rows = await env.db
 		.update(listEntries)
 		.set({ removedAt: now, removedByName: 'expiry', removal: 'expired' })
@@ -461,7 +461,10 @@ export async function reconcileServer(
  * only reserve removes are held back — the next successful sync computes them fresh. Pure and
  * exported so the behavior is unit-testable without a database (see lists-sync.test.ts).
  */
-export function withReserveRemovalsHeldBack(plan: SyncPlan, reserveError: string | undefined): SyncPlan {
+export function withReserveRemovalsHeldBack(
+	plan: SyncPlan,
+	reserveError: string | undefined
+): SyncPlan {
 	if (!reserveError) return plan;
 	return { ...plan, removes: plan.removes.filter((r) => r.kind !== 'reserve') };
 }
@@ -583,8 +586,7 @@ async function run(
 		added: outcome.added.length,
 		removed: outcome.removed.length,
 		failed: failedNow.length,
-		error:
-			outcome.aborted ?? (desired.reserveError ? `Reserve list: ${desired.reserveError}` : ''),
+		error: outcome.aborted ?? (desired.reserveError ? `Reserve list: ${desired.reserveError}` : ''),
 		observed: flat(outcome.observed),
 		bans: panelBans
 	};

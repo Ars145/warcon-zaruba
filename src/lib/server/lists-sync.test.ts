@@ -8,32 +8,48 @@ const OTHER_ORG = 'org-other';
 
 describe('includedInPostgresDesired', () => {
 	test('bans are always included, for every org, on or off a server', () => {
-		expect(includedInPostgresDesired({ kind: 'ban', orgId: COUCH_ORG, listServerId: null }, COUCH_ORG)).toBe(true);
-		expect(includedInPostgresDesired({ kind: 'ban', orgId: OTHER_ORG, listServerId: null }, COUCH_ORG)).toBe(true);
-		expect(includedInPostgresDesired({ kind: 'ban', orgId: COUCH_ORG, listServerId: 'srv-1' }, COUCH_ORG)).toBe(
-			true
-		);
+		expect(
+			includedInPostgresDesired({ kind: 'ban', orgId: COUCH_ORG, listServerId: null }, COUCH_ORG)
+		).toBe(true);
+		expect(
+			includedInPostgresDesired({ kind: 'ban', orgId: OTHER_ORG, listServerId: null }, COUCH_ORG)
+		).toBe(true);
+		expect(
+			includedInPostgresDesired({ kind: 'ban', orgId: COUCH_ORG, listServerId: 'srv-1' }, COUCH_ORG)
+		).toBe(true);
 	});
 
 	test("a server's own reserve list is always included, for every org", () => {
 		expect(
-			includedInPostgresDesired({ kind: 'reserve', orgId: COUCH_ORG, listServerId: 'srv-1' }, COUCH_ORG)
+			includedInPostgresDesired(
+				{ kind: 'reserve', orgId: COUCH_ORG, listServerId: 'srv-1' },
+				COUCH_ORG
+			)
 		).toBe(true);
 		expect(
-			includedInPostgresDesired({ kind: 'reserve', orgId: OTHER_ORG, listServerId: 'srv-1' }, COUCH_ORG)
+			includedInPostgresDesired(
+				{ kind: 'reserve', orgId: OTHER_ORG, listServerId: 'srv-1' },
+				COUCH_ORG
+			)
 		).toBe(true);
 	});
 
 	test("COUCH_ORG_ID's own org-wide reserve list (server_id null) is excluded — its entries come from CouchDB", () => {
-		expect(includedInPostgresDesired({ kind: 'reserve', orgId: COUCH_ORG, listServerId: null }, COUCH_ORG)).toBe(
-			false
-		);
+		expect(
+			includedInPostgresDesired(
+				{ kind: 'reserve', orgId: COUCH_ORG, listServerId: null },
+				COUCH_ORG
+			)
+		).toBe(false);
 	});
 
 	test("every other org's org-wide reserve list stays included — regression test for the HIGH bug where it was dropped for every org, not just COUCH_ORG_ID's", () => {
-		expect(includedInPostgresDesired({ kind: 'reserve', orgId: OTHER_ORG, listServerId: null }, COUCH_ORG)).toBe(
-			true
-		);
+		expect(
+			includedInPostgresDesired(
+				{ kind: 'reserve', orgId: OTHER_ORG, listServerId: null },
+				COUCH_ORG
+			)
+		).toBe(true);
 	});
 });
 

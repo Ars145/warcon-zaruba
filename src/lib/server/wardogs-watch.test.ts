@@ -66,9 +66,12 @@ describe('makeCoalescer', () => {
 	});
 
 	test('a run that throws is swallowed by the caller-supplied run(), not the coalescer', async () => {
-		const c = makeCoalescer<string>(async () => {
-			throw new Error('boom');
-		}, (item) => item);
+		const c = makeCoalescer<string>(
+			async () => {
+				throw new Error('boom');
+			},
+			(item) => item
+		);
 		// makeCoalescer itself never catches: a `run` that rejects would leave the in-flight
 		// promise rejected. Callers (like wardogs-watch's syncCoalescer) are expected to catch
 		// inside their own `run`, which this test's run deliberately does not, to document that.
@@ -77,7 +80,10 @@ describe('makeCoalescer', () => {
 	});
 
 	test('drain resolves immediately when nothing is in flight', async () => {
-		const c = makeCoalescer<string>(async () => {}, (item) => item);
+		const c = makeCoalescer<string>(
+			async () => {},
+			(item) => item
+		);
 		await expect(c.drain()).resolves.toBeUndefined();
 	});
 });
