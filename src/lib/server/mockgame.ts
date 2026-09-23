@@ -612,6 +612,7 @@ function resetScores(s: State): void {
 		f.score = 0;
 	}
 	s.matchStart = Date.now();
+	// Kills, deaths and cash start again, as on the game's scoreboard.
 	for (const p of s.players) {
 		p.kills = 0;
 		p.deaths = 0;

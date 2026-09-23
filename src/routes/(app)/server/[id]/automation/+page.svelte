@@ -124,7 +124,7 @@
 			kind: 'restart_notice',
 			group: 'Messages',
 			label: 'Restart notice',
-			blurb: 'Warn players before the twelve-hour restart and tell them when it lands.'
+			blurb: 'Warn players before the 24-hour restart and tell them when it lands.'
 		},
 		{
 			kind: 'match_broadcast',
@@ -186,14 +186,17 @@
 			case 'seed_reward':
 				return canSlotHere || canSlotOrg
 					? ''
-					: 'Saving needs the Reserved slots capability (or Org lists, for a slot on every server) as well as Automation.';
+					: 'Saving needs the Reserved slots capability (or Org reserved slots, for a slot on every server) as well as Automation.';
 			default:
 				return '';
 		}
 	});
-	/** what a Seeding reward may hand out: a slot on this server (Reserved slots) or org-wide (Org lists) */
+	/**
+	 * what a Seeding reward may hand out: a slot on this server (Reserved slots) or on every server
+	 * (Org reserved slots)
+	 */
 	let canSlotHere = $derived(can(data.server.caps, 'slots.manage'));
-	let canSlotOrg = $derived(can(data.server.caps, 'lists.edit'));
+	let canSlotOrg = $derived(can(data.server.caps, 'lists.reserve'));
 	/** A kind that lacks what it needs stays in the menu, greyed, with the reason in a few words. */
 	const short = (kind: TriggerKind): string =>
 		kind === 'team_kill' ? 'needs the kill feed' : kind === 'risk_kick' ? 'needs a Steam key' : '';
@@ -803,7 +806,9 @@
 <div class="space-y-2">
 	{#each rows as t (t.id)}
 		{@const h = health.get(t.id)}
-		<div class="panel py-3.5 {t.enabled ? '' : 'opacity-60'}">
+		<!-- An off row fades its contents, not the panel: opacity on the panel would fade the ⋯ menu
+		     too and trap it under the next row. -->
+		<div class="panel py-3.5">
 			<div class="flex items-start gap-3">
 				<button
 					type="button"
@@ -812,7 +817,7 @@
 					aria-label="{t.name}: {t.enabled ? 'on' : 'off'}"
 					class="mt-1 h-[18px] w-8 shrink-0 cursor-pointer rounded-full border border-black transition disabled:cursor-not-allowed {t.enabled
 						? 'bg-accent'
-						: 'bg-ink-700'}"
+						: 'bg-ink-700 opacity-60'}"
 					disabled={!admin || busy}
 					onclick={() => toggle(t)}
 				>
@@ -822,7 +827,7 @@
 							: 'translate-x-[2px]'}"
 					></span>
 				</button>
-				<div class="min-w-0 flex-1">
+				<div class="min-w-0 flex-1 {t.enabled ? '' : 'opacity-60'}">
 					<div class="flex flex-wrap items-center gap-x-3 gap-y-1">
 						{#if admin}
 							<button
@@ -1149,7 +1154,7 @@
 								class="input w-20 text-right"
 								type="number"
 								min="0"
-								max="719"
+								max="1439"
 								bind:value={f.leadMinutes}
 								aria-label="Heads-up, minutes before"
 							/>
@@ -1203,7 +1208,7 @@
 					</fieldset>
 					{@render placeholders(['minutes', 'uptime', 'server', 'map', 'players', 'max'])}
 					<p class="note">
-						The game restarts twelve hours after it started, once the round then in progress ends.
+						The game restarts 24 hours after it started, once the round then in progress ends.
 					</p>
 				{:else if f.kind === 'match_broadcast'}
 					<fieldset class="space-y-2">
@@ -1222,6 +1227,8 @@
 							'scores',
 							'cap',
 							'previous',
+							'mvp',
+							'top',
 							'map',
 							'server',
 							'players'

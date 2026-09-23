@@ -208,8 +208,43 @@
     {
       "idx": 29,
       "version": "7",
+      "when": 1789945728462,
+      "tag": "0029_panel_bans",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1790081560841,
+      "tag": "0030_keep_everything",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1790082146351,
+      "tag": "0031_match_players",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1790082629638,
+      "tag": "0032_match_players_backfill",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1790106668581,
+      "tag": "0033_org_list_capabilities",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
       "when": 1790110972645,
-      "tag": "0029_couch_state",
+      "tag": "0034_couch_state",
       "breakpoints": true
     }
   ]

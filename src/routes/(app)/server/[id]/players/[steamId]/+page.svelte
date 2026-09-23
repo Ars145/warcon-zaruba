@@ -143,6 +143,7 @@
 		}, '');
 	}
 
+	const SCOREBOARD_NOTE = "The game's scoreboard counters, added up over the player's sessions.";
 	const minutes = (m: number) => (m >= 90 ? `${(m / 60).toFixed(1)} h` : `${m} min`);
 	const kd = (k: number, dd: number) => (dd ? (k / dd).toFixed(2) : k ? `${k}.00` : '—');
 	const RISK_TONE = { low: 'ok', medium: 'warn', high: 'err' } as const;
@@ -195,8 +196,8 @@
 </div>
 
 <div class="mb-4 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-	{#each [['Sessions', fmtNum(d.summary.sessions)], ['Playtime', d.summary.sessions ? minutes(d.summary.minutes) : '—'], ['Kills', fmtNum(d.summary.kills)], ['Deaths', fmtNum(d.summary.deaths)], ['K/D', kd(d.summary.kills, d.summary.deaths)], ['First seen', d.summary.firstSeen ? fmtTime(d.summary.firstSeen) : '—']] as [label, value] (label)}
-		<div class="panel py-4">
+	{#each [['Sessions', fmtNum(d.summary.sessions), 'A session is one stay on a server, from joining to leaving.'], ['Playtime', d.summary.sessions ? minutes(d.summary.minutes) : '—', ''], ['Kills', fmtNum(d.summary.kills), SCOREBOARD_NOTE], ['Deaths', fmtNum(d.summary.deaths), SCOREBOARD_NOTE], ['K/D', kd(d.summary.kills, d.summary.deaths), SCOREBOARD_NOTE], ['First seen', d.summary.firstSeen ? fmtTime(d.summary.firstSeen) : '—', '']] as [label, value, note] (label)}
+		<div class="panel py-4" title={note || undefined}>
 			<div class="caps text-mist-400">{label}</div>
 			<div class="mt-1 font-display text-2xl font-semibold tabular">{value}</div>
 		</div>
@@ -304,7 +305,9 @@
 			<div class="panel">
 				<span class="label-sm">Combat</span>
 				<p class="mb-3 text-[12.5px] text-mist-600">
-					From the game's kill feed, across the organisation's servers you can see.
+					From the game's kill feed, across the organisation's servers you can see. A team kill
+					counts as a kill here and a suicide as a death, and the feed only knows the time since it
+					was set up, so these differ from the scoreboard totals at the top.
 					<a
 						href="/server/{encodeURIComponent(data.server.id)}/kills?player={encodeURIComponent(
 							d.steamId
@@ -371,6 +374,7 @@
 				serverName={data.server.name}
 				orgName={data.server.orgName}
 				multiServer={data.multiServer}
+				matchHref={(m) => `/server/${encodeURIComponent(m.serverId)}/matches/${m.matchId}`}
 			/>
 		</div>
 
@@ -448,78 +452,78 @@
 			</div>
 		{/if}
 
-		<!-- the entry, its reason and who added it are for those who may open the lists -->
-		{#if d.orgLists.canEdit}
+		<!-- an entry, its reason and who added it are for those who may edit that list -->
+		{#if d.orgLists.canBan || d.orgLists.canReserve}
 			<div class="panel">
 				<div class="mb-3 flex items-center gap-2">
 					<span class="label-sm mb-0!">Organisation lists</span>
 					<a
-						href="/orgs/{encodeURIComponent(data.server.orgId)}/bans"
+						href="/orgs/{encodeURIComponent(data.server.orgId)}/{d.orgLists.canBan
+							? 'bans'
+							: 'reserved'}"
 						class="ml-auto text-[12px] text-accent hover:underline">Open the lists →</a
 					>
 				</div>
 				<div class="space-y-3 text-[13px]">
-					<div class="flex flex-wrap items-center gap-2">
-						{#if d.orgLists.ban}
-							{@const b = d.orgLists.ban}
-							<Badge tone="err">banned org-wide</Badge>
-							<span class="min-w-0 flex-1 truncate text-mist-400"
-								>{b.reason || 'no reason'} · by {b.addedByName || '—'}{#if b.expiresAt}
-									· until {fmtTime(b.expiresAt)}{/if}</span
-							>
-							<span class="inline-flex flex-wrap gap-1">
-								{#each b.servers as s (s.serverId)}
-									<span title="{s.serverName}: {s.state}{s.error ? ` — ${s.error}` : ''}"
-										><Badge tone={STATE_TONE[s.state]}>{s.serverName}</Badge></span
-									>
-								{/each}
-							</span>
-							{#if d.orgLists.canEdit}
+					{#if d.orgLists.canBan}
+						<div class="flex flex-wrap items-center gap-2">
+							{#if d.orgLists.ban}
+								{@const b = d.orgLists.ban}
+								<Badge tone="err">banned org-wide</Badge>
+								<span class="min-w-0 flex-1 truncate text-mist-400"
+									>{b.reason || 'no reason'} · by {b.addedByName || '—'}{#if b.expiresAt}
+										· until {fmtTime(b.expiresAt)}{/if}</span
+								>
+								<span class="inline-flex flex-wrap gap-1">
+									{#each b.servers as s (s.serverId)}
+										<span title="{s.serverName}: {s.state}{s.error ? ` — ${s.error}` : ''}"
+											><Badge tone={STATE_TONE[s.state]}>{s.serverName}</Badge></span
+										>
+									{/each}
+								</span>
 								<button class="btn btn-sm" disabled={busy} onclick={() => orgRemove('ban')}
 									>Unban org-wide</button
 								>
-							{/if}
-						{:else}
-							<span class="text-mist-400">Not on the organisation's ban list.</span>
-							{#if d.orgLists.canEdit}
+							{:else}
+								<span class="text-mist-400">Not on the organisation's ban list.</span>
 								<button
 									class="ml-auto btn btn-sm btn-danger"
 									disabled={busy}
 									onclick={() => (banning = true)}>Ban org-wide</button
 								>
 							{/if}
-						{/if}
-					</div>
-					<div class="flex flex-wrap items-center gap-2">
-						{#if d.orgLists.reserve}
-							{@const r = d.orgLists.reserve}
-							<Badge tone="accent">reserved slot</Badge>
-							<span class="min-w-0 flex-1 truncate text-mist-400"
-								>{r.reason || 'org-wide'}{#if r.member}
-									· member{/if}{#if r.expiresAt}
-									· until {fmtTime(r.expiresAt)}{/if}</span
-							>
-							<span class="inline-flex flex-wrap gap-1">
-								{#each r.servers as s (s.serverId)}
-									<span title="{s.serverName}: {s.state}{s.error ? ` — ${s.error}` : ''}"
-										><Badge tone={STATE_TONE[s.state]}>{s.serverName}</Badge></span
-									>
-								{/each}
-							</span>
-							{#if d.orgLists.canEdit && !r.member}
-								<button class="btn btn-sm" disabled={busy} onclick={() => orgRemove('reserve')}
-									>Withdraw</button
+						</div>
+					{/if}
+					{#if d.orgLists.canReserve}
+						<div class="flex flex-wrap items-center gap-2">
+							{#if d.orgLists.reserve}
+								{@const r = d.orgLists.reserve}
+								<Badge tone="accent">reserved slot</Badge>
+								<span class="min-w-0 flex-1 truncate text-mist-400"
+									>{r.reason || 'org-wide'}{#if r.member}
+										· member{/if}{#if r.expiresAt}
+										· until {fmtTime(r.expiresAt)}{/if}</span
 								>
-							{/if}
-						{:else}
-							<span class="text-mist-400">No reserved slot from the organisation.</span>
-							{#if d.orgLists.canEdit}
+								<span class="inline-flex flex-wrap gap-1">
+									{#each r.servers as s (s.serverId)}
+										<span title="{s.serverName}: {s.state}{s.error ? ` — ${s.error}` : ''}"
+											><Badge tone={STATE_TONE[s.state]}>{s.serverName}</Badge></span
+										>
+									{/each}
+								</span>
+								{#if !r.member}
+									<button class="btn btn-sm" disabled={busy} onclick={() => orgRemove('reserve')}
+										>Withdraw</button
+									>
+								{/if}
+							{:else}
+								<span class="text-mist-400">No reserved slot from the organisation.</span>
 								<button class="ml-auto btn btn-sm" disabled={busy} onclick={orgReserve}
 									>Reserve a slot</button
 								>
 							{/if}
-						{/if}
-					</div>
+						</div>
+					{/if}
 				</div>
 			</div>
 		{/if}

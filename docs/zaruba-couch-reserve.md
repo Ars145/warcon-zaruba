@@ -91,7 +91,7 @@ New files (none of this logic lives in an upstream file):
   (`bun run scripts/migrate-reserve-to-couch.ts`, `COUCH_ORG_ID`, `COUCH_REPL_USER` and
   `COUCH_REPL_PASSWORD` required) and automatically as part of the migrate step. The backfill part
   specifically runs **only once, ever**: see "Backfill marker" below.
-- `drizzle/0029_couch_state.sql` + the `couchState` table in `db/schema.ts` — a tiny generic
+- `drizzle/0034_couch_state.sql` + the `couchState` table in `db/schema.ts` — a tiny generic
   key/value table holding the `_changes` watch loop's last seq, so a restart resumes instead of
   re-scanning. (`site_settings` was not reused: its values are bounded numeric settings, not an
   opaque cursor.)
@@ -209,8 +209,8 @@ again.
   steamId that also has no CouchDB doc, `serverListsState`'s `list_entries` lookup will still
   surface it before the CouchDB fallback runs. This is a pre-existing-row edge case, not a new
   write path — the platform and Warcon only ever write to CouchDB going forward for this list.
-- **`drizzle/meta/0029_couch_state_snapshot.json` was not generated** (no local `bun`/`drizzle-kit`
-  available in this environment). The hand-written `0029_couch_state.sql` and the appended
+- **`drizzle/meta/0034_couch_state_snapshot.json` was not generated** (no local `bun`/`drizzle-kit`
+  available in this environment). The hand-written `0034_couch_state.sql` and the appended
   `_journal.json` entry are enough for `runMigrations`/`bun run db:migrate` (they only read the SQL
   files and the journal). Before the *next* schema change, run `bun run db:generate` once so
   drizzle-kit's snapshot catches up — otherwise it will re-diff against the last real snapshot

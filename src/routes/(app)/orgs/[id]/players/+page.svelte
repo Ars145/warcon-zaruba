@@ -4,6 +4,7 @@
 	import { goto, invalidateAll } from '$app/navigation';
 	import { page } from '$app/state';
 	import { api, qs, errorMessage } from '$lib/api';
+	import { can } from '$lib/capabilities';
 	import { fmtDuration, fmtNum, fmtTime } from '$lib/format';
 	import { toast } from '$lib/toast.svelte';
 	import { confirmDialog } from '$lib/confirm.svelte';
@@ -16,6 +17,19 @@
 
 	let { data }: PageProps = $props();
 	let orgId = $derived(data.org.id);
+	/** each row action goes on one org list, and is offered to that list's editors */
+	let canBan = $derived(data.listsRole.kinds.includes('ban'));
+	let canReserve = $derived(data.listsRole.kinds.includes('reserve'));
+	/**
+	 * The watchlist is the organisation's, so Notes on any of its servers may mark a player: the
+	 * mark goes through the player's last server where the caller keeps notes there, else through
+	 * one where they do.
+	 */
+	let notesOn = $derived(
+		data.orgServers.filter((s) => can(s.caps, 'players.notes')).map((s) => s.id)
+	);
+	const watchVia = (p: SeenPlayer): string | null =>
+		notesOn.includes(p.lastServerId) ? p.lastServerId : (notesOn[0] ?? null);
 	let apiBase = $derived(`/api/orgs/${encodeURIComponent(orgId)}/players`);
 
 	let extra = $state<SeenPlayer[]>([]);
@@ -121,13 +135,14 @@
 		}
 	}
 	async function watch(p: SeenPlayer) {
+		const via = watchVia(p);
+		if (!via) return;
 		busy = p.steamId;
 		try {
-			await api(
-				'PUT',
-				`/api/servers/${encodeURIComponent(p.lastServerId)}/players/${p.steamId}/watch`,
-				{ watched: !p.watched, reason: '' }
-			);
+			await api('PUT', `/api/servers/${encodeURIComponent(via)}/players/${p.steamId}/watch`, {
+				watched: !p.watched,
+				reason: ''
+			});
 			toast(
 				p.watched ? `${p.name} taken off the watchlist.` : `${p.name} is on the watchlist.`,
 				'ok'
@@ -261,22 +276,32 @@
 						>
 						<td class="py-1.5 text-right whitespace-nowrap">
 							<div class="inline-flex gap-1.5">
-								<div class="join">
-									<button class="btn btn-sm" disabled={busy === p.steamId} onclick={() => watch(p)}
-										>{p.watched ? 'Unwatch' : 'Watch'}</button
-									>
+								{#if watchVia(p) || canReserve}
+									<div class="join">
+										{#if watchVia(p)}
+											<button
+												class="btn btn-sm"
+												disabled={busy === p.steamId}
+												onclick={() => watch(p)}>{p.watched ? 'Unwatch' : 'Watch'}</button
+											>
+										{/if}
+										{#if canReserve}
+											<button
+												class="btn btn-sm"
+												disabled={busy === p.steamId}
+												onclick={() => reserve(p)}>Reserve</button
+											>
+										{/if}
+									</div>
+								{/if}
+								{#if canBan}
 									<button
-										class="btn btn-sm"
-										disabled={busy === p.steamId}
-										onclick={() => reserve(p)}>Reserve</button
+										class="btn btn-sm btn-danger"
+										disabled={busy === p.steamId || p.banned === 'org'}
+										title={p.banned === 'org' ? 'Already on the organisation ban list' : ''}
+										onclick={() => (banning = p)}>Ban</button
 									>
-								</div>
-								<button
-									class="btn btn-sm btn-danger"
-									disabled={busy === p.steamId || p.banned === 'org'}
-									title={p.banned === 'org' ? 'Already on the organisation ban list' : ''}
-									onclick={() => (banning = p)}>Ban</button
-								>
+								{/if}
 							</div>
 						</td>
 					</tr>
@@ -303,8 +328,10 @@
 	<p class="note">
 		Built from the sessions the worker records on servers you can open, so only players who have
 		joined one of them appear, and only the names they used there. Playtime is the sum of session
-		lengths. Ban goes on the organisation's ban list; Reserve on its reserved slots; Watch marks the
-		player across the organisation.
+		lengths.{#if canBan}
+			Ban goes on the organisation's ban list.{/if}{#if canReserve}
+			Reserve goes on its reserved slots.{/if}{#if notesOn.length}
+			Watch marks the player across the organisation.{/if}
 	</p>
 </div>
 
@@ -315,7 +342,7 @@
 			orgName={data.org.name}
 			steamId={banning.steamId}
 			name={banning.name}
-			canOrg={true}
+			canOrg={canBan}
 			onclose={() => (banning = null)}
 			ondone={() => invalidateAll()}
 		/>
