@@ -103,6 +103,19 @@ export async function withServerLock<T>(
 
 // ---- desired and observed ----------------------------------------------------------------------
 
+/**
+ * zaruba: couch reserve — whether a list row belongs in `desiredFor`'s generic Postgres query, or
+ * is excluded because it's `couchOrgId`'s own org reserve list (server_id null; its entries live
+ * in CouchDB, added back separately below). Mirrors the SQL `or(...)` clause in the query right
+ * below it exactly; kept as a standalone pure function so the scoping can be unit-tested without a
+ * database (see lists-sync.test.ts). Bans and every server's own reserve list are always included,
+ * for every org; only an org-wide reserve list belonging to `couchOrgId` is ever excluded.
+ */
+export const includedInPostgresDesired = (
+	row: { kind: Kind; orgId: string; listServerId: string | null },
+	couchOrgId: string
+): boolean => row.kind !== 'reserve' || row.listServerId !== null || row.orgId !== couchOrgId;
+
 /** What the lists this server subscribes to want on it right now. */
 export async function desiredFor(
 	env: Env,
@@ -110,9 +123,11 @@ export async function desiredFor(
 	org: Pick<OrgRow, 'membersReserved' | 'banMessage'>,
 	now = new Date()
 ): Promise<PlanInput['desired'] & { reserveError?: string }> {
-	// zaruba: couch reserve — the org's own reserve list (server_id null) is excluded here: its
-	// entries live in CouchDB now (below), not in list_entries. Bans and every server's own reserve
-	// list are untouched.
+	// zaruba: couch reserve — only COUCH_ORG_ID's own reserve list (server_id null) is excluded
+	// here: its entries live in CouchDB now (below), not in list_entries. Every other org's reserve
+	// list stays in this query same as before the feature existed. Bans and every server's own
+	// reserve list are untouched for every org. See includedInPostgresDesired above — this `or(...)`
+	// is its SQL form.
 	const rows = await env.db
 		.select({ e: listEntries, kind: lists.kind, listServerId: lists.serverId })
 		.from(serverLists)
@@ -122,7 +137,11 @@ export async function desiredFor(
 			and(
 				eq(serverLists.serverId, server.id),
 				isNull(listEntries.removedAt),
-				or(ne(lists.kind, 'reserve'), isNotNull(lists.serverId))
+				or(
+					ne(lists.kind, 'reserve'),
+					isNotNull(lists.serverId),
+					ne(lists.orgId, env.COUCH_ORG_ID)
+				)
 			)
 		);
 	// A ban goes to the game as the org's ban message, not the bare reason. Only the adds read it:
@@ -215,13 +234,17 @@ export async function memberSlots(
  */
 export async function expireEntries(env: Env): Promise<{ lifted: number; orgIds: string[] }> {
 	const now = new Date();
-	// zaruba: couch reserve — org reserve lists are excluded: their expiry is a read-time filter in
-	// CouchDB (see wardogs-reserve.ts activeReserve), nothing is written there for it, and any rows
-	// still sitting in list_entries from before the migration are history, not live state.
+	// zaruba: couch reserve — only COUCH_ORG_ID's org reserve list is excluded: its expiry is a
+	// read-time filter in CouchDB (see wardogs-reserve.ts activeReserve), nothing is written there
+	// for it, and any rows still sitting in list_entries from before the migration are history, not
+	// live state. Every other org's org reserve list is untouched Postgres and must keep expiring
+	// here same as before the feature existed. Same scoping as includedInPostgresDesired above,
+	// applied to a row with listServerId: null (an org-wide reserve list) — that function's `false`
+	// case is exactly this exclusion.
 	const orgReserveListIds = env.db
 		.select({ id: lists.id })
 		.from(lists)
-		.where(and(eq(lists.kind, 'reserve'), isNull(lists.serverId)));
+		.where(and(eq(lists.kind, 'reserve'), isNull(lists.serverId), eq(lists.orgId, env.COUCH_ORG_ID)));
 	const rows = await env.db
 		.update(listEntries)
 		.set({ removedAt: now, removedByName: 'expiry', removal: 'expired' })
@@ -441,6 +464,19 @@ export async function reconcileServer(
 	return ran ?? { ...base, pending: true, skipped: 'busy', error: 'Sync already running.' };
 }
 
+/**
+ * zaruba: couch reserve — when the CouchDB read for COUCH_ORG_ID's reserve list failed
+ * (`reserveError` set), `desired.reserved` (which fed `plan`) is missing whatever that read would
+ * have added; treating a slot missing only because of the outage as "no longer wanted" would
+ * DELETE it off the game server. Adds and bans are unaffected (nothing is missing for them), so
+ * only reserve removes are held back — the next successful sync computes them fresh. Pure and
+ * exported so the behavior is unit-testable without a database (see lists-sync.test.ts).
+ */
+export function withReserveRemovalsHeldBack(plan: SyncPlan, reserveError: string | undefined): SyncPlan {
+	if (!reserveError) return plan;
+	return { ...plan, removes: plan.removes.filter((r) => r.kind !== 'reserve') };
+}
+
 async function run(
 	env: Env,
 	server: ServerRow,
@@ -461,13 +497,16 @@ async function run(
 		.limit(1);
 
 	const planWith = (observed: Observed) =>
-		planSync({
-			now,
-			retryAfterMs: RETRY_AFTER_MS,
-			desired,
-			observed: { bans: observed.bans.map((b) => b.steamId), reserved: observed.reserved },
-			state
-		});
+		withReserveRemovalsHeldBack(
+			planSync({
+				now,
+				retryAfterMs: RETRY_AFTER_MS,
+				desired,
+				observed: { bans: observed.bans.map((b) => b.steamId), reserved: observed.reserved },
+				state
+			}),
+			desired.reserveError
+		);
 
 	// Plan against what we last saw; before touching the server, look again.
 	let observed = opts.observed ?? (await snapshotObserved(env, server.id));

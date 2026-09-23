@@ -58,7 +58,8 @@ New files (none of this logic lives in an upstream file):
 
 - `src/lib/server/couch.ts` — minimal CouchDB HTTP client (basic auth): `getDoc`, `putDoc`,
   `deleteDoc`, `find` (Mango), `getRevs` (open_revs), `changes` (`_changes` longpoll),
-  `ensureDatabase`, `ensureIndex`.
+  `ensureDatabase`, `ensureIndex`, `ensureReplicationUser`, `setSecurity`,
+  `ensureValidateDesignDoc` (replication trust — see "Replication trust" below).
 - `src/lib/server/wardogs-reserve.ts` — pure logic: `activeReserve`, `pickWinner`,
   `resolveConflict`, `desiredReserve`. No I/O beyond what couch.ts does on its behalf; the merge
   and conflict rules are unit-tested in `wardogs-reserve.test.ts` without a database.
@@ -82,9 +83,14 @@ New files (none of this logic lives in an upstream file):
 - `scripts/migrate-reserve-to-couch.ts` — idempotent backfill from `COUCH_ORG_ID`'s Postgres
   `list_entries` into CouchDB `personal:` docs, and `ensureDatabase`/`ensureIndex` (ddoc `wardogs`,
   index names `type-steamId`/`type-clanId` — matching what the platform's own init job creates) on
-  first run. Runs standalone (`bun run scripts/migrate-reserve-to-couch.ts`, `COUCH_ORG_ID`
-  required) and automatically as part of the migrate step. Runs **only once, ever**: see "Backfill
-  marker" below.
+  first run. Also re-asserts replication trust on every run, not gated by the once-ever backfill
+  marker: `ensureReplicationUser` (the dedicated non-admin `COUCH_REPL_USER`), `setSecurity`
+  (locks `wardogs_reserve/_security.members` to exactly that user, `admins` empty), and
+  `ensureValidateDesignDoc` (writes `_design/validate`'s `validate_doc_update`, bounding every
+  write to the three known doc shapes — see "Replication trust" below). Runs standalone
+  (`bun run scripts/migrate-reserve-to-couch.ts`, `COUCH_ORG_ID`, `COUCH_REPL_USER` and
+  `COUCH_REPL_PASSWORD` required) and automatically as part of the migrate step. The backfill part
+  specifically runs **only once, ever**: see "Backfill marker" below.
 - `drizzle/0029_couch_state.sql` + the `couchState` table in `db/schema.ts` — a tiny generic
   key/value table holding the `_changes` watch loop's last seq, so a restart resumes instead of
   re-scanning. (`site_settings` was not reused: its values are bounded numeric settings, not an
@@ -109,37 +115,53 @@ one-line early-return, or a small guard condition, never a rewrite of surroundin
     of adopting server-observed slots into a Postgres list that isn't the source of truth for that
     org; every other org still imports reserve picks normally. See "Known gaps" below for why
     disabling was chosen over a seam, for the couch-backed org.
-  - `serverListsState` — a fallback block after the existing `list_entries` lookup: org-scoped
-    slots it found nothing for get their note/expiry from `reserveStore.notesFor`. (Unconditional:
-    `notesFor` only ever has entries when the calling org is `COUCH_ORG_ID`, since that's the only
-    org anything is ever written to CouchDB for — see `entriesView`/`notesFor` in
-    `reserve-store.ts`, both of which read the same single, org-agnostic CouchDB database.)
+  - `serverListsState` — a fallback block after the existing `list_entries` lookup, gated on
+    `server.orgId === env.COUCH_ORG_ID`: org-scoped slots it found nothing for get their
+    note/expiry from `reserveStore.notesFor`. (The gate matters even though `notesFor` only ever
+    has entries for `COUCH_ORG_ID` — without it, every other org's page still makes a CouchDB call
+    on every load that can only ever return nothing, so a CouchDB outage would break every org's
+    players page, not just `COUCH_ORG_ID`'s. See `entriesView`/`notesFor` in `reserve-store.ts`,
+    both of which read the same single, org-agnostic CouchDB database.)
 - `src/lib/server/lists-sync.ts`:
-  - `desiredFor` — the org reserve list is excluded from the generic Postgres query
-    (`or(ne(lists.kind, 'reserve'), isNotNull(lists.serverId))`) for every org; `COUCH_ORG_ID`'s
-    entries are then added from `desiredReserve(env, now)`, gated on `server.orgId ===
-    env.COUCH_ORG_ID`. A `desiredReserve` failure (CouchDB unreachable) is caught around that one
-    call only and returned as `reserveError` on the result rather than thrown: bans, and reserve
-    entries already computed from `list_entries` (every other org's, and this org's
+  - `desiredFor` — only `COUCH_ORG_ID`'s own org reserve list is excluded from the generic Postgres
+    query (`or(ne(lists.kind, 'reserve'), isNotNull(lists.serverId), ne(lists.orgId,
+    env.COUCH_ORG_ID))`); every other org's org reserve list stays in that query exactly as before
+    this feature existed. `COUCH_ORG_ID`'s entries are then added from `desiredReserve(env, now)`,
+    gated on `server.orgId === env.COUCH_ORG_ID`. (An earlier version of this query excluded every
+    org's org reserve list, not just `COUCH_ORG_ID`'s, which silently dropped every other org's
+    org-wide reserved slots off their servers on the next sync — fixed; the scoped `ne(lists.orgId,
+    …)` clause above is the fix.) A `desiredReserve` failure (CouchDB unreachable) is caught around
+    that one call only and returned as `reserveError` on the result rather than thrown: bans, and
+    reserve entries already computed from `list_entries` (every other org's, and this org's
     members-reserved additions), are unaffected by a CouchDB outage. The caller (`run` in this same
     file) surfaces `reserveError` as `Reserve list: …` in the server's sync result `error` field
-    without marking the sync `ok: false`.
-  - `expireEntries` — the org reserve list's Postgres rows are excluded from the expiry sweep
-    (`notInArray(listEntries.listId, orgReserveListIds)`): expiry for it is a CouchDB read-time
-    filter now, nothing to lift here. Applies to every org's reserve list the same way `desiredFor`
-    excludes it, not just `COUCH_ORG_ID`'s — harmless for every other org, since their reserve list
-    was never a CouchDB list to begin with and this just skips an already-empty exclusion set.
+    without marking the sync `ok: false`, and — since `desired.reserved` is then missing whatever
+    the failed CouchDB read would have added — holds back reserve *removals* for that run (`plan
+    .removes` is filtered to drop `kind: 'reserve'` whenever `reserveError` is set), so a CouchDB
+    outage cannot look like "nobody wants these slots any more" and delete them off the game
+    server; adds and bans are unaffected. The next successful sync recomputes removals normally.
+  - `expireEntries` — only `COUCH_ORG_ID`'s org reserve list's Postgres rows are excluded from the
+    expiry sweep (`notInArray(listEntries.listId, orgReserveListIds)`, where `orgReserveListIds` is
+    now scoped with `eq(lists.orgId, env.COUCH_ORG_ID)`): expiry for that one list is a CouchDB
+    read-time filter now, nothing to lift here. Every other org's org reserve list keeps expiring
+    through this sweep exactly as before this feature existed. (An earlier version scoped the
+    exclusion to every org's org reserve list, not just `COUCH_ORG_ID`'s, which meant an expired
+    reserved slot on any other org's org-wide list would never actually lift — fixed; the added
+    `eq(lists.orgId, …)` clause above is the fix.)
 - `src/lib/server/poller.ts` — `startReserveWatch(env)` / `await stopReserveWatch()` alongside the
   existing `startDelivery`/`startStatusMirror` pair in `startPoller`/`stopPoller` (`stopPoller` was
   already `async`).
 - `src/lib/server/db/schema.ts` — the new `couchState` table (additive; nothing existing changed).
   Doubles as the backfill marker's storage (see below) and the `_changes` watch's last-seq cursor.
-- `src/worker/migrate.ts` — requires `COUCH_ORG_ID` (fails fast if unset) and passes it to
-  `migrateReserveToCouch(db, process.env, couchOrgId)` after `runMigrations`.
+- `src/worker/migrate.ts` — requires `COUCH_ORG_ID`, `COUCH_REPL_USER` and `COUCH_REPL_PASSWORD`
+  (fails fast if any is unset) and passes them to
+  `migrateReserveToCouch(db, process.env, couchOrgId, { user, password })` after `runMigrations`.
 - `docker-compose.yml` — a `couch` service, `COUCH_*` (including `COUCH_ORG_ID`) in the shared env
   anchor, `migrate` gains `depends_on: couch (healthy)` (mirroring how it already depends on `db`;
   `warcon`/`worker` don't depend on `db` directly either — they depend on `migrate`, which gates
-  both).
+  both), and `COUCH_REPL_USER`/`COUCH_REPL_PASSWORD` on the `migrate` service only — `warcon` and
+  `worker` never receive them, since neither connects to CouchDB as the replication user (both use
+  `COUCH_USER`/`COUCH_PASSWORD`, the admin, same as before this env var pair existed).
 
 ## COUCH_ORG_ID
 
@@ -194,12 +216,39 @@ again.
   drizzle-kit's snapshot catches up — otherwise it will re-diff against the last real snapshot
   (0028) and may re-propose the `couch_state` table.
 
+## Replication trust
+
+The platform's replicator authenticates to CouchDB as `COUCH_REPL_USER`, a dedicated **non-admin**
+user — never `COUCH_USER`/`COUCH_PASSWORD`, which are the CouchDB server admin Warcon itself
+connects with. `migrateReserveToCouch` (`scripts/migrate-reserve-to-couch.ts`, also called from
+`src/worker/migrate.ts`) sets this up on every run, not gated by the once-ever backfill marker:
+
+- `ensureReplicationUser` creates/updates `_users/org.couchdb.user:{COUCH_REPL_USER}` with
+  `COUCH_REPL_PASSWORD`.
+- `setSecurity` sets `wardogs_reserve/_security` to `{ admins: { names: [], roles: [] }, members:
+  { names: [COUCH_REPL_USER], roles: [] } }` — that one user, and no one else, may read or write
+  the database as a non-admin. (`admins` stays empty: server admins already bypass `_security` and
+  `validate_doc_update` entirely, so there is no admin to name here.)
+- `ensureValidateDesignDoc` writes `_design/validate`'s `validate_doc_update` function, which
+  bounds every non-admin write (i.e. everything `COUCH_REPL_USER` can do) to exactly the three
+  known doc shapes: `personal:{steamId}`, `clan:{clanId}`, `clanslot:{clanId}:{steamId}`, each with
+  its expected `type`/id-derived fields validated, plus deletions of docs with those three id
+  prefixes. Anything else — a different doc shape, a delete of something else, a design doc — is
+  rejected with `{forbidden: …}`. Warcon's own writes (`reserve-store.ts`) use the same three
+  shapes, so they pass validation too; in practice Warcon runs as the CouchDB admin and bypasses
+  the function outright, but the function does not special-case that — it accepts these shapes for
+  any caller, admin or not.
+
+If `COUCH_REPL_USER`/`COUCH_REPL_PASSWORD` are unset, the migrate step fails fast (no fallback to
+running without a replication user, which would leave the db either wide open under the old
+`_security` or, worse, force the platform onto the admin credentials to keep working).
+
 ## Caddy, on the host in front of the dev/prod box
 
 ```
 warcon.zaruba-server.online {
     @couch {
-        path /couch/*
+        path /couch/wardogs_reserve /couch/wardogs_reserve/*
         remote_ip 144.31.49.29
     }
     handle @couch {
@@ -210,9 +259,17 @@ warcon.zaruba-server.online {
 }
 ```
 
-`docker-compose.yml` binds CouchDB to `127.0.0.1:5984` on the host (not the public interface); the
-`@couch` matcher additionally restricts it to the platform's own IP, since CouchDB's replicator
-protocol carries its own auth but the port is otherwise open to anything reaching Caddy.
+`docker-compose.yml` binds CouchDB to `127.0.0.1:5984` on the host (not the public interface). The
+`@couch` matcher is scoped to exactly the `wardogs_reserve` database path — not `/couch/*` — so it
+cannot reach CouchDB's server-wide endpoints (`/_utils`, `/_config`, `/_all_dbs`, `/_users`, or any
+other database) even though the reverse-proxied CouchDB instance can serve all of them; it is also
+restricted to the platform's own IP. Within that path, the request still needs valid CouchDB
+credentials to do anything, and per "Replication trust" above the platform is only ever given the
+non-admin `COUCH_REPL_USER` — never the admin `COUCH_USER`/`COUCH_PASSWORD` — so a request that
+gets through this Caddy match is still bounded by `wardogs_reserve/_security` and
+`validate_doc_update`, not just by network path. This proxy must only ever be reachable over
+HTTPS (Caddy's default with a public hostname); CouchDB's basic auth is plaintext over the wire
+otherwise.
 
 ## Env vars
 
@@ -220,9 +277,11 @@ protocol carries its own auth but the port is otherwise open to anything reachin
 |---|---|---|
 | `COUCH_URL` | yes | e.g. `http://couch:5984` inside Compose |
 | `COUCH_DB` | yes | `wardogs_reserve` |
-| `COUCH_USER` | yes | basic auth |
+| `COUCH_USER` | yes | basic auth; the CouchDB admin — Warcon (`warcon`/`worker`/`migrate`) only |
 | `COUCH_PASSWORD` | yes | basic auth; set in `.env`, never committed |
 | `COUCH_ORG_ID` | yes | the one org whose reserve list is couch-backed; see "COUCH_ORG_ID" above |
+| `COUCH_REPL_USER` | yes, for `migrate` only | the dedicated non-admin replication user `migrate` creates; see "Replication trust" above |
+| `COUCH_REPL_PASSWORD` | yes, for `migrate` only | basic auth for `COUCH_REPL_USER`; set in `.env`, never committed |
 
-All five are required with no fallback: `initEnv()` throws at startup if any is missing (see
+The first five are required with no fallback: `initEnv()` throws at startup if any is missing (see
 `couchEnvProblem`/`couchOrgIdProblem` in `env.ts`).

@@ -37,6 +37,10 @@ services:
     environment:
       <<: *warcon-env
       WARCON_ROLE: migrate
+      # zaruba: couch reserve — only migrate needs these: it creates the dedicated non-admin
+      # replication user and locks wardogs_reserve's _security to it. warcon/worker never see them.
+      COUCH_REPL_USER: ${COUCH_REPL_USER:?set COUCH_REPL_USER in .env}
+      COUCH_REPL_PASSWORD: ${COUCH_REPL_PASSWORD:?set COUCH_REPL_PASSWORD in .env}
     restart: 'no'
     depends_on:
       db:

@@ -169,3 +169,69 @@ export async function ensureIndex(
 	});
 	if (!res.ok) return failIfNotOk(res, `_index ${name}`);
 }
+
+// zaruba: couch reserve — replication trust: the platform replicates wardogs_reserve from a
+// dedicated non-admin user, never the admin credentials Warcon itself connects with (see
+// migrate-reserve-to-couch.ts and docs/zaruba-couch-reserve.md).
+
+/**
+ * Creates or updates a CouchDB user doc in `_users` (server-level, not `c.db`). Idempotent:
+ * re-running with the same name/password just rewrites the same doc (CouchDB re-hashes the
+ * password each time, which is harmless — the value always comes fresh from env at call time).
+ */
+export async function ensureReplicationUser(
+	c: CouchConfig,
+	name: string,
+	password: string
+): Promise<void> {
+	const id = `org.couchdb.user:${name}`;
+	const headers = { authorization: authHeader(c) };
+	const getRes = await fetch(`${serverUrl(c)}/_users/${encodeURIComponent(id)}`, { headers });
+	if (getRes.status !== 200 && getRes.status !== 404)
+		return failIfNotOk(getRes, `GET _users/${id}`);
+	const existing = getRes.status === 200 ? ((await getRes.json()) as { _rev: string }) : null;
+	const doc: Record<string, unknown> = {
+		_id: id,
+		name,
+		password,
+		roles: [],
+		type: 'user',
+		...(existing ? { _rev: existing._rev } : {})
+	};
+	const putRes = await fetch(`${serverUrl(c)}/_users/${encodeURIComponent(id)}`, {
+		method: 'PUT',
+		headers: { ...headers, 'content-type': 'application/json' },
+		body: JSON.stringify(doc)
+	});
+	if (!putRes.ok) return failIfNotOk(putRes, `PUT _users/${id}`);
+}
+
+/**
+ * Sets `c.db`'s `_security` so exactly `members` (and no one else) can read/write it as a
+ * non-admin; `admins` stays empty (server admins already bypass `_security` and
+ * `validate_doc_update` entirely, so there is nothing to list there).
+ */
+export async function setSecurity(c: CouchConfig, members: string[]): Promise<void> {
+	const res = await dbFetch(c, '/_security', {
+		method: 'PUT',
+		body: JSON.stringify({ admins: { names: [], roles: [] }, members: { names: members, roles: [] } })
+	});
+	if (!res.ok) return failIfNotOk(res, 'PUT _security');
+}
+
+/**
+ * Creates or updates `_design/validate`'s `validate_doc_update` function (idempotent: a no-op
+ * PUT when the source already matches, so re-running the migrate script does not churn the ddoc's
+ * revision on every start).
+ */
+export async function ensureValidateDesignDoc(c: CouchConfig, validateFn: string): Promise<void> {
+	const id = '_design/validate';
+	const existing = await getDoc<CouchDoc & { validate_doc_update?: string }>(c, id);
+	if (existing && existing.validate_doc_update === validateFn) return;
+	await putDoc(c, {
+		_id: id,
+		...(existing?._rev ? { _rev: existing._rev } : {}),
+		language: 'javascript',
+		validate_doc_update: validateFn
+	});
+}

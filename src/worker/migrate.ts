@@ -29,6 +29,14 @@ if (!couchOrgId) {
 	console.error('Set COUCH_ORG_ID to the id of the organisation whose reserve list is couch-backed.');
 	process.exit(2);
 }
+const couchReplUser = process.env.COUCH_REPL_USER;
+const couchReplPassword = process.env.COUCH_REPL_PASSWORD;
+if (!couchReplUser || !couchReplPassword) {
+	console.error(
+		'Set COUCH_REPL_USER and COUCH_REPL_PASSWORD (the dedicated non-admin replication user for wardogs_reserve).'
+	);
+	process.exit(2);
+}
 const couchResult = await migrateReserveToCouch(
 	db,
 	{
@@ -37,7 +45,8 @@ const couchResult = await migrateReserveToCouch(
 		COUCH_USER: process.env.COUCH_USER,
 		COUCH_PASSWORD: process.env.COUCH_PASSWORD
 	},
-	couchOrgId
+	couchOrgId,
+	{ user: couchReplUser, password: couchReplPassword }
 );
 console.log(
 	couchResult.alreadyDone

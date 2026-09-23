@@ -1076,16 +1076,24 @@ export async function serverListsState(
 			s.expiresAt = iso(e.expiresAt);
 			if (e.listId === own.id) s.scope = 'server';
 		}
-		// zaruba: couch reserve — org-wide slots (scope 'org', the default) that list_entries above
-		// found nothing for: their note and expiry live in CouchDB now, not in list_entries.
-		const uncovered = slotIds.filter((id) => out.reserved[id].scope === 'org' && !out.reserved[id].expiresAt && !out.reserved[id].note);
-		if (uncovered.length) {
-			const couchNotes = await reserveStore.notesFor(env, uncovered);
-			for (const [steamId, n] of couchNotes) {
-				const s = out.reserved[steamId];
-				s.note = role !== null || access.caps.has('slots.manage') ? n.reason : '';
-				s.expiresAt = n.expiresAt;
-			}
+			// zaruba: couch reserve — org-wide slots (scope 'org', the default) that list_entries above
+			// found nothing for: their note and expiry live in CouchDB now, not in list_entries. Only
+			// for COUCH_ORG_ID: every other org's reserve list is entirely Postgres, so a CouchDB call
+			// here would leak nothing useful (wardogs_reserve only ever holds COUCH_ORG_ID's data by
+			// construction) but would make every org's page depend on CouchDB being up.
+			const uncovered =
+				server.orgId === env.COUCH_ORG_ID
+					? slotIds.filter(
+							(id) => out.reserved[id].scope === 'org' && !out.reserved[id].expiresAt && !out.reserved[id].note
+						)
+					: [];
+			if (uncovered.length) {
+				const couchNotes = await reserveStore.notesFor(env, uncovered);
+				for (const [steamId, n] of couchNotes) {
+					const s = out.reserved[steamId];
+					s.note = role !== null || access.caps.has('slots.manage') ? n.reason : '';
+					s.expiresAt = n.expiresAt;
+				}
 		}
 	}
 	return out;
