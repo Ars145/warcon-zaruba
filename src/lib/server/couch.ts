@@ -162,6 +162,21 @@ export async function ensureDatabase(c: CouchConfig): Promise<void> {
 }
 
 /**
+ * A fresh single-node CouchDB has no `_users` / `_replicator` until someone creates them; the
+ * replication user lives in `_users`, and the platform's replicator needs both on its peer.
+ * Idempotent like ensureDatabase.
+ */
+export async function ensureSystemDatabases(c: CouchConfig): Promise<void> {
+	for (const name of ['_users', '_replicator']) {
+		const res = await fetch(`${serverUrl(c)}/${name}`, {
+			method: 'PUT',
+			headers: { authorization: authHeader(c) }
+		});
+		if (res.status !== 201 && res.status !== 412) return failIfNotOk(res, `PUT /${name}`);
+	}
+}
+
+/**
  * Idempotent: creating the same named index on the same ddoc twice is a no-op on CouchDB's side.
  * `ddoc` is required (not defaulted) because the Helm init job creates the same two indexes under
  * the design doc `wardogs` and the names must match exactly for both to agree they're the same index.
