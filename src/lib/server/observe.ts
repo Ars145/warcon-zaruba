@@ -31,13 +31,13 @@ import {
 } from './triggers';
 import { applyTriggerUpdates, enqueueIntents, wakeDelivery } from './outbox';
 import {
-	banOnSight,
+	kickBanned,
 	liveObserved,
 	reconcileServer,
 	writeSnapshot,
 	type Observed
 } from './lists-sync';
-import type { RefusedBan } from './lists-plan';
+import type { PanelBan } from './lists-plan';
 import { keepFinalLook, reportMatch, type FinalLook } from './match-card';
 import {
 	closeAllSessions,
@@ -45,10 +45,19 @@ import {
 	firstVisits,
 	loadPresence,
 	newPresence,
+	followPlayer,
 	persistPresence,
 	type Presence,
 	type PresenceDiff
 } from './sessions';
+import {
+	closeTallies,
+	enrichMatchPlayers,
+	tallyLook,
+	tallyRow,
+	writeMatchPlayers,
+	type Tallies
+} from './match-players';
 import { isOwner, LostOwnership, withOwnedTransaction } from './leadership';
 import { settings } from './settings';
 import { isWatched } from './interest';
@@ -100,9 +109,11 @@ export interface ServerMemory {
 	 * Cleared when a boundary consumes it.
 	 */
 	lastLook: FinalLook | null;
+	/** each player's line of the match in progress, from the scoreboard (match-players.ts) */
+	tallies: Tallies;
 	reserved: Set<string>;
-	/** bans the lists want here that the game refused (the player was not on): applied on sight */
-	refusedBans: Map<string, RefusedBan>;
+	/** the bans the lists put on this server, from the last sync: these players are removed on sight */
+	bans: Map<string, PanelBan>;
 	listsAt: number;
 	syncAt: number;
 	liveKey: string;
@@ -166,8 +177,9 @@ export function memoryFor(server: ServerRow, org: OrgRow): ServerMemory {
 			presence: newPresence(),
 			lastMatch: null,
 			lastLook: null,
+			tallies: new Map(),
 			reserved: new Set(),
-			refusedBans: new Map(),
+			bans: new Map(),
 			listsAt: 0,
 			syncAt: 0,
 			liveKey: '',
@@ -451,6 +463,7 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 	// Any failure may have been a restart onto a new build: re-read the identity on recovery.
 	const hadFailed = m.failures > 0;
 	const prevPlayersAt = m.playersAt;
+	const prevStatusAt = m.statusAt;
 	m.failures = 0;
 	m.holdUntil = 0;
 	m.ok = true;
@@ -496,7 +509,7 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 		gapMs <= 2 * Math.max(m.playersIntervalMs, 1000) + 1000;
 	const diff: PresenceDiff = players
 		? diffPresence(m.presence, players, started)
-		: { joined: [], left: [], stayed: [], factioned: [] };
+		: { joined: [], left: [], stayed: [], factioned: [], renamed: [] };
 	const joined = joinsTrusted ? diff.joined : [];
 	// Players pick a faction after joining; rules that wait for it see the change here. A joiner
 	// who arrives with one (a reconnect) counts as a first pick on the spot.
@@ -564,6 +577,7 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 						playersObserved: players !== null,
 						playersIntervalMs: m.playersIntervalMs,
 						joined,
+						renamed: diff.renamed,
 						factioned,
 						firstVisit,
 						reserved: m.reserved,
@@ -577,20 +591,29 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 						performance: risk.performance,
 						startedAt: m.startedAt,
 						matchEnd,
+						// the lines the match stage will write, for the broadcast's {mvp} and {top}
+						matchLines: matchEnd ? closeTallies(m.tallies, prevStatusAt).rows : [],
 						ts
 					},
 					rows
 				)
 			: { intents: [], updates: [] };
 	// Memory follows every player observation; the database only when something is due.
-	for (const { player: p, session: s } of diff.stayed) {
-		s.name = p.name;
-		s.faction = p.faction;
-		if (p.faction) s.lastFaction = p.faction;
-		s.kills = p.kills;
-		s.deaths = p.deaths;
-		s.cash = p.cash;
-		s.lastSeen = started;
+	const teams = m.status?.scores.map((f) => f.name);
+	for (const { player: p, session: s } of diff.stayed) followPlayer(s, p, started, teams);
+	// The match tallies follow the same look: everyone on the list, time for those on since the
+	// previous trusted look, and a leaver's row is due at the next match stage.
+	if (players) {
+		tallyLook(m.tallies, players, {
+			now: started,
+			gapMs,
+			stayed: joinsTrusted ? new Set(diff.stayed.map((x) => x.player.steamId)) : new Set(),
+			teams
+		});
+		for (const s of diff.left) {
+			const t = m.tallies.get(s.steamId);
+			if (t) t.dirty = true;
+		}
 	}
 	const presenceDue =
 		diff.joined.length > 0 || diff.left.length > 0 || (heartbeatDue && diff.stayed.length > 0);
@@ -601,7 +624,16 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 		if (needWrite)
 			await withOwnedTransaction(env, async (tx) => {
 				if (players && presenceDue)
-					await persistPresence(tx, server.id, m.presence, diff, ts, heartbeatDue, firstVisit);
+					await persistPresence(
+						tx,
+						server.id,
+						m.presence,
+						diff,
+						ts,
+						heartbeatDue,
+						firstVisit,
+						teams
+					);
 				if (ev.intents.length) intents = await enqueueIntents(tx, server.id, ev.intents);
 				if (ev.updates.length) await applyTriggerUpdates(tx, ev.updates);
 				if (liveDue) await writeLive(tx, m, ts);
@@ -630,13 +662,12 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 
 	// Housekeeping, each part on its own, and only while this process still owns the worker. A
 	// player the lists want banned here, seen on the list: banned now, not at the sync's retry.
-	const seen = players?.map((p) => p.steamId) ?? [];
-	if (isOwner() && seen.length && m.refusedBans.size)
-		await stage('bans', m, () => banOnSight(env, server, m.org, client, seen, m.refusedBans));
 	if (look) {
 		let closed: number | null = null;
 		await stage('match', m, async () => {
-			closed = await withOwnedTransaction(env, (tx) => reconcileMatch(tx, m, ts, look, matchEnd));
+			closed = await withOwnedTransaction(env, (tx) =>
+				reconcileMatch(tx, m, ts, look, matchEnd, prevStatusAt)
+			);
 		});
 		// Drawing and sending the card takes seconds; the observation must not wait for it, and
 		// only the process that closed the row reports it, so one match is one card.
@@ -651,6 +682,10 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 		}
 	}
 	if (isOwner()) await stage('lists', m, () => keepLists(env, m, client, started, ts));
+	// After the lists, so a ban just placed removes the player at this look, not the next.
+	const seen = players?.map((p) => p.steamId) ?? [];
+	if (isOwner() && seen.length && m.bans.size)
+		await stage('bans', m, () => kickBanned(env, server, m.org, client, seen, m.bans));
 	if (diff.joined.length && steamEnabled(env))
 		void getProfiles(
 			env,
@@ -692,12 +727,31 @@ async function observationFailed(
 	const liveKey = liveKeyOf(m);
 	const liveDue = liveKey !== m.liveKey || started - m.liveWrittenAt >= LIVE_HEARTBEAT_MS;
 	const sampleDue = m.failures === 1 || started - m.sampleWrittenAt >= s.sampleMs;
+	let talliesWritten = false;
 	try {
 		await withOwnedTransaction(env, async (tx) => {
 			if (m.failures >= OFFLINE_AFTER_FAILURES) {
 				// Close every open session once; a rollback below reloads the map so this retries.
 				if (!m.presence.loaded) await loadPresence(tx, m.server.id, m.presence);
 				if (m.presence.open.size) await closeAllSessions(tx, m.presence);
+				// Everyone's line of the match as it stood, to the match still open; the tallies end
+				// with the sessions (after the commit, so a rollback keeps them for the retry).
+				if (m.tallies.size) {
+					const [open] = await tx
+						.select({ id: matches.id })
+						.from(matches)
+						.where(and(eq(matches.serverId, m.server.id), isNull(matches.endedAt)))
+						.orderBy(desc(matches.id))
+						.limit(1);
+					if (open)
+						await writeMatchPlayers(
+							tx,
+							m.server.id,
+							open.id,
+							[...m.tallies.values()].map(tallyRow)
+						);
+					talliesWritten = true;
+				}
 				m.lastMatch = null;
 			}
 			if (sampleDue)
@@ -718,6 +772,7 @@ async function observationFailed(
 			m.sampleKey = 'failed';
 			m.sampleWrittenAt = started;
 		}
+		if (talliesWritten) m.tallies = new Map();
 	} catch (e) {
 		m.presence = newPresence();
 		if (e instanceof LostOwnership) throw e;
@@ -785,38 +840,61 @@ async function keepLists(
 			lane: 'held'
 		});
 		if (synced.observed) m.reserved = new Set(synced.observed.reserved);
-		if (synced.refusedBans) m.refusedBans = new Map(synced.refusedBans.map((r) => [r.steamId, r]));
+		if (synced.bans) m.bans = new Map(synced.bans.map((b) => [b.steamId, b]));
 	}
 }
 
+/**
+ * The match bookkeeping of one status look: a boundary seen in memory closes the open row with
+ * its result and writes every player's line of it (then the feed's columns, on servers with a
+ * feed); a row left open on another map across a worker start or an outage closes with no
+ * result, since no boundary was seen; players who left get their line written meanwhile, so a
+ * worker restart cannot lose it; and a new row opens when none is.
+ */
 async function reconcileMatch(
 	db: DbOrTx,
 	m: ServerMemory,
 	ts: Date,
 	look: MatchLook,
-	ended: MatchEnd | null
+	ended: MatchEnd | null,
+	prevStatusAt: number
 ): Promise<number | null> {
 	const serverId = m.server.id;
 	const [current] = await db
-		.select({ id: matches.id, map: matches.map, peakPlayers: matches.peakPlayers })
+		.select({
+			id: matches.id,
+			map: matches.map,
+			peakPlayers: matches.peakPlayers,
+			startedAt: matches.startedAt
+		})
 		.from(matches)
 		.where(and(eq(matches.serverId, serverId), isNull(matches.endedAt)))
 		.orderBy(desc(matches.id))
 		.limit(1);
-	// A boundary seen in memory closes the open row. After a worker start there is no previous
-	// look, so a row left open on another map is closed with the scores seen now, as before.
-	const end =
-		ended ??
-		(current && current.map !== look.map
-			? matchBoundary({ map: current.map ?? '', scores: look.scores, matchSeconds: null }, look)
-			: null);
-	if (current && end) {
-		await db
-			.update(matches)
-			.set({ endedAt: ts, finalScores: end.scores, winner: end.winner })
-			.where(eq(matches.id, current.id));
+	const stale = !ended && !!current && current.map !== look.map;
+	if (ended) {
+		const closed = closeTallies(m.tallies, prevStatusAt);
+		if (current) {
+			await writeMatchPlayers(db, serverId, current.id, closed.rows);
+			if (m.server.feedTokenHash)
+				await enrichMatchPlayers(db, serverId, current.id, current.startedAt);
+			await db
+				.update(matches)
+				.set({ endedAt: ts, finalScores: ended.scores, winner: ended.winner })
+				.where(eq(matches.id, current.id));
+		}
+		m.tallies = closed.carried;
+	} else if (current && stale) {
+		// Abandoned: no scores, no winner. What the tallies hold belongs to the map now on.
+		await db.update(matches).set({ endedAt: ts }).where(eq(matches.id, current.id));
+	} else if (current) {
+		const due = [...m.tallies.values()].filter((t) => t.dirty);
+		if (due.length) {
+			await writeMatchPlayers(db, serverId, current.id, due.map(tallyRow));
+			for (const t of due) t.dirty = false;
+		}
 	}
-	if (!current || end) {
+	if (!current || ended || stale) {
 		const secs = look.matchSeconds;
 		const startedAt = secs !== null ? new Date(ts.getTime() - secs * 1000) : ts;
 		await db.insert(matches).values({
@@ -834,5 +912,5 @@ async function reconcileMatch(
 			.where(eq(matches.id, current.id));
 	}
 	// The row that was just closed, for whoever reports the result.
-	return current && end ? current.id : null;
+	return current && ended ? current.id : null;
 }

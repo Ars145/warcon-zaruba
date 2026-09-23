@@ -15,6 +15,7 @@ import { writeAudit } from './audit';
 import {
 	getOrg,
 	listsRoleFor,
+	type ListsRole,
 	type OrgRow,
 	type ServerAccess,
 	type ServerRow,
@@ -38,6 +39,7 @@ import { DEFAULT_BAN_MESSAGE } from '$lib/ban-message';
 import { requireSteamId } from './steam';
 import { desiredFor, memberSlots, summaryOf } from './lists-sync';
 import { gateway } from './gateway';
+import * as reserveStore from './reserve-store'; // zaruba: couch reserve
 import type {
 	ImportCandidate,
 	ListEntryState,
@@ -63,6 +65,16 @@ export function parseKind(v: unknown): Kind {
 	if (v === 'ban' || v === 'reserve') return v;
 	throw new ApiError(404, 'No such list.', 'not_found');
 }
+
+// zaruba: couch reserve — only COUCH_ORG_ID's own reserve list is couch-backed; every other org's
+// reserve list keeps the Postgres list_entries path below untouched. Not a `kind is 'reserve'`
+// type predicate: `kind` must stay the full `Kind` type at every call site below, since each of
+// them falls through to generic list_entries code (for a non-couch org, or a non-reserve kind)
+// that switches on it. reserveStore.entriesView (reserve-store.ts) builds its own members-reserved
+// entries for the couch-backed org; the analogous branch further down in this function's own
+// entriesView is dead code for that org, reachable only for every other org's reserve list.
+const isCouchReserve = (env: Env, kind: Kind, orgId: string): boolean =>
+	kind === 'reserve' && orgId === env.COUCH_ORG_ID;
 
 /** The db or a transaction handle: the ensure* helpers run inside the caller's transaction. */
 type DbLike = Db | Parameters<Parameters<Db['transaction']>[0]>[0];
@@ -211,8 +223,9 @@ export async function namesFor(
 type Standing = { state: ListEntryState; error: string; managed: boolean };
 
 /**
- * Where each SteamID stands on each server: a state row means Warcon put it there (applied or
- * failed); otherwise present on the server means local, absent means pending.
+ * Where each SteamID stands on each server. A reserved slot: a state row means Warcon put it
+ * there (applied or failed); otherwise present on the server means local, absent means pending.
+ * A ban is applied everywhere: the panel enforces it, nothing is placed on the server.
  */
 export async function standings(
 	env: Env,
@@ -223,23 +236,20 @@ export async function standings(
 	const out = new Map<string, Map<string, Standing>>();
 	for (const id of serverIds) out.set(id, new Map());
 	if (!serverIds.length || !steamIds.length) return out;
-	const observed =
-		kind === 'ban'
-			? env.db
-					.select({ serverId: serverBans.serverId, steamId: serverBans.steamId })
-					.from(serverBans)
-					.where(
-						and(inArray(serverBans.serverId, serverIds), inArray(serverBans.steamId, steamIds))
-					)
-			: env.db
-					.select({ serverId: serverReserved.serverId, steamId: serverReserved.steamId })
-					.from(serverReserved)
-					.where(
-						and(
-							inArray(serverReserved.serverId, serverIds),
-							inArray(serverReserved.steamId, steamIds)
-						)
-					);
+	// A ban is the panel's to enforce (kickBanned): it is in force on every server of the list
+	// the moment it is on the list, whatever the game's own ban list holds.
+	if (kind === 'ban') {
+		for (const standing of out.values())
+			for (const steamId of steamIds)
+				standing.set(steamId, { state: 'applied', error: '', managed: true });
+		return out;
+	}
+	const observed = env.db
+		.select({ serverId: serverReserved.serverId, steamId: serverReserved.steamId })
+		.from(serverReserved)
+		.where(
+			and(inArray(serverReserved.serverId, serverIds), inArray(serverReserved.steamId, steamIds))
+		);
 	const [seen, state] = await Promise.all([
 		observed,
 		env.db
@@ -292,12 +302,13 @@ function shapeEntry(
 
 // ---- views -------------------------------------------------------------------------------------
 
-export async function orgListsView(
-	env: Env,
-	org: OrgRow,
-	role: 'owner' | 'editor'
-): Promise<OrgListsView> {
-	const rows = await orgLists(env, org.id);
+/**
+ * The org's lists as one person may see them: the lists they edit with their counts, where the
+ * sync stands on each server (it pushes every list), and the ban message for the ban list's
+ * editors.
+ */
+export async function orgListsView(env: Env, org: OrgRow, role: ListsRole): Promise<OrgListsView> {
+	const rows = (await orgLists(env, org.id)).filter((l) => role.kinds.includes(l.kind));
 	const [counts, srv] = await Promise.all([
 		env.db
 			.select({ listId: listEntries.listId, n: count() })
@@ -328,9 +339,10 @@ export async function orgListsView(
 	const syncOf = new Map(syncRows.map((s) => [s.serverId, s]));
 	const n = new Map(counts.map((c) => [c.listId, c.n]));
 	return {
-		role,
+		role: role.owner ? 'owner' : 'editor',
+		kinds: role.kinds,
 		membersReserved: org.membersReserved,
-		banMessage: org.banMessage,
+		banMessage: role.kinds.includes('ban') ? org.banMessage : null,
 		servers: srv.map((s) => {
 			const y = syncOf.get(s.id);
 			return {
@@ -351,6 +363,7 @@ export async function entriesView(
 	kind: Kind,
 	opts: { includeRemoved?: boolean } = {}
 ): Promise<ListEntryView[]> {
+	if (isCouchReserve(env, kind, org.id)) return reserveStore.entriesView(env, org);
 	const list = await listOf(env, org.id, kind);
 	const rows = await env.db
 		.select()
@@ -491,6 +504,7 @@ export async function addEntry(
 	kind: Kind,
 	body: Record<string, unknown>
 ): Promise<{ entry: ListEntryView; sync: ListSyncSummary }> {
+	if (isCouchReserve(env, kind, org.id)) return reserveStore.addEntry(env, req, actor, org, body); // zaruba: couch reserve
 	const steamId = requireSteamId(body.steamId);
 	const reason = str(body.reason, 200);
 	const expiresAt = parseExpiry(body.expiresAt);
@@ -537,6 +551,8 @@ export async function removeEntry(
 	kind: Kind,
 	steamIdIn: unknown
 ): Promise<{ sync: ListSyncSummary }> {
+	if (isCouchReserve(env, kind, org.id))
+		return reserveStore.removeEntry(env, req, actor, org, steamIdIn); // zaruba: couch reserve
 	const steamId = requireSteamId(steamIdIn);
 	const list = await listOf(env, org.id, kind);
 	const [row] = await env.db
@@ -694,6 +710,9 @@ export async function updateEntry(
 	steamIdIn: unknown,
 	body: Record<string, unknown>
 ): Promise<{ entry: { steamId: string; reason: string; expiresAt: string | null } }> {
+	// zaruba: couch reserve
+	if (isCouchReserve(env, kind, org.id) && !server)
+		return reserveStore.updateEntry(env, req, actor, org, steamIdIn, body);
 	const steamId = requireSteamId(steamIdIn);
 	const set: { reason?: string; expiresAt?: Date | null } = {};
 	if ('reason' in body) set.reason = str(body.reason, 200);
@@ -828,6 +847,15 @@ export async function importEntries(
 		};
 	});
 	if (!picks.length) throw new ApiError(400, 'Nothing to import.');
+	// zaruba: couch reserve — for COUCH_ORG_ID the reserve list lives in CouchDB now; there is
+	// nowhere here to adopt a server-observed reserved slot into. Every other org still keeps its
+	// reserve list in Postgres and imports normally.
+	if (picks.some((p) => isCouchReserve(env, p.kind, org.id)))
+		throw new ApiError(
+			400,
+			'Reserved-slot import is disabled: the reserved-slot list lives in CouchDB, not here.',
+			'reserve_import_disabled'
+		);
 	const candidates = await importCandidates(env, org);
 	const byKey = new Map(candidates.map((c) => [`${c.kind}:${c.steamId}`, c]));
 	const listRows = await orgLists(env, org.id);
@@ -886,15 +914,16 @@ export async function importEntries(
 	return { imported, skipped: picks.length - imported, sync };
 }
 
-/** The org's active ban and reserved entries for one player, for the dossier. */
+/** The player's active entries on the org lists named (those the reader edits), for the dossier. */
 export async function orgListMembership(
 	env: Env,
 	org: OrgRow,
-	steamId: string
+	steamId: string,
+	kinds: ListKind[]
 ): Promise<{ ban: ListEntryView | null; reserve: ListEntryView | null }> {
 	const [bans, reserved] = await Promise.all([
-		entriesView(env, org, 'ban'),
-		entriesView(env, org, 'reserve')
+		kinds.includes('ban') ? entriesView(env, org, 'ban') : [],
+		kinds.includes('reserve') ? entriesView(env, org, 'reserve') : []
 	]);
 	return {
 		ban: bans.find((e) => e.steamId === steamId) ?? null,
@@ -924,12 +953,15 @@ export async function serverListsState(
 		env.db.select().from(serverListSync).where(eq(serverListSync.serverId, server.id)).limit(1),
 		listsRoleFor(env, user, server.orgId)
 	]);
+	const orgBans = !!role?.kinds.includes('ban');
+	const orgSlots = !!role?.kinds.includes('reserve');
 	// who placed a ban, and the message the org wraps its bans in, are for those who manage bans
-	// here or edit the org's lists
-	const staff = role !== null || access.caps.has('bans.manage');
+	// here or edit the org's ban list
+	const staff = orgBans || access.caps.has('bans.manage');
 	const out: ServerListsState = {
-		canEditOrg: role !== null,
-		orgOwner: role === 'owner',
+		canEditOrgBans: orgBans,
+		canEditOrgSlots: orgSlots,
+		orgOwner: !!role?.owner,
 		orgId: server.orgId,
 		banMessage: null,
 		bans: {},
@@ -961,10 +993,7 @@ export async function serverListsState(
 	});
 	for (const b of bans) out.bans[b.steamId] = ban('local', false);
 	for (const r of reserved) out.reserved[r.steamId] = slot('local', false);
-	for (const s of state) {
-		if (s.kind === 'ban') out.bans[s.steamId] = ban(s.state, true);
-		else out.reserved[s.steamId] = slot(s.state, true);
-	}
+	for (const s of state) if (s.kind === 'reserve') out.reserved[s.steamId] = slot(s.state, true);
 	// wanted but not yet on the server
 	const org = (await getOrg(env, server.orgId)) ?? {
 		membersReserved: false,
@@ -972,10 +1001,12 @@ export async function serverListsState(
 	};
 	if (staff) out.banMessage = org.banMessage;
 	const desired = await desiredFor(env, server, org);
-	for (const d of desired.bans) out.bans[d.steamId] ??= ban('pending', true);
+	// a ban on the lists is in force: the panel removes the player itself. One the game also
+	// holds in its own list shows as the panel's.
+	for (const d of desired.bans) out.bans[d.steamId] = ban('applied', true);
 	// The entry behind each ban the lists want: which list it is on (the org's, or this server's
 	// own), the reason and when it lifts. Who is banned and why is View (the game's own ban list
-	// says as much); who placed it is for those who manage bans here or edit the org's lists.
+	// says as much); who placed it is for those who manage bans here or edit the org's ban list.
 	if (desired.bans.length) {
 		const ownBans = await serverListOf(env, server, 'ban');
 		const sourceOf = new Map(desired.bans.map((d) => [d.steamId, d.listId]));
@@ -1045,10 +1076,33 @@ export async function serverListsState(
 		for (const e of entries) {
 			if (sourceOf.get(e.steamId) !== e.listId) continue;
 			const s = out.reserved[e.steamId];
-			// Who holds a slot is View; what staff wrote about it is for those who manage slots.
-			s.note = role !== null || access.caps.has('slots.manage') ? e.reason : '';
+			// Who holds a slot is View; what staff wrote about it is for those who manage slots here
+			// or edit the org's reserved-slot list.
+			s.note = orgSlots || access.caps.has('slots.manage') ? e.reason : '';
 			s.expiresAt = iso(e.expiresAt);
 			if (e.listId === own.id) s.scope = 'server';
+		}
+		// zaruba: couch reserve — org-wide slots (scope 'org', the default) that list_entries above
+		// found nothing for: their note and expiry live in CouchDB now, not in list_entries. Only
+		// for COUCH_ORG_ID: every other org's reserve list is entirely Postgres, so a CouchDB call
+		// here would leak nothing useful (wardogs_reserve only ever holds COUCH_ORG_ID's data by
+		// construction) but would make every org's page depend on CouchDB being up.
+		const uncovered =
+			server.orgId === env.COUCH_ORG_ID
+				? slotIds.filter(
+						(id) =>
+							out.reserved[id].scope === 'org' &&
+							!out.reserved[id].expiresAt &&
+							!out.reserved[id].note
+					)
+				: [];
+		if (uncovered.length) {
+			const couchNotes = await reserveStore.notesFor(env, uncovered);
+			for (const [steamId, n] of couchNotes) {
+				const s = out.reserved[steamId];
+				s.note = role !== null || access.caps.has('slots.manage') ? n.reason : '';
+				s.expiresAt = n.expiresAt;
+			}
 		}
 	}
 	return out;

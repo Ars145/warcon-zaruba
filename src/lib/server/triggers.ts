@@ -57,6 +57,7 @@ import {
 	fullMoments,
 	lowStretches,
 	matchBroadcastMessages,
+	type MatchLineVars,
 	matchReplay,
 	seedReplay,
 	type MatchBroadcastConfig,
@@ -133,7 +134,7 @@ const RULE_NEEDS: Record<Exclude<TriggerKind, 'seed_reward'>, [Capability, strin
 export function ruleNeeds(kind: TriggerKind, config: unknown): [Capability, string] {
 	if (kind !== 'seed_reward') return RULE_NEEDS[kind];
 	return (config as Partial<SeedRewardConfig> | null)?.scope !== 'server'
-		? ['lists.edit', "edits the organisation's reserved-slot list"]
+		? ['lists.reserve', "edits the organisation's reserved-slot list"]
 		: ['slots.manage', 'reserves slots on this server'];
 }
 
@@ -280,6 +281,8 @@ export interface TickContext {
 	playersIntervalMs: number;
 	/** players with no open session before this observation (empty when joins are not trusted) */
 	joined: Player[];
+	/** players still on under a name their session did not hold at the last look */
+	renamed: Player[];
 	/** players whose faction is new since the last look (joiners arriving with one included;
 	 *  empty when joins are not trusted) */
 	factioned: FactionPick<Player>[];
@@ -299,6 +302,8 @@ export interface TickContext {
 	startedAt: number;
 	/** the match that ended between the previous look and this one, or null */
 	matchEnd: MatchEnd | null;
+	/** at a boundary, every player's line of the match that ended, from the worker's tallies */
+	matchLines: MatchLineVars[];
 	ts: Date;
 }
 
@@ -611,10 +616,13 @@ function evalRiskKick(
 }
 
 function evalNameFilter(ctx: TickContext, row: TriggerRow, cfg: NameFilterConfig, out: Evaluation) {
-	if (!ctx.joined.length) return;
+	if (!ctx.joined.length && !ctx.renamed.length) return;
+	// A name is judged when it is first seen, at the join or later: the clan tag is part of the
+	// name, and the game may only show it once the player is in.
+	const named = ctx.renamed.length ? [...ctx.joined, ...ctx.renamed] : ctx.joined;
 	let n = 0;
 	let last = '';
-	for (const { player: p, verdict: v } of nameFilterTargets(cfg, ctx.joined, ctx.reserved)) {
+	for (const { player: p, verdict: v } of nameFilterTargets(cfg, named, ctx.reserved)) {
 		const kick = cfg.action === 'kick';
 		out.intents.push({
 			trigger: row,
@@ -737,7 +745,13 @@ function evalMatchBroadcast(
 	out: Evaluation
 ) {
 	if (!ctx.matchEnd) return;
-	const sends = matchBroadcastMessages(cfg, ctx.matchEnd, ctx.status.playerCount, vars(ctx));
+	const sends = matchBroadcastMessages(
+		cfg,
+		ctx.matchEnd,
+		ctx.status.playerCount,
+		vars(ctx),
+		ctx.matchLines
+	);
 	if (!sends.length) return;
 	for (const { stage, message } of sends)
 		out.intents.push({
@@ -1309,12 +1323,15 @@ export async function dryRun(
 			2 * settings().sampleMs + 1000
 		);
 		for (const e of ends)
+			// The samples hold no player lines, so the dry run cannot name anyone.
 			for (const { message } of matchBroadcastMessages(c, e.end, e.count, {
 				server: server.name,
 				map: e.map,
 				players: e.count,
 				max: '…',
-				cap: DEFAULT_SCORE_CAP
+				cap: DEFAULT_SCORE_CAP,
+				mvp: '…',
+				top: '…'
 			}))
 				push(new Date(e.ts), `broadcast (${e.count} on): ${message}`);
 		result.notes.push(

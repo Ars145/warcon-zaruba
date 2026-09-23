@@ -238,14 +238,11 @@ export async function dossier(
 	const [summary] = await db.execute<{
 		sessions: string;
 		minutes: string | null;
-		kills: string | null;
-		deaths: string | null;
 		firstSeen: Date | null;
 		lastSeen: Date | null;
 	}>(sql`
 		SELECT COUNT(*) AS sessions,
 		       SUM(EXTRACT(EPOCH FROM (COALESCE(left_at, now()) - joined_at))) / 60 AS minutes,
-		       SUM(kills) AS kills, SUM(deaths) AS deaths,
 		       MIN(joined_at) AS "firstSeen", MAX(last_seen) AS "lastSeen"
 		  FROM player_sessions WHERE steam_id = ${steamId} AND server_id IN ${ids.length ? ids : ['']}`);
 	const perServer = ids.length
@@ -253,16 +250,29 @@ export async function dossier(
 				serverId: string;
 				sessions: string;
 				minutes: string;
-				kills: string;
-				deaths: string;
 				lastSeen: Date;
 			}>(sql`
 			SELECT server_id AS "serverId", COUNT(*) AS sessions,
 			       SUM(EXTRACT(EPOCH FROM (COALESCE(left_at, now()) - joined_at))) / 60 AS minutes,
-			       SUM(kills) AS kills, SUM(deaths) AS deaths, MAX(last_seen) AS "lastSeen"
+			       MAX(last_seen) AS "lastSeen"
 			  FROM player_sessions WHERE steam_id = ${steamId} AND server_id IN ${ids}
 			 GROUP BY server_id ORDER BY "lastSeen" DESC`)
 		: [];
+	// Kills and deaths are the game's own counters, summed from the player's lines of the matches
+	// that ended (the same rows the boards and careers read, so every page agrees).
+	const recorded = ids.length
+		? await db.execute<{ serverId: string; kills: string; deaths: string }>(sql`
+			SELECT p.server_id AS "serverId", SUM(p.kills) AS kills, SUM(p.deaths) AS deaths
+			  FROM match_players p JOIN matches m ON m.id = p.match_id
+			 WHERE p.steam_id = ${steamId} AND p.server_id IN ${ids} AND m.ended_at IS NOT NULL
+			 GROUP BY p.server_id`)
+		: [];
+	const recordedOn = new Map(recorded.map((r) => [r.serverId, r]));
+	const recordedAll = { kills: 0, deaths: 0 };
+	for (const r of recorded) {
+		recordedAll.kills += num(r.kills);
+		recordedAll.deaths += num(r.deaths);
+	}
 	const recent = ids.length
 		? await db
 				.select()
@@ -323,11 +333,13 @@ export async function dossier(
 	]);
 	const l = local.get(steamId);
 	const admin = access.caps.has('players.notes.manage');
-	// What staff wrote about the player is for those who may write it; the org list entry (its
-	// reason, who added it, where it stands on every server) for those who may open the lists.
+	// What staff wrote about the player is for those who may write it; an org list entry (its
+	// reason, who added it, where it stands on every server) for those who may edit that list.
 	const staff = admin || access.caps.has('players.notes');
 	const membership =
-		org && listsRole ? await orgListMembership(env, org, steamId) : { ban: null, reserve: null };
+		org && listsRole
+			? await orgListMembership(env, org, steamId, listsRole.kinds)
+			: { ban: null, reserve: null };
 	return {
 		steamId,
 		name,
@@ -336,7 +348,11 @@ export async function dossier(
 			? { serverId: online.serverId, serverName: nameOf.get(online.serverId) || '' }
 			: null,
 		orgServerCount: allOrgServers.length,
-		orgLists: { ...membership, canEdit: listsRole !== null },
+		orgLists: {
+			...membership,
+			canBan: !!listsRole?.kinds.includes('ban'),
+			canReserve: !!listsRole?.kinds.includes('reserve')
+		},
 		steamEnabled: steamEnabled(env),
 		steam: steamView(profiles.get(steamId)),
 		risk: riskFor(env, profiles.get(steamId), l, performance.get(steamId), staff),
@@ -356,8 +372,8 @@ export async function dossier(
 		summary: {
 			sessions: num(summary?.sessions),
 			minutes: Math.round(num(summary?.minutes)),
-			kills: num(summary?.kills),
-			deaths: num(summary?.deaths),
+			kills: recordedAll.kills,
+			deaths: recordedAll.deaths,
 			firstSeen: iso(summary?.firstSeen ? new Date(summary.firstSeen) : null),
 			lastSeen: iso(summary?.lastSeen ? new Date(summary.lastSeen) : null)
 		},
@@ -366,8 +382,8 @@ export async function dossier(
 			serverName: nameOf.get(r.serverId) || r.serverId,
 			sessions: num(r.sessions),
 			minutes: Math.round(num(r.minutes)),
-			kills: num(r.kills),
-			deaths: num(r.deaths),
+			kills: num(recordedOn.get(r.serverId)?.kills),
+			deaths: num(recordedOn.get(r.serverId)?.deaths),
 			lastSeen: new Date(r.lastSeen).toISOString()
 		})),
 		recent: recent.map((s) => ({

@@ -4,10 +4,10 @@
 // at the same time. A global cap bounds how many observations run at once; servers that stopped
 // answering can only take a share of it. One process does this: the one holding the worker
 // lease (leadership.ts), renewed every few seconds and re-checked inside every write.
-import { and, eq, gt, lt } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import type { Env } from './env';
 import type { OrgRow, ServerRow } from './access';
-import { matches, organizations, playerSessions, samples, servers } from './db/schema';
+import { organizations, servers } from './db/schema';
 import { expireEntries } from './lists-sync';
 import { PRIORITY, dispatcherStats, withServer } from './dispatcher';
 import {
@@ -21,6 +21,7 @@ import { loadSettings, settings, settingsVersion } from './settings';
 import { watchedCount } from './interest';
 import { deliveryStats, outboxDepth, startDelivery, stopDelivery } from './outbox';
 import { startStatusMirror, stopStatusMirror } from './webhook-status';
+import { startReserveWatch, stopReserveWatch } from './wardogs-watch'; // zaruba: couch reserve
 import {
 	allMemory,
 	cadenceOf,
@@ -35,7 +36,7 @@ import {
 	type ServerMemory
 } from './observe';
 import { phaseOffset, pickDue, withHold } from './poller-schedule';
-import { applyRetentionPolicy, rollupSamples } from './rollups';
+import { rollupSamples } from './rollups';
 import { liveView } from './live';
 import { feedDemoKills } from './feed-events';
 import { publicMessage } from './http';
@@ -47,7 +48,7 @@ const RENEW_MS = 5000;
 const ROSTER_MS = 5000;
 const SETTINGS_MS = 10_000;
 const EXPIRY_MS = 5000;
-const PRUNE_MS = 3600_000;
+const HOUSEKEEP_MS = 3600_000;
 /** Share of the concurrency budget that unreachable servers may hold at once. */
 const OFFLINE_SHARE = 0.5;
 /** An observation still running after this long is reported once and counted as stuck. */
@@ -67,7 +68,7 @@ interface Scheduler {
 	settingsAt: number;
 	settingsSeen: number;
 	expiryAt: number;
-	pruneAt: number;
+	housekeepAt: number;
 	active: number;
 	activeOffline: number;
 	beating: boolean;
@@ -111,7 +112,7 @@ export function startPoller(env: Env, label = 'worker'): void {
 		settingsAt: 0,
 		settingsSeen: settingsVersion(),
 		expiryAt: 0,
-		pruneAt: 0,
+		housekeepAt: 0,
 		active: 0,
 		activeOffline: 0,
 		beating: false,
@@ -129,6 +130,7 @@ export function startPoller(env: Env, label = 'worker'): void {
 	globalThis.__warconRenew = scheduler.renewTimer;
 	startDelivery(env);
 	startStatusMirror(env);
+	startReserveWatch(env); // zaruba: couch reserve
 	if (unregisterMetrics) unregisterMetrics();
 	unregisterMetrics = metrics.registerCollector(collectWorkerMetrics);
 	globalThis.__warconPoller = setInterval(() => void beat(env), BEAT_MS);
@@ -143,6 +145,7 @@ export async function stopPoller(): Promise<void> {
 	globalThis.__warconRenew = undefined;
 	stopDelivery();
 	stopStatusMirror();
+	await stopReserveWatch(); // zaruba: couch reserve
 	if (unregisterMetrics) unregisterMetrics();
 	unregisterMetrics = null;
 	scheduler = null;
@@ -165,6 +168,18 @@ export function observeSoon(serverId: string, opts?: { lists?: boolean }): void 
 		m.playersDueAt = withHold(now, m.holdUntil, now);
 		m.statusDueAt = withHold(now, m.holdUntil, now);
 	}
+}
+
+/**
+ * The server's lists were just edited: its next look, which comes at once, takes the lists again,
+ * so the worker holds the new bans and removes a banned player who is on now rather than at the
+ * next scheduled sync.
+ */
+export function resyncSoon(serverId: string): void {
+	const m = memoryOf(serverId);
+	if (!m) return;
+	m.syncAt = 0;
+	observeSoon(serverId);
 }
 
 /**
@@ -277,8 +292,8 @@ async function refreshRoster(env: Env, s: Scheduler, now: number): Promise<void>
 					observeSoon(m.server.id);
 				}
 	}
-	if (now - s.pruneAt >= PRUNE_MS) {
-		s.pruneAt = now;
+	if (now - s.housekeepAt >= HOUSEKEEP_MS) {
+		s.housekeepAt = now;
 		void housekeep(env);
 	}
 }
@@ -333,44 +348,18 @@ function launchDue(env: Env, s: Scheduler, now: number): void {
 	}
 }
 
-/**
- * Hourly: rollups first, and only if they succeeded the prune and the retention policy, so raw
- * history is never dropped before its rollup exists.
- */
+/** Hourly: the sample rollups. Nothing is deleted; history is kept for good. */
 let housekeeping = false;
 async function housekeep(env: Env): Promise<void> {
 	if (housekeeping) return;
 	housekeeping = true;
 	try {
-		await housekeepOnce(env);
+		await rollupSamples(env);
+	} catch (err) {
+		console.error('[warcon] rollups failed', err);
 	} finally {
 		housekeeping = false;
 	}
-}
-
-async function housekeepOnce(env: Env): Promise<void> {
-	try {
-		await rollupSamples(env);
-	} catch (err) {
-		console.error('[warcon] rollups failed; keeping raw samples until they succeed', err);
-		return;
-	}
-	await prune(env).catch((err) => console.error('[warcon] prune', err));
-	await applyRetentionPolicy(env).catch((err) => console.error('[warcon] retention', err));
-}
-
-async function prune(env: Env): Promise<void> {
-	const s = settings();
-	const cutSessions = new Date(Date.now() - s.sessionRetentionDays * 86400000);
-	// TimescaleDB's retention policy drops old sample chunks; plain Postgres needs this delete.
-	if (!env.timescale)
-		await env.db
-			.delete(samples)
-			.where(lt(samples.ts, new Date(Date.now() - s.rawRetentionDays * 86400000)));
-	await env.db
-		.delete(playerSessions)
-		.where(and(lt(playerSessions.leftAt, cutSessions), gt(playerSessions.id, 0)));
-	await env.db.delete(matches).where(lt(matches.endedAt, cutSessions));
 }
 
 // ---- stats --------------------------------------------------------------------------------------

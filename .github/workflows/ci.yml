@@ -26,10 +26,29 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U warcon -d warcon"
           --health-interval 5s --health-timeout 5s --health-retries 20
+      # zaruba: couch reserve — the org reserve list of COUCH_ORG_ID lives here.
+      couch:
+        image: couchdb:3.4.3
+        env:
+          COUCHDB_USER: warcon
+          COUCHDB_PASSWORD: warcon
+        ports: ['5984:5984']
+        options: >-
+          --health-cmd "curl -fsS http://127.0.0.1:5984/_up"
+          --health-interval 5s --health-timeout 5s --health-retries 20
     env:
       DATABASE_URL: postgres://warcon:warcon@127.0.0.1:5432/warcon
       # bun test makes its own warcon_test_* database on this server for the permission suites
       TEST_DATABASE_URL: postgres://warcon:warcon@127.0.0.1:5432/postgres
+      # zaruba: couch reserve — a fixed org id nobody in the tests owns, so every
+      # upstream suite keeps the Postgres-backed reserve list it expects.
+      COUCH_URL: http://127.0.0.1:5984
+      COUCH_DB: wardogs_reserve
+      COUCH_USER: warcon
+      COUCH_PASSWORD: warcon
+      COUCH_ORG_ID: 00000000-0000-4000-8000-000000000000
+      COUCH_REPL_USER: wardogs-replicator
+      COUCH_REPL_PASSWORD: warcon-ci
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
@@ -40,6 +59,8 @@ jobs:
       - run: bun run check
       - run: bun test
       - run: bun run build
+      # zaruba: couch reserve — the worker's _changes watch needs the database to exist
+      - run: curl -fsS -X PUT -u warcon:warcon http://127.0.0.1:5984/wardogs_reserve
       - name: Smoke test the production build
         env:
           ORIGIN: http://127.0.0.1:5199
@@ -73,3 +94,48 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # Tells the Discord update channel that main has new changes, once they pass. The webhook lives
+  # in the DISCORD_WEBHOOK_URL repository secret (Discord: channel settings > Integrations >
+  # Webhooks); without it the job does nothing, so forks and pull requests are unaffected.
+  # Only one post per push, after every other job is green; a push whose tests fail is not
+  # announced. A run cancelled by a newer push to main leaves its commits unannounced; the next
+  # post covers its own push only.
+  notify:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, docker]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post the pushed commits to Discord
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          REPO: ${{ github.repository }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then echo "DISCORD_WEBHOOK_URL is not set; nothing to post"; exit 0; fi
+          # The commits of this push, merges left out; a forced push or a new branch has no usable
+          # range, so fall back to the head commit alone.
+          if [[ "$BEFORE" =~ ^0+$ ]] || ! gh api "repos/$REPO/compare/$BEFORE...$AFTER" > compare.json 2>/dev/null; then
+            gh api "repos/$REPO/commits/$AFTER" | jq '{commits: [.]}' > compare.json
+            BEFORE=$(jq -r '.commits[0].parents[0].sha // .commits[0].sha' compare.json)
+          fi
+          jq -n --rawfile compare compare.json --arg repo "$REPO" --arg url "$SERVER_URL" \
+             --arg before "$BEFORE" --arg after "$AFTER" '
+            ($compare | fromjson | .commits | map(select(.parents | length < 2))) as $all
+            | (if $all == [] then ($compare | fromjson | .commits) else $all end) as $all
+            | ($all | length) as $n
+            | (($all | .[:15] | map("• [`\(.sha[:7])`](\(.html_url)) " + (.commit.message | split("\n")[0])))
+              + (if $n > 15 then ["… and \($n - 15) more"] else [] end)) as $lines
+            | {
+                embeds: [{
+                  title: (if $n == 1 then "1 new commit on main" else "\($n) new commits on main" end),
+                  url: "\($url)/\($repo)/compare/\($before)...\($after)",
+                  description: ($lines | join("\n") | .[:4000]),
+                  color: 5763719,
+                  footer: {text: "Update: git pull && docker compose up -d --build"}
+                }]
+              }' > payload.json
+          curl --fail-with-body -sS -H 'Content-Type: application/json' --data @payload.json "$WEBHOOK"

@@ -9,9 +9,9 @@
 // banned" is a success, "not banned" on delete is a success), so two replicas working the same
 // server at once do no harm; the in-process lock below only keeps the poller and an API call in
 // one process from interleaving.
-import { and, eq, gt, inArray, isNotNull, isNull, lte, notInArray, or, sql } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNotNull, isNull, lte, ne, notInArray, or, sql } from 'drizzle-orm';
 import type { Env } from './env';
-import { renderBanMessage } from '$lib/ban-message';
+import { banUid, renderBanMessage } from '$lib/ban-message';
 import { publicMessage } from './http';
 import { writeAudit } from './audit';
 import { ACTIONS } from './actions';
@@ -40,14 +40,14 @@ import {
 	isUnreachable,
 	planHasWork,
 	planSync,
-	refusedBansAfter,
 	type Kind,
 	type PlanInput,
-	type RefusedBan,
+	type PanelBan,
 	type SyncPlan
 } from './lists-plan';
 import type { DbOrTx } from './db';
 import type { Ban, Features, ListSyncServer, ListSyncSummary } from '$lib/types';
+import { desiredReserve } from './wardogs-reserve'; // zaruba: couch reserve
 
 /** A failed add or remove is not retried for this long. */
 const RETRY_AFTER_MS = 5 * 60_000;
@@ -64,8 +64,8 @@ export interface SyncResult extends ListSyncServer {
 	skipped?: 'busy' | 'suspended';
 	/** the server's lists after the run; the poller keeps its in-memory copy from this */
 	observed?: { bans: string[]; reserved: string[] };
-	/** bans the lists want that the game refused; the worker bans the player on sight */
-	refusedBans?: RefusedBan[];
+	/** the bans the lists put on this server; the worker removes these players on sight */
+	bans?: PanelBan[];
 }
 
 // ---- per-server lock ---------------------------------------------------------------------------
@@ -102,54 +102,86 @@ export async function withServerLock<T>(
 
 // ---- desired and observed ----------------------------------------------------------------------
 
+/**
+ * zaruba: couch reserve — whether a list row belongs in `desiredFor`'s generic Postgres query, or
+ * is excluded because it's `couchOrgId`'s own org reserve list (server_id null; its entries live
+ * in CouchDB, added back separately below). Mirrors the SQL `or(...)` clause in the query right
+ * below it exactly; kept as a standalone pure function so the scoping can be unit-tested without a
+ * database (see lists-sync.test.ts). Bans and every server's own reserve list are always included,
+ * for every org; only an org-wide reserve list belonging to `couchOrgId` is ever excluded.
+ */
+export const includedInPostgresDesired = (
+	row: { kind: Kind; orgId: string; listServerId: string | null },
+	couchOrgId: string
+): boolean => row.kind !== 'reserve' || row.listServerId !== null || row.orgId !== couchOrgId;
+
 /** What the lists this server subscribes to want on it right now. */
 export async function desiredFor(
 	env: Env,
 	server: Pick<ServerRow, 'id' | 'orgId'>,
 	org: Pick<OrgRow, 'membersReserved' | 'banMessage'>,
 	now = new Date()
-): Promise<PlanInput['desired']> {
+): Promise<PlanInput['desired'] & { reserveError?: string }> {
+	// zaruba: couch reserve — only COUCH_ORG_ID's own reserve list (server_id null) is excluded
+	// here: its entries live in CouchDB now (below), not in list_entries. Every other org's reserve
+	// list stays in this query same as before the feature existed. Bans and every server's own
+	// reserve list are untouched for every org. See includedInPostgresDesired above — this `or(...)`
+	// is its SQL form.
 	const rows = await env.db
 		.select({ e: listEntries, kind: lists.kind, listServerId: lists.serverId })
 		.from(serverLists)
 		.innerJoin(lists, eq(lists.id, serverLists.listId))
 		.innerJoin(listEntries, eq(listEntries.listId, lists.id))
-		.where(and(eq(serverLists.serverId, server.id), isNull(listEntries.removedAt)));
-	// A ban goes to the game as the org's ban message, not the bare reason. Only the adds read it:
-	// a ban already on the server keeps the text it was placed with.
+		.where(
+			and(
+				eq(serverLists.serverId, server.id),
+				isNull(listEntries.removedAt),
+				or(ne(lists.kind, 'reserve'), isNotNull(lists.serverId), ne(lists.orgId, env.COUCH_ORG_ID))
+			)
+		);
 	const active = activeEntries(
-		rows.map((r) => ({
-			...r.e,
-			kind: r.kind,
-			serverId: r.listServerId,
-			reason:
-				r.kind === 'ban'
-					? renderBanMessage(org.banMessage, { ...r.e, entryId: r.e.id })
-					: r.e.reason
-		})),
+		rows.map((r) => ({ ...r.e, kind: r.kind, serverId: r.listServerId })),
 		now
 	);
 	const { bans, reserved } = desiredOf(active);
-	if (org.membersReserved) {
-		// Members who set a SteamID get a slot from the org's reserve list, unless the org has
-		// banned them.
-		const [reserveList] = await env.db
-			.select({ id: lists.id })
-			.from(serverLists)
-			.innerJoin(lists, eq(lists.id, serverLists.listId))
-			.where(
-				and(eq(serverLists.serverId, server.id), eq(lists.kind, 'reserve'), isNull(lists.serverId))
-			)
-			.limit(1);
-		if (reserveList) {
-			const banned = new Set(bans.map((b) => b.steamId));
-			const have = new Set(reserved.map((r) => r.steamId));
+	// zaruba: couch reserve — the org's reserve list id, needed both for its CouchDB-backed entries
+	// and (as before) for the members-reserved addition below; one lookup serves both.
+	const [reserveList] = await env.db
+		.select({ id: lists.id })
+		.from(serverLists)
+		.innerJoin(lists, eq(lists.id, serverLists.listId))
+		.where(
+			and(eq(serverLists.serverId, server.id), eq(lists.kind, 'reserve'), isNull(lists.serverId))
+		)
+		.limit(1);
+	let reserveError: string | undefined;
+	if (reserveList) {
+		const banned = new Set(bans.map((b) => b.steamId));
+		const have = new Set(reserved.map((r) => r.steamId));
+		// zaruba: couch reserve — only COUCH_ORG_ID's reserve list has grants in CouchDB; every
+		// other org's reserve list is entirely list_entries (already folded into `reserved` above).
+		// A CouchDB outage here must fail only this org's couch-sourced additions, not the whole
+		// sync: bans, and the reserve entries already computed from list_entries, are unaffected.
+		if (server.orgId === env.COUCH_ORG_ID) {
+			try {
+				for (const c of await desiredReserve(env, now))
+					if (!banned.has(c.steamId) && !have.has(c.steamId)) {
+						reserved.push({ steamId: c.steamId, listId: reserveList.id, member: false });
+						have.add(c.steamId);
+					}
+			} catch (err) {
+				reserveError = err instanceof Error ? err.message : String(err);
+				console.error(`[warcon] couch reserve unavailable for org ${server.orgId}`, err);
+			}
+		}
+		if (org.membersReserved)
+			// Members who set a SteamID get a slot from the org's reserve list, unless the org has
+			// banned them or a CouchDB grant already covers them.
 			for (const m of await memberSlots(env, server.orgId))
 				if (!banned.has(m.steamId) && !have.has(m.steamId))
 					reserved.push({ steamId: m.steamId, listId: reserveList.id, member: true });
-		}
 	}
-	return { bans, reserved };
+	return { bans, reserved, reserveError };
 }
 
 /** Members of the org who linked a SteamID on their account and are not disabled. */
@@ -189,6 +221,19 @@ export async function memberSlots(
  */
 export async function expireEntries(env: Env): Promise<{ lifted: number; orgIds: string[] }> {
 	const now = new Date();
+	// zaruba: couch reserve — only COUCH_ORG_ID's org reserve list is excluded: its expiry is a
+	// read-time filter in CouchDB (see wardogs-reserve.ts activeReserve), nothing is written there
+	// for it, and any rows still sitting in list_entries from before the migration are history, not
+	// live state. Every other org's org reserve list is untouched Postgres and must keep expiring
+	// here same as before the feature existed. Same scoping as includedInPostgresDesired above,
+	// applied to a row with listServerId: null (an org-wide reserve list) — that function's `false`
+	// case is exactly this exclusion.
+	const orgReserveListIds = env.db
+		.select({ id: lists.id })
+		.from(lists)
+		.where(
+			and(eq(lists.kind, 'reserve'), isNull(lists.serverId), eq(lists.orgId, env.COUCH_ORG_ID))
+		);
 	const rows = await env.db
 		.update(listEntries)
 		.set({ removedAt: now, removedByName: 'expiry', removal: 'expired' })
@@ -196,7 +241,8 @@ export async function expireEntries(env: Env): Promise<{ lifted: number; orgIds:
 			and(
 				isNull(listEntries.removedAt),
 				isNotNull(listEntries.expiresAt),
-				lte(listEntries.expiresAt, now)
+				lte(listEntries.expiresAt, now),
+				notInArray(listEntries.listId, orgReserveListIds)
 			)
 		)
 		.returning({ listId: listEntries.listId, steamId: listEntries.steamId });
@@ -407,6 +453,22 @@ export async function reconcileServer(
 	return ran ?? { ...base, pending: true, skipped: 'busy', error: 'Sync already running.' };
 }
 
+/**
+ * zaruba: couch reserve — when the CouchDB read for COUCH_ORG_ID's reserve list failed
+ * (`reserveError` set), `desired.reserved` (which fed `plan`) is missing whatever that read would
+ * have added; treating a slot missing only because of the outage as "no longer wanted" would
+ * DELETE it off the game server. Adds and bans are unaffected (nothing is missing for them), so
+ * only reserve removes are held back — the next successful sync computes them fresh. Pure and
+ * exported so the behavior is unit-testable without a database (see lists-sync.test.ts).
+ */
+export function withReserveRemovalsHeldBack(
+	plan: SyncPlan,
+	reserveError: string | undefined
+): SyncPlan {
+	if (!reserveError) return plan;
+	return { ...plan, removes: plan.removes.filter((r) => r.kind !== 'reserve') };
+}
+
 async function run(
 	env: Env,
 	server: ServerRow,
@@ -416,6 +478,7 @@ async function run(
 ): Promise<SyncResult> {
 	const now = new Date();
 	const desired = await desiredFor(env, server, org, now);
+	const panelBans = desired.bans.map(({ steamId, listId }) => ({ steamId, listId }));
 	const state = await env.db
 		.select()
 		.from(serverListState)
@@ -427,13 +490,16 @@ async function run(
 		.limit(1);
 
 	const planWith = (observed: Observed) =>
-		planSync({
-			now,
-			retryAfterMs: RETRY_AFTER_MS,
-			desired,
-			observed: { bans: observed.bans.map((b) => b.steamId), reserved: observed.reserved },
-			state
-		});
+		withReserveRemovalsHeldBack(
+			planSync({
+				now,
+				retryAfterMs: RETRY_AFTER_MS,
+				desired,
+				observed: { reserved: observed.reserved },
+				state
+			}),
+			desired.reserveError
+		);
 
 	// Plan against what we last saw; before touching the server, look again.
 	let observed = opts.observed ?? (await snapshotObserved(env, server.id));
@@ -446,8 +512,9 @@ async function run(
 		return {
 			...base,
 			ok: true,
+			error: desired.reserveError ? `Reserve list: ${desired.reserveError}` : '',
 			observed: flat(observed),
-			refusedBans: refusedBansAfter(desired.bans, state)
+			bans: panelBans
 		};
 	}
 	try {
@@ -519,13 +586,9 @@ async function run(
 		added: outcome.added.length,
 		removed: outcome.removed.length,
 		failed: failedNow.length,
-		error: outcome.aborted ?? '',
+		error: outcome.aborted ?? (desired.reserveError ? `Reserve list: ${desired.reserveError}` : ''),
 		observed: flat(outcome.observed),
-		refusedBans: refusedBansAfter(desired.bans, state, {
-			added: outcome.added,
-			confirms: plan.confirms,
-			failedAdds: outcome.failedAdds
-		})
+		bans: panelBans
 	};
 }
 
@@ -595,9 +658,9 @@ async function execute(
 			continue;
 		}
 		try {
-			await (r.kind === 'ban' ? ACTIONS.unban : ACTIONS.reservedRemove).run(client, {
+			await ACTIONS.reservedRemove.run(client, {
 				steamId: r.steamId,
-				viaConfig: r.kind === 'reserve' && reserve.viaConfig
+				viaConfig: reserve.viaConfig
 			});
 			out.removed.push(r);
 			dropObserved(r.kind, r.steamId);
@@ -618,10 +681,9 @@ async function execute(
 			continue;
 		}
 		try {
-			await (a.kind === 'ban' ? ACTIONS.ban : ACTIONS.reservedAdd).run(client, {
+			await ACTIONS.reservedAdd.run(client, {
 				steamId: a.steamId,
-				reason: a.reason || undefined,
-				viaConfig: a.kind === 'reserve' && reserve.viaConfig
+				viaConfig: reserve.viaConfig
 			});
 			out.added.push(a);
 			addObserved(a.kind, a.steamId, a.reason);
@@ -730,89 +792,86 @@ async function upsertState(db: DbOrTx, u: StateUpsert): Promise<void> {
 		});
 }
 
-// ---- bans on sight -----------------------------------------------------------------------------
+// ---- bans, enforced by the panel -----------------------------------------------------------------
+
+/** How long a kick the game refused waits before it is tried again on the same player. */
+const KICK_RETRY_MS = 30_000;
 
 /**
- * Bans, at once, any player on the server whose ban the game refused earlier because they were
- * not connected (`refused`: the worker's copy from the last sync, edited here as bans land). One
- * call per such player, on the connection the observation already holds, and nothing at all on a
- * server with no refused bans. A ban that lands is recorded as applied, mirrored into server_bans
- * and audited like a sync run; one the game refuses again keeps its failed row with the new error
- * and attempt time, for the sync's own retry.
+ * A server's bans are the panel's alone: nothing is written to the game's ban list (some hosts
+ * keep that list in a file an unban never leaves). The worker holds the bans its lists put on the
+ * server (`bans`, from the last sync) and this removes any of those players found on it: one kick,
+ * with the org's ban message as it reads now, on the connection the observation already holds.
+ * Nothing at all happens on a server whose players are not banned.
  *
- * The worker's copy is as old as the last sync, so each ban is asked for again before it is
- * placed: an entry taken off its list or run out since then bans nobody. That is one query, and
- * only when such a player is actually on the server.
+ * The worker's copy is as old as the last sync, so the entry is read again before the kick: one
+ * taken off its list or run out since then removes nobody. That is one query, and only when such
+ * a player is actually on the server.
  */
-export async function banOnSight(
+export async function kickBanned(
 	env: Env,
 	server: ServerRow,
 	org: OrgRow,
 	client: WardogsClient,
 	present: string[],
-	refused: Map<string, RefusedBan>
+	bans: Map<string, PanelBan>
 ): Promise<void> {
 	for (const steamId of present) {
-		const r = refused.get(steamId);
-		if (!r) continue;
+		const b = bans.get(steamId);
+		if (!b) continue;
 		const now = new Date();
-		if (!(await stillBanned(env, server.id, r, now))) {
-			refused.delete(steamId);
+		if (b.retryAt && b.retryAt > now.getTime()) continue;
+		const entry = await liveEntry(env, server.id, b, now);
+		if (!entry) {
+			bans.delete(steamId);
 			continue;
 		}
-		const row = {
-			serverId: server.id,
-			kind: 'ban' as const,
-			steamId,
-			sourceListId: r.listId,
-			attemptedAt: now,
-			updatedAt: now
-		};
+		let error = '';
 		try {
-			await ACTIONS.ban.run(client, { steamId, reason: r.reason || undefined });
+			await ACTIONS.kick.run(client, {
+				steamId,
+				reason: renderBanMessage(org.banMessage, { ...entry, entryId: entry.id })
+			});
 		} catch (err) {
 			const f = failure(err);
-			if (!isAlreadyApplied(f)) {
-				if (isUnreachable(f)) return;
-				await upsertState(env.db, { ...row, state: 'failed', error: f.message.slice(0, 300) });
-				continue;
-			}
+			// gone between the look and the kick: that is what was wanted
+			if (isGone(f)) continue;
+			if (isUnreachable(f)) return;
+			b.retryAt = now.getTime() + KICK_RETRY_MS;
+			error = f.message;
 		}
-		refused.delete(steamId);
-		await upsertState(env.db, { ...row, state: 'applied', error: '' });
-		await noteLocalEdit(env, server.id, 'ban', 'add', steamId, r.reason, now);
 		await writeAudit(env, null, {
-			actorName: 'list sync',
+			actorName: 'ban list',
 			server: { id: server.id, name: server.name },
 			orgId: server.orgId,
 			category: 'system',
-			action: 'lists.sync',
-			target: org.name,
-			outcome: 'ok',
-			status: 200,
-			message: '1 added on sight',
-			detail: { reason: 'join', added: [`ban:${steamId}`], removed: [], failed: [] }
-		}).catch((err) => console.error('[warcon] lists.sync audit', err));
+			action: 'ban.enforce',
+			target: steamId,
+			outcome: error ? 'error' : 'ok',
+			status: error ? 502 : 200,
+			message: error ? `Could not remove a banned player: ${error}` : 'Banned player removed',
+			detail: { banId: banUid(entry.id) }
+		}).catch((err) => console.error('[warcon] ban.enforce audit', err));
 	}
 }
 
-/** Is the entry this refused ban came from still live on a list the server subscribes to? */
-async function stillBanned(env: Env, serverId: string, r: RefusedBan, now: Date): Promise<boolean> {
-	const [entry] = await env.db
-		.select({ id: listEntries.id })
+/** The entry behind a ban, if it is still live on a list the server subscribes to. */
+async function liveEntry(env: Env, serverId: string, b: PanelBan, now: Date) {
+	const [row] = await env.db
+		.select({ entry: listEntries })
 		.from(serverLists)
 		.innerJoin(listEntries, eq(listEntries.listId, serverLists.listId))
 		.where(
 			and(
 				eq(serverLists.serverId, serverId),
-				eq(serverLists.listId, r.listId),
-				eq(listEntries.steamId, r.steamId),
+				eq(serverLists.listId, b.listId),
+				eq(listEntries.steamId, b.steamId),
 				isNull(listEntries.removedAt),
 				or(isNull(listEntries.expiresAt), gt(listEntries.expiresAt, now))
 			)
 		)
 		.limit(1);
-	return !!entry;
+	return row?.entry ?? null;
 }
 
 // ---- fan-out from the API ----------------------------------------------------------------------
@@ -859,7 +918,7 @@ export async function fanOut(env: Env, org: OrgRow): Promise<ListSyncSummary> {
 
 /**
  * What an API answer says of a sync: where it landed, in counts. The rest of a SyncResult is the
- * worker's own (the server's lists, and the refused bans with their reasons) and never leaves.
+ * worker's own (the server's lists, and the bans the worker enforces) and never leaves.
  */
 export function summaryOf(r: SyncResult): ListSyncServer {
 	const { serverId, serverName, ok, added, removed, failed, pending, error } = r;
