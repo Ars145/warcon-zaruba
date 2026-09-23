@@ -14,6 +14,7 @@ import { couchState, listEntries, lists } from '../src/lib/server/db/schema';
 import {
 	couchConfig,
 	ensureDatabase,
+	ensureSystemDatabases,
 	ensureIndex,
 	ensureReplicationUser,
 	ensureValidateDesignDoc,
@@ -133,6 +134,7 @@ export async function migrateReserveToCouch(
 	repl: { user: string; password: string }
 ): Promise<{ created: number; skipped: number; alreadyDone: boolean }> {
 	const c = couchConfig(couchEnv);
+	await ensureSystemDatabases(c);
 	await ensureDatabase(c);
 	await ensureIndex(c, ['type', 'steamId'], 'type-steamId', 'wardogs');
 	await ensureIndex(c, ['type', 'clanId'], 'type-clanId', 'wardogs');
