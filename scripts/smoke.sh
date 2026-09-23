@@ -297,17 +297,19 @@ check enforce-kicked '0' "$(echo "$R" | grep -c "$ON")"
 check enforce-audit '"action":"ban.enforce"' "$(req $J1 GET '/api/audit?action=ban.enforce')"
 check enforce-no-game-ban '0' "$(req $J1 GET /api/servers/$SID/rcon/bans | grep -c "$ON")"
 # a reserved slot handed out for a fixed term lifts itself the same way
-ER="{\"steamId\":\"76561198100000702\",\"reason\":\"donor\",\"expiresAt\":\"$EXP\"}"
+# its own term: the ban enforcement above can take long enough for EXP to have passed
+RX=$(date -u -v+15S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+15 seconds' +%Y-%m-%dT%H:%M:%SZ)
+ER="{\"steamId\":\"76561198100000702\",\"reason\":\"donor\",\"expiresAt\":\"$RX\"}"
 check reserve-expiry-add '"expiresAt"' "$(req $J1 POST /api/orgs/$ORG/lists/reserve/entries "$ER")"
 check reserve-expiry-applied '76561198100000702' "$(req $J1 GET /api/servers/$SID/rcon/reserved)"
 # PATCH: a slot given out permanently can be put on a term afterwards (and back)
 req $J1 POST /api/orgs/$ORG/lists/reserve/entries '{"steamId":"76561198100000703","reason":"donor"}' >/dev/null
 check patch-no-field 'Nothing to change' "$(req $J1 PATCH /api/orgs/$ORG/lists/reserve/entries/76561198100000703 '{}')"
 check patch-past 'future' "$(req $J1 PATCH /api/orgs/$ORG/lists/reserve/entries/76561198100000703 '{"expiresAt":"2020-01-01T00:00:00Z"}')"
-check patch-unknown 'not on the' "$(req $J1 PATCH /api/orgs/$ORG/lists/reserve/entries/76561198100000704 "{\"expiresAt\":\"$EXP\"}")"
-check patch-set "${EXP%Z}" "$(req $J1 PATCH /api/orgs/$ORG/lists/reserve/entries/76561198100000703 "{\"expiresAt\":\"$EXP\"}")"
+check patch-unknown 'not on the' "$(req $J1 PATCH /api/orgs/$ORG/lists/reserve/entries/76561198100000704 "{\"expiresAt\":\"$RX\"}")"
+check patch-set "${RX%Z}" "$(req $J1 PATCH /api/orgs/$ORG/lists/reserve/entries/76561198100000703 "{\"expiresAt\":\"$RX\"}")"
 check patch-permanent '"expiresAt":null' "$(req $J1 PATCH /api/orgs/$ORG/lists/reserve/entries/76561198100000703 '{"expiresAt":null}')"
-check patch-reset "${EXP%Z}" "$(req $J1 PATCH /api/orgs/$ORG/lists/reserve/entries/76561198100000703 "{\"expiresAt\":\"$EXP\"}")"
+check patch-reset "${RX%Z}" "$(req $J1 PATCH /api/orgs/$ORG/lists/reserve/entries/76561198100000703 "{\"expiresAt\":\"$RX\"}")"
 check steam-badid '400' "$(form $J1 '/account?/steam' 'steamId=abc')"
 check steam-set '200' "$(form $J1 '/account?/steam' 'steamId=76561198100000801')"
 check steam-dup-carol '409' "$(form $J5 '/account?/steam' 'steamId=76561198100000801')"

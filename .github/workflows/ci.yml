@@ -59,6 +59,8 @@ jobs:
       - run: bun run check
       - run: bun test
       - run: bun run build
+      # zaruba: couch reserve — the worker's _changes watch needs the database to exist
+      - run: curl -fsS -X PUT -u warcon:warcon http://127.0.0.1:5984/wardogs_reserve
       - name: Smoke test the production build
         env:
           ORIGIN: http://127.0.0.1:5199
