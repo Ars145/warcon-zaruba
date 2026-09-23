@@ -26,10 +26,29 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U warcon -d warcon"
           --health-interval 5s --health-timeout 5s --health-retries 20
+      # zaruba: couch reserve — the org reserve list of COUCH_ORG_ID lives here.
+      couch:
+        image: couchdb:3.4.3
+        env:
+          COUCHDB_USER: warcon
+          COUCHDB_PASSWORD: warcon
+        ports: ['5984:5984']
+        options: >-
+          --health-cmd "curl -fsS http://127.0.0.1:5984/_up"
+          --health-interval 5s --health-timeout 5s --health-retries 20
     env:
       DATABASE_URL: postgres://warcon:warcon@127.0.0.1:5432/warcon
       # bun test makes its own warcon_test_* database on this server for the permission suites
       TEST_DATABASE_URL: postgres://warcon:warcon@127.0.0.1:5432/postgres
+      # zaruba: couch reserve — a fixed org id nobody in the tests owns, so every
+      # upstream suite keeps the Postgres-backed reserve list it expects.
+      COUCH_URL: http://127.0.0.1:5984
+      COUCH_DB: wardogs_reserve
+      COUCH_USER: warcon
+      COUCH_PASSWORD: warcon
+      COUCH_ORG_ID: 00000000-0000-4000-8000-000000000000
+      COUCH_REPL_USER: wardogs-replicator
+      COUCH_REPL_PASSWORD: warcon-ci
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
