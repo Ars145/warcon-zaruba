@@ -6,8 +6,17 @@ import type { DbOrTx } from './db';
 import { serverLive, type ServerLiveRow } from './db/schema';
 import type { ServerMemory } from './observe';
 import type { LiveView, Player, Status } from '$lib/types';
+import { saneScores } from '$lib/format';
 
 const iso = (ms: number): string | null => (ms > 0 ? new Date(ms).toISOString() : null);
+
+/** A status read back from the table: one written before its scores were checked, or while the
+ *  server was down, is checked again on the way out. */
+function saneStatus(raw: unknown): Status | null {
+	if (!raw || typeof raw !== 'object') return null;
+	const s = raw as Status;
+	return { ...s, scores: saneScores(s.scores) };
+}
 
 export function liveView(m: ServerMemory): LiveView {
 	return {
@@ -40,7 +49,7 @@ export function liveViewFromRow(r: ServerLiveRow): LiveView {
 		reservedSlots: r.reservedSlots ?? null,
 		// A hold lasts seconds; a row read cold from the database is not inside one.
 		throttledUntil: null,
-		status: (r.status as Status | null) ?? null,
+		status: saneStatus(r.status),
 		players: Array.isArray(r.players) ? (r.players as Player[]) : [],
 		statusAt: r.statusAt ? r.statusAt.toISOString() : null,
 		playersAt: r.playersAt ? r.playersAt.toISOString() : null,

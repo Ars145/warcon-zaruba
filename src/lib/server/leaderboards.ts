@@ -50,7 +50,8 @@ const lines = (ids: string[], from: Date, steamId: string | string[] | null) => 
 		                 THEN NULL
 		            WHEN m.winner IS NOT NULL THEN CASE WHEN m.winner = p.faction THEN 'win' ELSE 'loss' END
 		            WHEN jsonb_typeof(m.final_scores) = 'array'
-		                 AND (SELECT MAX((e->>'score')::numeric) FROM jsonb_array_elements(m.final_scores) e) > 0 THEN 'draw'
+		                 AND (SELECT MAX(CASE WHEN jsonb_typeof(e->'score') = 'number' THEN (e->>'score')::numeric END)
+		                        FROM jsonb_array_elements(m.final_scores) e) > 0 THEN 'draw'
 		            ELSE NULL END AS result
 		  FROM matches m
 		  JOIN match_players p ON p.match_id = m.id AND p.server_id = m.server_id
