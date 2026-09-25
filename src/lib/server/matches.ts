@@ -7,6 +7,7 @@ import type { Env } from './env';
 import { matches, matchPlayers, samples, serverLive, servers } from './db/schema';
 import type { KillsOfMatch } from './feed';
 import { matchResult } from '$lib/leaderboard';
+import { saneScores } from '$lib/format';
 import {
 	awardsFor,
 	durationOf,
@@ -56,10 +57,8 @@ export async function liveFactions(env: Env, serverId: string): Promise<LiveFact
 		.select({ status: serverLive.status })
 		.from(serverLive)
 		.where(eq(serverLive.serverId, serverId));
-	const scores =
-		(live?.status as { scores?: { name: string; colorHex?: string; score?: number }[] } | null)
-			?.scores ?? [];
-	return scores.map((f) => ({ name: f.name, colorHex: f.colorHex || null, score: num(f.score) }));
+	const scores = saneScores((live?.status as { scores?: unknown } | null)?.scores);
+	return scores.map((f) => ({ name: f.name, colorHex: f.colorHex || null, score: f.score }));
 }
 
 /** One page of the server's matches, newest first, and how many there are in all. */

@@ -48,7 +48,8 @@ What is in the box:
   and playtime. Anyone who can open the server can look; a row's Ban (for people who hold _Bans_)
   lands the moment the player next joins, and Watch needs _Notes_.
 - **Analytics**: the worker keeps what the game does not: players online over time, cash in play
-  per faction, uptime, time per map, busiest hours, player playtime and sessions, match history
+  per faction, uptime, time per map, wins per team, busiest hours, player playtime and sessions,
+  match history
   with results. Samples are written when something changes plus a heartbeat, and every figure is
   duration-weighted, so a faster cadence never distorts them.
 - **Player dossiers**: click any player for their history across the organisation's servers
@@ -393,6 +394,9 @@ watchlist_ can write them, and a note can be deleted by its author or a role wit
 A [Discord webhook](#discord-webhooks) ticked for _Watched players joining_ posts each time a
 watched player joins one of the organisation's servers.
 
+With a Steam key, the Players tab shows a player's Steam name under an in-game name that does not
+already hold it (a streamer's hidden name, say), and its filter finds players by that name too.
+
 With `STEAM_API_KEY` set, the dossier also shows the Steam persona, account age (public profiles
 only), VAC and game bans, refreshed daily and on demand, and what its friends list shows, looked
 at weekly. The **advisory risk score** is worked out when someone looks, for that reader: a ban on
@@ -597,6 +601,63 @@ under the body. A public link goes out only while that page is on for the server
 is off by default, for staff channels. The server's **Settings** tab has these controls next to
 the card style, with the public page switches under them.
 
+### JSON webhooks
+
+For your own systems (a memberships database, a donor bot), an org owner adds a **JSON webhook**
+on the organisation's overview (ten at most): an HTTPS address Warcon POSTs signed JSON to for each
+event ticked on it, for every server or a subset. The one event so far is a
+[Seeding reward](#automation-triggers) grant, sent once the slot is on the list:
+
+```json
+{
+	"event": "seed_reward.granted",
+	"id": "seed_reward.granted:0b6f3c2e-5d8a-4c17-9e42-7a1d6b3f8c90",
+	"at": "2026-09-25T21:14:03.120Z",
+	"org": { "id": "…", "name": "Example Clan" },
+	"server": { "id": "…", "name": "Example Clan #1" },
+	"player": { "steamId": "76561198100000101", "name": "Ghostpepper" },
+	"slot": { "scope": "server", "expiresAt": "2026-10-02T21:14:03.120Z", "days": 7 },
+	"rule": { "id": "…", "name": "Seeding reward" },
+	"seedMinutes": 64
+}
+```
+
+Every event starts with `event`, `id` and `at`; `id` is unique per event (its name and what it is
+about) and stays the same on every attempt. `slot.scope` is `server` for a slot on that server's own
+list and `org` for one on every server of the organisation. **Send test** posts a `ping` event with
+`event`, `id`, `at` and `org`.
+
+Every request carries `X-Warcon-Event`, `X-Warcon-Delivery` (the event's `id`) and
+`X-Warcon-Signature: t=<unix seconds>,v1=<hex>`, where `v1` is the HMAC-SHA256 of `<t>.<body>`,
+the body exactly as received, under the webhook's **signing secret**. The secret is shown once,
+when the webhook is added (Edit can make a new one); check every request with it:
+
+```js
+import { createHmac, timingSafeEqual } from 'node:crypto';
+
+function fromWarcon(rawBody, header, secret, toleranceS = 300) {
+	const { t, v1 } = Object.fromEntries(header.split(',').map((kv) => kv.split('=')));
+	if (!t || !v1 || Math.abs(Date.now() / 1000 - Number(t)) > toleranceS) return false;
+	const want = createHmac('sha256', secret).update(`${t}.${rawBody}`).digest('hex');
+	return want.length === v1.length && timingSafeEqual(Buffer.from(want), Buffer.from(v1));
+}
+```
+
+A 2xx answer is a delivery. No answer within five seconds, a 429 or a 5xx is sent again after 1, 5
+and 30 minutes, then 2, 6, 12 and 24 hours; any other answer is final, and redirects are not
+followed. After the last wait (about two days in all) the POST is given up and its webhook paused:
+what was waiting for it is skipped, and nothing more is queued for it until an owner enables it
+again. A webhook is also paused when whoever added it stops being an owner (removed, made a member,
+or their account disabled or deleted). POSTs go out on a queue of their own, oldest first and one at
+a time per webhook, and while one waits for its retry the webhook's others wait behind it, so a
+receiver that is slow or down never holds up another webhook or the servers' own automation.
+Delivery is at least once: after a timeout, or a panel restart in the middle of a send, the same
+`id` can arrive twice, so dedupe on it. The address must be https and public: a private-network
+address is for the site owner only (as a game server is) and a link-local one for nobody, checked
+when it is saved and again before every send. The address and the secret are stored encrypted with
+`ENCRYPTION_KEY`; the panel shows the address's host, when the last delivery went through and the
+last result as a status code or a short reason, never what the receiver answered.
+
 ### Leaderboards and careers
 
 Every server page has a **Leaderboards** tab: a board over this server or every server of the
@@ -613,6 +674,13 @@ result (win, loss, draw) is read from the match's winner and final scores agains
 player played; a match with no winner and nobody scoring, or one abandoned by a restart, has no
 result. Playtime and seed time come from player sessions; kills per hour leaves seed time out;
 cash is summed over sessions, each banked across its matches like kills. Names link to the dossier.
+
+**Export CSV** on the tab downloads the board as it is set (scope, range, sort, playtime floor),
+from the top and every page of it, up to 10,000 players: rank, SteamID, name, playtime and seed
+time in minutes, kills, deaths, K/D, kills per hour, the feed's columns, matches, wins, losses,
+draws, win rate, cash and when last seen. Names that start like a spreadsheet formula are written
+as text. The file is UTF-8; Excel shows a 17-digit SteamID rounded unless that column is
+imported as text.
 
 Each dossier has a **Career** section: rank on the all-time kills board for this server and the
 organisation, the current win or loss streak, matches with wins, losses and draws, K/D, kills per
@@ -1010,12 +1078,13 @@ These need _View_ on the server unless the table says otherwise.
 | `GET /api/servers/:id/players/seen`                      | everyone who has played on the server: `q` (name, alias or SteamID), `since` (days), `flag` (`banned`, `watched` or `online`), `sort` (`lastSeen`, `firstSeen`, `minutes`, `sessions`, `kills`, `deaths`, `name`), `dir`, `offset`, `limit` (up to 100)                                                                                                                             |
 | `GET /api/servers/:id/players/:steamId`                  | the dossier: names, sessions, totals per server, bans, risk, the kill feed's summary; notes and why a player is watched only with _Notes & watchlist_                                                                                                                                                                                                                               |
 | `GET /api/servers/:id/players/:steamId/career`           | rank, streak, results by map and faction, the last ten matches                                                                                                                                                                                                                                                                                                                      |
-| `GET /api/servers/:id/players/marks?ids=a,b`             | watched, first visit and risk score for up to 200 SteamIDs                                                                                                                                                                                                                                                                                                                          |
+| `GET /api/servers/:id/players/marks?ids=a,b`             | watched, first visit, risk score and Steam name (`steamName`) for up to 200 SteamIDs                                                                                                                                                                                                                                                                                                |
 | `GET /api/servers/:id/kills`                             | the stored kill feed, newest first (see [Kill feed](#kill-feed)): `killer`, `victim`, `player` (a SteamID, or part of a name), `kind` (`headshot`, `teamKill`, `suicide`, `vehicle`, `environment`), `cause`, `minM` (metres), `match`, `limit` (up to 200); `count=1` adds the total. For the next page, send the last kill's `ts` as `before` and its `eventTime` as `beforeTime` |
 | `GET /api/servers/:id/matches?page=`                     | the match history, fifty a page, newest first; the match in progress has no `endedAt`                                                                                                                                                                                                                                                                                               |
 | `GET /api/servers/:id/matches/:matchId`                  | a match that has ended: each player's line, the score timeline, awards                                                                                                                                                                                                                                                                                                              |
 | `GET /api/servers/:id/leaderboard`                       | `scope` (`server` or `org`), `range` (`7d`, `30d`, `90d`, `all`), `sort` (`kills`, `deaths`, `kd`, `perHour`, `playtime`, `seeded`, `matches`, `wins`, `winRate`, `cash`), `dir`, `page` (fifty a page), `minMinutes` (default 60)                                                                                                                                                  |
-| `GET /api/servers/:id/analytics?range=`                  | population, uptime and, with a kill feed, combat, over `24h`, `7d` or `30d`                                                                                                                                                                                                                                                                                                         |
+| `GET /api/servers/:id/leaderboard/export`                | the same query as the board, as a CSV file of every row from the top (up to 10,000; `page` is ignored); ten a minute                                                                                                                                                                                                                                                                |
+| `GET /api/servers/:id/analytics?range=`                  | population, uptime, wins per team (`wins`) and, with a kill feed, combat, over `24h`, `7d` or `30d`                                                                                                                                                                                                                                                                                 |
 | `GET /api/orgs/:orgId/players`                           | either org list: the organisation's players on the servers the key can see, with the filters of `players/seen` and `server`; `limit` up to 200                                                                                                                                                                                                                                      |
 | `GET /api/steam/profiles?ids=a,b`                        | Steam name and avatar for up to 100 SteamIDs, as `{"<steamId>": {"name", "avatar"}}` (null for one Steam does not know; no `ok`); 404 `steam_disabled` when the panel has no Steam key                                                                                                                                                                                              |
 | `POST /api/servers/:id/players/:steamId/steam`           | asks Steam about the player again and answers the dossier                                                                                                                                                                                                                                                                                                                           |
@@ -1287,6 +1356,7 @@ GET/POST /api/orgs  PATCH/DELETE /api/orgs/:id   PATCH {name} | {discordInviteUr
 GET  /api/orgs/:id/members  PATCH/DELETE /api/orgs/:id/members/:userId {role}  PUT .../:userId/grants {grants:[{serverId,roleId}]}
 GET/POST /api/orgs/:id/roles {name,capabilities[]}  PATCH/DELETE .../:roleId {name?,capabilities?}  POST .../:roleId/reset
 GET/POST /api/orgs/:id/keys {label,capabilities[],serverIds[]|null,expiresDays}  DELETE .../:keyId   (POST returns the token once)
+GET/POST /api/orgs/:id/json-webhooks {label,url,events[],serverIds[]|null,enabled}  PATCH/DELETE .../:webhookId {…, signing:"new"}  POST .../:webhookId/test   (POST, and PATCH with signing, return the secret once)
 GET/POST /api/orgs/:id/invites {label,orgRole,serverRoleId,expiresDays,maxUses}  DELETE /api/orgs/:id/invites/:inviteId
 GET/POST /api/users  PATCH/DELETE /api/users/:id  PUT /api/users/:id/grants {grants:[{serverId,roleId}]}
 GET/POST /api/servers {orgId,...}  PATCH/DELETE /api/servers/:id  POST /api/servers/:id/test   (PATCH also {publicStatus, publicLeaderboards, publicKills}, org owners, within the site owner's allowance; a PATCH that changes host, port or scheme must carry password, or it is 400 password_required)
@@ -1303,6 +1373,7 @@ GET  /api/servers/:id/cash?since=<iso>                  cash-in-play samples sin
 GET  /api/servers/:id/players/marks?ids=a,b&names=…     watchlist / first-visit / risk per connected player
 GET  /api/servers/:id/players/:steamId                  dossier   POST .../steam (refresh Steam data)   GET .../career   rank, streak, results by map and faction, the last ten matches
 GET  /api/servers/:id/leaderboard?scope=server|org&range=7d|30d|90d|all&sort=kills|deaths|kd|perHour|playtime|matches|wins|winRate|cash&dir=desc|asc&page=1&minMinutes=60
+GET  /api/servers/:id/leaderboard/export?<same query>   the board as CSV, every row from the top, up to 10,000
 POST /api/servers/:id/players/:steamId/notes {body}     DELETE .../notes/:noteId   PUT .../watch {watched,reason}
 GET/POST /api/servers/:id/triggers {kind,name,enabled,config}   PATCH/DELETE .../:triggerId   POST .../dry-run {kind,config}
 GET/POST /api/orgs/:id/webhooks {label,url,events,serverIds,enabled,statusEnabled,statusStyle,statusIntervalS,linkStatus,linkLeaderboard,linkPanel}   PATCH/DELETE .../:webhookId   POST .../:webhookId/test

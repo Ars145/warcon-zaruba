@@ -367,6 +367,8 @@ export interface PlayerMark {
 	reason: string;
 	firstVisit: boolean;
 	risk: RiskView;
+	/** the Steam profile's name, as the dossier shows it; null without a profile on record */
+	steamName: string | null;
 }
 
 export interface PlayerNoteView {
@@ -527,6 +529,23 @@ export interface WebhookView {
 	statusSentAt: string | null;
 	lastSentAt: string | null;
 	lastStatus: number | null;
+	lastError: string;
+	createdAt: string | null;
+}
+
+/** A JSON webhook as its org's owners see it: never the address or the signing secret. */
+export interface JsonWebhookView {
+	id: string;
+	label: string;
+	/** the address's host, and port when not 443 */
+	urlHint: string;
+	events: string[];
+	serverIds: string[] | null;
+	enabled: boolean;
+	/** the last delivery that got a 2xx */
+	lastSentAt: string | null;
+	lastStatus: number | null;
+	/** '' after a delivery, else a fixed phrase */
 	lastError: string;
 	createdAt: string | null;
 }

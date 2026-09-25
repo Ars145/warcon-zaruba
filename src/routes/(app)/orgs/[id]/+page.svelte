@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { invalidateAll } from '$app/navigation';
-	import { api, errorMessage } from '$lib/api';
+	import { api, ApiError, errorMessage } from '$lib/api';
 	import { fmtTime } from '$lib/format';
 	import { toast } from '$lib/toast.svelte';
 	import { confirmDialog } from '$lib/confirm.svelte';
@@ -11,7 +11,13 @@
 	import SortHeader from '$lib/components/SortHeader.svelte';
 	import { TableSort, matches } from '$lib/table.svelte';
 	import { capabilitySummary, type Capability } from '$lib/capabilities';
-	import type { ApiKeyView, InviteView, OrgMemberView, WebhookView } from '$lib/types';
+	import type {
+		ApiKeyView,
+		InviteView,
+		JsonWebhookView,
+		OrgMemberView,
+		WebhookView
+	} from '$lib/types';
 	import { STATUS_STYLE_LABELS, STATUS_STYLES, type StatusStyle } from '$lib/status-styles';
 	import CardOptions from '$lib/components/CardOptions.svelte';
 	import { FEATURE_LABELS, PUBLIC_FEATURES, allowed } from '$lib/features';
@@ -63,7 +69,18 @@
 				servers: Record<string, boolean>;
 				expiresDays: string;
 		  }
-		| { kind: 'keyCreated'; key: ApiKeyView; token: string };
+		| { kind: 'keyCreated'; key: ApiKeyView; token: string }
+		| {
+				kind: 'jsonhook';
+				id: string | null;
+				label: string;
+				url: string;
+				events: Record<string, boolean>;
+				allServers: boolean;
+				servers: Record<string, boolean>;
+				newSecret: boolean;
+		  }
+		| { kind: 'jsonhookSecret'; secret: string };
 	let dialog = $state<Dialog | null>(null);
 	let busy = $state(false);
 
@@ -300,6 +317,86 @@
 	}
 	const eventLabel = (key: string) =>
 		data.webhookEvents.find((e) => e.key === key)?.label.split(' (')[0] ?? key;
+
+	// --- JSON webhooks ---
+	const openJsonHook = (w: JsonWebhookView | null) => {
+		const events: Record<string, boolean> = {};
+		for (const e of data.jsonWebhookEvents) events[e.key] = w ? w.events.includes(e.key) : true;
+		const servers: Record<string, boolean> = {};
+		for (const s of data.orgServers) servers[s.id] = !!w?.serverIds?.includes(s.id);
+		dialog = {
+			kind: 'jsonhook',
+			id: w?.id ?? null,
+			label: w?.label ?? '',
+			url: '',
+			events,
+			allServers: !w?.serverIds,
+			servers,
+			newSecret: false
+		};
+	};
+	function saveJsonHook() {
+		const d = dialog;
+		if (!d || d.kind !== 'jsonhook') return;
+		const body: Record<string, unknown> = {
+			label: d.label.trim(),
+			events: Object.entries(d.events)
+				.filter(([, on]) => on)
+				.map(([k]) => k),
+			serverIds: d.allServers
+				? null
+				: Object.entries(d.servers)
+						.filter(([, on]) => on)
+						.map(([k]) => k)
+		};
+		if (d.url.trim()) body.url = d.url.trim();
+		if (d.newSecret) body.signing = 'new';
+		void run(
+			async () => {
+				const res = await api<{ webhook: JsonWebhookView; secret?: string }>(
+					d.id ? 'PATCH' : 'POST',
+					d.id ? `${orgPath}/json-webhooks/${d.id}` : `${orgPath}/json-webhooks`,
+					body
+				);
+				dialog = res.secret ? { kind: 'jsonhookSecret', secret: res.secret } : null;
+			},
+			d.id && !d.newSecret ? 'Webhook updated.' : '',
+			false
+		);
+	}
+	function toggleJsonHook(w: JsonWebhookView) {
+		void run(
+			() => api('PATCH', `${orgPath}/json-webhooks/${w.id}`, { enabled: !w.enabled }),
+			w.enabled ? 'Webhook paused.' : 'Webhook enabled.',
+			false
+		);
+	}
+	/** A signed ping now; what came back is shown, and kept on the row either way. */
+	async function testJsonHook(w: JsonWebhookView) {
+		busy = true;
+		try {
+			await api('POST', `${orgPath}/json-webhooks/${w.id}/test`);
+			toast('Test event delivered.', 'ok');
+		} catch (err) {
+			const why =
+				err instanceof ApiError
+					? (err.data as { result?: { error?: string } } | null)?.result?.error
+					: '';
+			toast(why || errorMessage(err), 'err');
+		} finally {
+			busy = false;
+			await invalidateAll();
+		}
+	}
+	async function deleteJsonHook(w: JsonWebhookView) {
+		if (
+			!(await confirmDialog(`Remove the ${w.label} webhook?`, { okLabel: 'Remove', danger: true }))
+		)
+			return;
+		await run(() => api('DELETE', `${orgPath}/json-webhooks/${w.id}`), 'Webhook removed.', false);
+	}
+	const jsonEventLabel = (key: string) =>
+		data.jsonWebhookEvents.find((e) => e.key === key)?.label ?? key;
 
 	// --- site owner controls ---
 	// A number input binds a number, or null when blank (blank = the instance default).
@@ -684,6 +781,53 @@
 
 		<div class="panel">
 			<div class="mb-3 flex items-center gap-3">
+				<span class="label-sm mb-0!">JSON webhooks</span>
+				<button class="ml-auto btn btn-sm btn-primary" onclick={() => openJsonHook(null)}
+					>New JSON webhook</button
+				>
+			</div>
+			<p class="mb-3 text-[13px] text-mist-400">
+				Each event is POSTed as signed JSON to an HTTPS address you run.
+			</p>
+			{#each data.jsonWebhooks as w (w.id)}
+				<div class="kv items-start">
+					<div class="min-w-0">
+						<div>
+							{w.label}
+							{#if !w.enabled}<Badge class="ml-1">paused</Badge>{/if}
+							{#if w.enabled && w.lastError}<Badge tone="err" class="ml-1">failing</Badge
+								>{:else if w.enabled && w.lastSentAt}<Badge tone="ok" class="ml-1">ok</Badge>{/if}
+						</div>
+						<div class="truncate font-mono text-[11px] text-mist-600">{w.urlHint}</div>
+						<div class="text-[12px] text-mist-400">
+							{w.events.map(jsonEventLabel).join(' · ')} ·
+							{w.serverIds
+								? `${w.serverIds.length} server${w.serverIds.length === 1 ? '' : 's'}`
+								: 'every server'}
+							{#if w.lastError}<div class="text-danger">{w.lastError}</div>{:else if w.lastSentAt}·
+								last sent {fmtTime(w.lastSentAt)}{/if}
+						</div>
+					</div>
+					<span class="inline-flex shrink-0 flex-wrap justify-end gap-1.5">
+						<button class="btn btn-sm" onclick={() => testJsonHook(w)} disabled={busy}
+							>Send test</button
+						>
+						<button class="btn btn-sm" onclick={() => openJsonHook(w)}>Edit</button>
+						<button class="btn btn-sm" onclick={() => toggleJsonHook(w)} disabled={busy}
+							>{w.enabled ? 'Pause' : 'Enable'}</button
+						>
+						<button class="btn btn-sm btn-danger" onclick={() => deleteJsonHook(w)} disabled={busy}
+							>Remove</button
+						>
+					</span>
+				</div>
+			{:else}
+				<p class="text-[13px] text-mist-600">No JSON webhooks yet.</p>
+			{/each}
+		</div>
+
+		<div class="panel">
+			<div class="mb-3 flex items-center gap-3">
 				<span class="label-sm mb-0!">API keys</span>
 				<button class="ml-auto btn btn-sm btn-primary" onclick={openKey}>New key</button>
 			</div>
@@ -1016,6 +1160,99 @@
 			<b>{d.key.label}</b>: {capabilitySummary(d.key.capabilities)} · {keyServers(d.key)}.
 			{d.key.expiresAt ? `Expires ${fmtTime(d.key.expiresAt)}.` : 'Never expires.'}
 		</p>
+		{#snippet actions()}<button type="button" class="btn" onclick={() => (dialog = null)}
+				>Done</button
+			>{/snippet}
+	</Modal>
+{:else if dialog?.kind === 'jsonhook'}
+	{@const d = dialog}
+	<Modal title={d.id ? 'Edit JSON webhook' : 'New JSON webhook'} onclose={() => (dialog = null)}>
+		<form
+			class="space-y-3"
+			onsubmit={(e) => {
+				e.preventDefault();
+				saveJsonHook();
+			}}
+		>
+			<label class="block"
+				><span class="field-label">Label</span><input
+					class="input"
+					type="text"
+					bind:value={d.label}
+					placeholder="e.g. Memberships DB"
+					maxlength="60"
+				/></label
+			>
+			<label class="block"
+				><span class="field-label">URL{d.id ? ' (leave blank to keep)' : ''}</span><input
+					class="input font-mono text-[12.5px]"
+					type="url"
+					bind:value={d.url}
+					placeholder="https://…"
+					required={!d.id}
+					autocomplete="off"
+				/></label
+			>
+			<div>
+				<span class="field-label">Sends</span>
+				<div class="space-y-1">
+					{#each data.jsonWebhookEvents as e (e.key)}
+						<label class="flex items-center gap-2 text-[13px]"
+							><input type="checkbox" bind:checked={d.events[e.key]} /> {e.label}</label
+						>
+					{/each}
+				</div>
+			</div>
+			{#if data.orgServers.length > 1}
+				<div>
+					<span class="field-label">Servers</span>
+					<label class="flex items-center gap-2 text-[13px]"
+						><input type="checkbox" bind:checked={d.allServers} /> Every server in the organisation</label
+					>
+					{#if !d.allServers}
+						<div class="mt-1 space-y-1 pl-5">
+							{#each data.orgServers as s (s.id)}
+								<label class="flex items-center gap-2 text-[13px]"
+									><input type="checkbox" bind:checked={d.servers[s.id]} /> {s.name}</label
+								>
+							{/each}
+						</div>
+					{/if}
+				</div>
+			{/if}
+			{#if d.id}
+				<label class="flex items-center gap-2 text-[13px]"
+					><input type="checkbox" bind:checked={d.newSecret} /> Make a new signing secret</label
+				>
+			{/if}
+			<div class="flex justify-end gap-2 pt-2">
+				<button type="button" class="btn" data-close onclick={() => (dialog = null)}>Cancel</button>
+				<button
+					type="submit"
+					class="btn btn-primary"
+					disabled={busy ||
+						!Object.values(d.events).some(Boolean) ||
+						(!d.allServers && !Object.values(d.servers).some(Boolean))}
+					>{d.id ? 'Save' : 'Add'}</button
+				>
+			</div>
+		</form>
+	</Modal>
+{:else if dialog?.kind === 'jsonhookSecret'}
+	{@const d = dialog}
+	<Modal title="Signing secret" onclose={() => (dialog = null)}>
+		<p class="mb-3 text-[13.5px]">
+			Shown once. Every request carries
+			<code class="font-mono text-[12.5px]">X-Warcon-Signature: t=&lt;time&gt;,v1=&lt;hex&gt;</code
+			>, an HMAC-SHA256 of <code class="font-mono text-[12.5px]">&lt;time&gt;.&lt;body&gt;</code> with
+			this secret.
+		</p>
+		<div class="join w-full">
+			<input class="input font-mono text-[12.5px]" type="text" readonly value={d.secret} />
+			<button type="button" class="btn btn-primary" onclick={() => copy(d.secret, 'Signing secret')}
+				>Copy</button
+			>
+		</div>
 		{#snippet actions()}<button type="button" class="btn" onclick={() => (dialog = null)}
 				>Done</button
 			>{/snippet}

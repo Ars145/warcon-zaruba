@@ -97,6 +97,17 @@ export const outboxOldestSeconds = new Gauge({
 	help: 'Age of the oldest pending outbox row.',
 	registers: [registry]
 });
+export const jsonWebhookPostsDone = new Counter({
+	name: 'warcon_json_webhook_posts_total',
+	help: 'POSTs to JSON webhooks finished, by outcome.',
+	labelNames: ['outcome'] as const,
+	registers: [registry]
+});
+export const jsonWebhookPostsPending = new Gauge({
+	name: 'warcon_json_webhook_posts_pending',
+	help: 'POSTs to JSON webhooks queued and not yet finished.',
+	registers: [registry]
+});
 
 // ---- web: requests, kill feed, rate limits, fleet counts ---------------------------------------
 

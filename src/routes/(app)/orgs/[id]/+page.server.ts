@@ -5,6 +5,7 @@ import { requireOrgRole, type OrgRow } from '$lib/server/access';
 import { normalizeError } from '$lib/server/http';
 import { listInvites, listMembers } from '$lib/server/orgs';
 import { listWebhooks, WEBHOOK_EVENT_LABELS } from '$lib/server/webhooks';
+import { JSON_WEBHOOK_EVENT_LABELS, listJsonWebhooks } from '$lib/server/json-webhooks';
 import { listRoles } from '$lib/server/roles';
 import { listKeys } from '$lib/server/apikeys';
 
@@ -19,10 +20,11 @@ export const load: PageServerLoad = async ({ locals, params }) => {
 		if (!known) throw err;
 		error(known.status, known.message);
 	}
-	const [members, invites, webhooks, roles, keys] = await Promise.all([
+	const [members, invites, webhooks, jsonWebhooks, roles, keys] = await Promise.all([
 		listMembers(env, org.id),
 		listInvites(env, org.id),
 		listWebhooks(env, org.id),
+		listJsonWebhooks(env, org.id),
 		listRoles(env, org.id),
 		listKeys(env, org.id)
 	]);
@@ -30,9 +32,14 @@ export const load: PageServerLoad = async ({ locals, params }) => {
 		members,
 		invites,
 		webhooks,
+		jsonWebhooks,
 		roles,
 		keys,
 		webhookEvents: Object.entries(WEBHOOK_EVENT_LABELS).map(([key, label]) => ({ key, label })),
+		jsonWebhookEvents: Object.entries(JSON_WEBHOOK_EVENT_LABELS).map(([key, label]) => ({
+			key,
+			label
+		})),
 		https: env.ORIGIN.startsWith('https://'),
 		discord: discordEnabled(env)
 	};

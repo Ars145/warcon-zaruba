@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { api, qs, rconPost, errorMessage } from '$lib/api';
 	import { watchLive } from '$lib/live';
-	import { fmtNum } from '$lib/format';
+	import { fmtNum, steamNameBeside } from '$lib/format';
 	import { can } from '$lib/capabilities';
 	import { toast } from '$lib/toast.svelte';
 	import { confirmDialog } from '$lib/confirm.svelte';
@@ -67,7 +67,9 @@
 		cash: { by: (p) => p.cash, dir: 'desc' },
 		ping: { by: (p) => p.ping }
 	});
-	let rows = $derived(sort.sorted(all.filter((p) => matches(search, p.name, p.steamId))));
+	let rows = $derived(
+		sort.sorted(all.filter((p) => matches(search, p.name, p.steamId, marks[p.steamId]?.steamName)))
+	);
 	/** the dialog's player as the roster sees them now; null once they have left */
 	let live = $derived.by(() => {
 		const d = dialog;
@@ -249,6 +251,7 @@
 					{#each rows as p (p.steamId)}
 						{@const m = marks[p.steamId]}
 						{@const r = listState?.reserved[p.steamId]}
+						{@const steam = steamNameBeside(p.name, m?.steamName)}
 						<tr>
 							<td
 								><a
@@ -256,7 +259,10 @@
 									class="font-medium text-mist-100 underline decoration-mist-600 underline-offset-[3px] hover:text-accent hover:decoration-accent"
 									>{p.name}</a
 								>
-								<span class="font-mono text-[12px] text-mist-600">{p.steamId}</span></td
+								<span class="font-mono text-[12px] text-mist-600">{p.steamId}</span>
+								{#if steam}<span class="block text-[12.5px] text-mist-400"
+										>Steam · <span class="text-mist-100">{steam}</span></span
+									>{/if}</td
 							>
 							<td class="whitespace-nowrap">
 								{#if m}

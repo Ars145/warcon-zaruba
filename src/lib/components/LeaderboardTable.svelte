@@ -28,7 +28,9 @@
 		/** show SteamIDs under the names (the panel does, a public page does not) */
 		showIds = false,
 		/** relative "last seen" times (public pages) rather than clock times */
-		relative = false
+		relative = false,
+		/** where Export CSV downloads the board as it is set (the panel only) */
+		exportHref = ''
 	}: {
 		board: BoardView | null;
 		query: BoardQuery;
@@ -39,6 +41,7 @@
 		orgScope?: boolean;
 		showIds?: boolean;
 		relative?: boolean;
+		exportHref?: string;
 	} = $props();
 
 	const set = (patch: Partial<BoardQuery>) =>
@@ -117,6 +120,9 @@
 		{#if board}{fmtNum(board.total)} player{board.total === 1 ? '' : 's'}{#if loading}
 				· loading…{/if}{:else}Loading…{/if}
 	</span>
+	{#if exportHref}
+		<a class="btn btn-sm" href={exportHref} target="_blank" rel="noopener">Export CSV</a>
+	{/if}
 </div>
 
 <div class="table-wrap">
@@ -158,7 +164,7 @@
 					<td class="num">{fmtNum(r.kills)}</td>
 					<td class="num">{fmtNum(r.deaths)}</td>
 					<td class="num">{ratio(kdRatio(r.kills, r.deaths))}</td>
-					<td class="num">{ratio(perHour(r.kills, r.minutes), 1)}</td>
+					<td class="num">{ratio(perHour(r.kills, r.minutes, r.seedMinutes), 1)}</td>
 					<td class="num">{r.headshots}</td>
 					<td class="num {r.teamKills >= 3 ? 'text-warn' : ''}">{r.teamKills}</td>
 					<td class="num">{r.matches}</td>
