@@ -711,21 +711,380 @@ organisation; they are allowed for every organisation unless closed there.
 
 A Discord bot or a script talks to the same `/api` routes as the panel, with an organisation
 **API key** instead of a session. An org owner mints one on the org page under **API keys**: a
-label, the capabilities it carries (the same list roles use), which servers it may touch (or every
-server the org has, now and later), and an optional expiry. The token is shown once; only its
-hash is stored. Keys can read and act on servers and edit the org lists (a key limited to some
-servers carries neither _Org ban list_ nor _Org reserved slots_), but never manage the
-organisation, its members or its keys, and never reach the site owner's routes.
+label, the capabilities it carries (the same list roles use, see [Roles](#roles)), which servers it
+may touch (or every server the org has, now and later), and an optional expiry. The token is shown
+once; only its hash is stored. Everything a key changes is audited under `<label> (API key)`, and
+so is every game action it is refused (game reads too, where `AUDIT_LOG_READS` is on). Revoking a
+key on the org page ends it at once; a suspended organisation's keys stop working with it.
+
+The rest of this section is the API as a key sees it. The example answers come from the built-in
+demo server.
+
+#### Calling the API
+
+Send the token as a bearer to the address you open the panel at (its `ORIGIN`). A key needs no
+cookie and no `X-Requested-With` header, and works on `/api` routes only; a page answers it with a
+redirect to sign-in. Request bodies are JSON, sent with `Content-Type: application/json` (anything
+else is a 415).
 
 ```sh
-# add a reserved slot from a bot: no cookie, no CSRF header, just the bearer
-curl -X POST "$ORIGIN/api/orgs/$ORG_ID/lists/reserve/entries" \
-  -H "Authorization: Bearer wck_…" -H "Content-Type: application/json" \
+ORIGIN=https://panel.example.com
+KEY=wck_…
+# the servers the key covers: id, name, orgId, and the key's capabilities on each
+curl -s "$ORIGIN/api/servers" -H "Authorization: Bearer $KEY"
+# a reserved slot on every server of the organisation
+curl -s -X POST "$ORIGIN/api/orgs/$ORG_ID/lists/reserve/entries" \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   -d '{"steamId":"76561198000000000","reason":"donor"}'
 ```
 
-Every call a key makes is audited under `<label> (API key)`. Revoking a key on the org page ends
-it at once; a suspended organisation's keys stop working with it.
+Server and organisation ids come from `GET /api/servers` (`id`, `orgId`). `GET /api/orgs` lists
+the organisations a person runs and is empty for a key, and a key without _View_ sees no servers,
+so a key that carries only an org list takes its org id from the panel: the org page's address
+ends in it (`/orgs/<id>`). Players are named by their SteamID64 (17 digits, as a string), and times
+are ISO 8601 in UTC.
+
+Every answer is JSON with `ok`. A refusal has an HTTP status to match and an `error`:
+
+```json
+{
+	"ok": false,
+	"error": {
+		"message": "This needs 'Bans' on Demo One; your role 'API key' does not include it.",
+		"code": "forbidden"
+	}
+}
+```
+
+Act on the status and `error.code`; the message is written for people and can change.
+
+| Status | `error.code`                                            | When                                                                                                                                                |
+| ------ | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 400    | mostly none                                             | a field is missing or out of range; the message says which                                                                                          |
+| 401    | `invalid_api_key`, `api_key_revoked`, `api_key_expired` | the token is not one the panel knows, or it is no longer valid                                                                                      |
+| 403    | `forbidden`                                             | the key can see the server but lacks the capability; the message names it                                                                           |
+| 403    | `api_key_forbidden`                                     | a route no key may use (below)                                                                                                                      |
+| 403    | `suspended`                                             | the organisation is suspended                                                                                                                       |
+| 404    | `not_found`                                             | nothing there, or nothing the key may see: a server of another organisation or outside the key's servers, and every server for a key without _View_ |
+| 409    | `duplicate`                                             | the player is already on that list                                                                                                                  |
+| 429    | `rate_limited`                                          | too many calls; the message says how many seconds to wait (there is no `Retry-After` header)                                                        |
+| 502    | `unreachable`, or the game's own                        | a game action could not reach the game server, or the game refused the stored RCON password                                                         |
+
+#### What a key can do
+
+On each server it covers a key holds its capabilities, and nothing more: it has no role in the
+organisation. _View_ is the way in to a server; a key without it cannot see any. The organisation's
+ban and reserved-slot lists are open to a key over every server that carries _Org ban list_ or _Org
+reserved slots_; a key held to some servers cannot be given either. Whatever it carries, a key
+manages nothing, and these answer it 403: the organisation's settings, members, roles, invite
+links, webhooks and keys; adding, editing and deleting servers; the kill feed token; purging stats;
+importing into the org lists; and every site owner route.
+
+Answers name capabilities by id:
+
+| Id                     | In the panel       |
+| ---------------------- | ------------------ |
+| `server.view`          | View               |
+| `chat.send`            | Chat               |
+| `players.moderate`     | Kick, kill, move   |
+| `match.control`        | Match control      |
+| `rotation.edit`        | Live rotation      |
+| `players.notes`        | Notes & watchlist  |
+| `players.notes.manage` | Others' notes      |
+| `bans.manage`          | Bans               |
+| `slots.manage`         | Reserved slots     |
+| `lists.ban`            | Org ban list       |
+| `lists.reserve`        | Org reserved slots |
+| `rotation.save`        | Save rotation      |
+| `config.apply`         | Config & settings  |
+| `automation.manage`    | Automation         |
+| `audit.read`           | Audit trail        |
+| `rcon.raw`             | Raw RCON           |
+
+#### Reading a server
+
+`GET /api/live` answers what the panel last saw on each server the key covers, or on those named in
+`?ids=a,b` (ids the key cannot see are left out). It is what the panel's own pages show and costs
+the game server nothing. By default the panel reads the players every two seconds and the status
+every five while people are on, and looks at an empty server every thirty seconds; `observedAt`
+says when it last looked. Poll this rather than the game actions. `GET /api/servers/:id/summary`
+answers the same for one server, with the key's capabilities there (its `ok` is the server's, as in
+the live view).
+
+```json
+{
+	"ok": true,
+	"live": {
+		"fd359609-3d96-4e99-9963-22971c78d0d5": {
+			"serverId": "fd359609-3d96-4e99-9963-22971c78d0d5",
+			"ok": true,
+			"error": "",
+			"tier": "hot",
+			"build": "++Wardogs+Demo-CL-501228",
+			"gameServerId": "fae6015d-8dba-45c2-a792-50910fa21c12",
+			"startedAt": "2026-09-24T12:50:27.202Z",
+			"reservedSlots": 2,
+			"throttledUntil": null,
+			"status": {
+				"serverName": "Warcon Demo Server [fd3596]",
+				"map": "Kavkazi",
+				"experiences": ["Bakurani_KOTH_01"],
+				"lighting": "DayLateClear",
+				"alternator": "ZoneAlternator.Factory.Circle",
+				"scoreTick": 24,
+				"scoreTickMin": 18,
+				"scoreTickMax": 30,
+				"scoreCap": 100,
+				"matchSeconds": 130,
+				"playerCount": 13,
+				"maxPlayers": 30,
+				"scores": [
+					{ "name": "Valkyra", "colorHex": "#D86060", "score": 73 },
+					{ "name": "Lonestar", "colorHex": "#5B95D8", "score": 55 },
+					{ "name": "Manticore", "colorHex": "#7BC462", "score": 62 }
+				],
+				"rotationNow": 0,
+				"rotationNext": 1
+			},
+			"players": [
+				{
+					"name": "Ghostpepper",
+					"steamId": "76561198100000101",
+					"faction": "Valkyra",
+					"kills": 5,
+					"deaths": 4,
+					"cash": 750,
+					"ping": 16
+				}
+			],
+			"statusAt": "2026-09-24T13:00:59.215Z",
+			"playersAt": "2026-09-24T13:00:58.213Z",
+			"observedAt": "2026-09-24T13:00:59.215Z"
+		}
+	}
+}
+```
+
+`ok` false means the last look did not reach the server, and `error` says why; `statusAt` and
+`playersAt` say when the status and the players were last read. `gameServerId` is the join code.
+Live builds report no `scoreCap` or `matchSeconds`, so those are null there. A player's `kills`,
+`deaths` and `cash` are the in-game scoreboard's, which starts again every match.
+
+`GET /api/live/events?ids=a,b` is the same as a stream of server-sent events: `live` (the object
+above, at every look), `kills` (`{"type": "kills", "serverId": …, "kills": […]}`, as the kill
+feed brings them) and `outbox` (what automation rules did, only on servers where the key holds
+_Automation_), with a `: ping` comment every 15 seconds. The stream ends after five minutes;
+connect again. While it is open its servers are looked at every second, as for a panel tab left
+open, so hold it only while something needs updates that fast.
+
+#### Game actions
+
+Actions are the commands and reads that go straight to the game server:
+`GET /api/servers/:id/rcon/:action` for reads, with any parameters in the query, and `POST` with the
+parameters as a JSON body for anything that changes the game (a `GET` of one of those is a 405;
+`POST` works for reads too). Each call goes to the game server there and then. `GET /api/actions`
+lists every action with the capability it needs.
+
+```sh
+curl -s -X POST "$ORIGIN/api/servers/$SERVER_ID/rcon/broadcast" \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"message":"Restart in 5 minutes"}'
+```
+
+```json
+{
+	"ok": true,
+	"action": "broadcast",
+	"role": "API key",
+	"result": { "message": "Announcement sent to 13 player(s)." },
+	"durationMs": 1
+}
+```
+
+`result` is the game server's answer. When the game refuses, `ok` is false, the status is the
+game's (a 401 or a 5xx from it becomes a 502), and `error` carries the game's `code` and
+`upstreamStatus`:
+
+```json
+{
+	"ok": false,
+	"action": "kick",
+	"error": {
+		"message": "Player not found: 76561198100009999",
+		"code": "player_not_found",
+		"upstreamStatus": 404
+	}
+}
+```
+
+| Action                              | Needs             | Parameters                                                                              |
+| ----------------------------------- | ----------------- | --------------------------------------------------------------------------------------- |
+| `status`, `players`, `rotation`     | View              | none                                                                                    |
+| `bans`                              | View              | none (the game's own ban list; see [Bans and reserved slots](#bans-and-reserved-slots)) |
+| `reserved`                          | View              | `document=1` also reads the config document's list                                      |
+| `serverId`                          | View              | none (the join code)                                                                    |
+| `health`, `capabilities`, `sponsor` | View              | none                                                                                    |
+| `maps`, `lightings`, `catalog`      | View              | none                                                                                    |
+| `experiences`                       | View              | `map` (optional: the experiences that map offers)                                       |
+| `alternators`                       | View              | `map`                                                                                   |
+| `broadcast`                         | Chat              | `message`                                                                               |
+| `whisper`                           | Chat              | `steamId`, `message`                                                                    |
+| `kick`                              | Kick, kill, move  | `steamId`, `reason` (optional)                                                          |
+| `kill`                              | Kick, kill, move  | `steamId`                                                                               |
+| `changeTeam`                        | Kick, kill, move  | `steamId`, `faction`                                                                    |
+| `endMatch`, `restartMatch`          | Match control     | none                                                                                    |
+| `changeMap`, `setNextMap`           | Match control     | `map`, and optionally `experiences` (a list), `lighting`, `zoneAlternator`              |
+| `setWeather`                        | Match control     | `lighting`                                                                              |
+| `rotationAdd`                       | Live rotation     | as `changeMap`                                                                          |
+| `rotationRemove`                    | Live rotation     | `index`                                                                                 |
+| `rotationMove`                      | Live rotation     | `index`, `direction` (`up` or `down`)                                                   |
+| `rotationReorder`                   | Live rotation     | `from`, `to`                                                                            |
+| `ban`                               | Bans              | `steamId`, `reason` (optional)                                                          |
+| `unban`                             | Bans              | `steamId`                                                                               |
+| `reservedAdd`, `reservedRemove`     | Reserved slots    | `steamId`                                                                               |
+| `rotationSave`                      | Save rotation     | none                                                                                    |
+| `rotationSettings`                  | Save rotation     | `rotationEnabled`, `rotationMode` (`ordered` or `random`)                               |
+| `settings`                          | Config & settings | `scoreTick` (1 to 600), `rotationEnabled`, `rotationMode`                               |
+| `config`                            | Config & settings | none (the config document, credentials as `(hidden)`)                                   |
+| `configValidate`, `configApply`     | Config & settings | `text`; apply also `revision`, `force`, `fullApply`                                     |
+| `serverLog`                         | Audit trail       | `limit` (1 to 500, default 50)                                                          |
+| `raw`                               | Raw RCON          | `method`, `path` (a `/v1` route), `body`                                                |
+
+`message` and `reason` are cut at 200 characters; rotation indexes count from 0. The reads answer:
+
+- `status`: the `status` object of the live view, read fresh; `players`: `{"players": […]}` as in
+  the live view.
+- `rotation`: `enabled`, `mode`, `nowIndex`, `nextIndex` and `entries`, each with `map`,
+  `experiences`, `lighting`, `zoneAlternator`, `denied` and `status`.
+- `bans`: `{"bans": [{"steamId", "bannedAtUtc", "bannedBy", "reason"}]}`; `reserved`:
+  `{"reserved": [SteamIDs]}`.
+- `maps`, `lightings` and `experiences`: `{"maps": [{"id", "display"}]}` and so on; `catalog` all
+  three at once. The ids are what `changeMap` and `setWeather` take. `alternators`:
+  `{"alternators": [{"tag", "display"}]}`, the tags `zoneAlternator` takes.
+- `capabilities`: the routes the server's build serves, and `features`, which of the optional
+  actions it has (`changeTeam`, `reservedSlots`, `rotationEdit`, `rotationSave`, `liveSettings`,
+  `serverId`, `configDocument`).
+
+Not every build of the game serves every action; one it lacks answers with the code `no_route`. On
+a build without the reserved-slot routes, `reservedAdd` and `reservedRemove` edit the config
+document instead, which the running server takes up at its next restart (the answer says so, with
+`pendingRestart`). `POST /api/servers/:id/test` (_Config & settings_) is the panel's connection
+test: it reaches the server and answers its `status`, `capabilities` and join code (`serverId`).
+
+#### Bans and reserved slots
+
+Ban and reserve through the panel's lists rather than the `ban` and `reservedAdd` actions:
+
+| Route                                                                                                       | Needs                                                                                            |
+| ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `POST /api/orgs/:orgId/lists/:kind/entries`                                                                 | _Org ban list_ (`kind` is `ban`) or _Org reserved slots_ (`reserve`), on a key over every server |
+| `PATCH` and `DELETE /api/orgs/:orgId/lists/:kind/entries/:steamId`                                          | the same                                                                                         |
+| `GET /api/orgs/:orgId/lists/:kind/entries`                                                                  | the same; `?includeRemoved=1` adds entries that were lifted                                      |
+| `GET /api/orgs/:orgId/lists`                                                                                | either list: the lists the key edits, their entry counts, the last sync on each server           |
+| `POST /api/orgs/:orgId/lists/sync`                                                                          | either list: push the lists to every server now                                                  |
+| `POST /api/servers/:id/lists/ban/entries`, `PATCH` and `DELETE /api/servers/:id/lists/ban/entries/:steamId` | _Bans_ on that server: the server's own ban list                                                 |
+| `POST /api/servers/:id/lists/reserve/entries`, `DELETE /api/servers/:id/lists/reserve/entries/:steamId`     | _Reserved slots_ on that server: the server's own slots                                          |
+| `GET /api/servers/:id/lists/state`                                                                          | View: every ban and slot on the server by SteamID, which list it comes from, why and until when  |
+
+An add takes `{"steamId": "…", "reason": "…", "expiresAt": "2026-10-01T00:00:00Z"}`. `reason`
+(the note, on a reserved slot) is up to 200 characters; `expiresAt` is at least ten seconds and at most
+ten years ahead, and left out for a permanent entry. A `PATCH` takes either or both, and
+`"expiresAt": null` makes an entry permanent. A player already on the list is a 409 `duplicate`,
+one who is not on it a 404. An add or a removal is applied at once, and its answer's `sync` says
+how it went (`ok`, `added`, `removed`, `failed`, `error`): for the server's own list on that
+server, for an org list once per server under `sync.servers`.
+
+The panel enforces its bans itself: it removes a banned player from every server the list covers
+the moment it sees them, with the organisation's ban message, whether or not they were on when the
+ban was placed (see [Organisation ban and reserved lists](#organisation-ban-and-reserved-lists)).
+The `ban` action writes to the game's own ban list instead, which the panel never lifts or expires
+and shows as _local_, and the live game accepts it only for a player who is connected.
+`reservedAdd` likewise puts a slot on the server outside the lists.
+
+#### Players and statistics
+
+These need _View_ on the server unless the table says otherwise.
+
+| Route                                                    | Answers                                                                                                                                                                                                                                                                                                                                                                             |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/servers/:id/players/seen`                      | everyone who has played on the server: `q` (name, alias or SteamID), `since` (days), `flag` (`banned`, `watched` or `online`), `sort` (`lastSeen`, `firstSeen`, `minutes`, `sessions`, `kills`, `deaths`, `name`), `dir`, `offset`, `limit` (up to 100)                                                                                                                             |
+| `GET /api/servers/:id/players/:steamId`                  | the dossier: names, sessions, totals per server, bans, risk, the kill feed's summary; notes and why a player is watched only with _Notes & watchlist_                                                                                                                                                                                                                               |
+| `GET /api/servers/:id/players/:steamId/career`           | rank, streak, results by map and faction, the last ten matches                                                                                                                                                                                                                                                                                                                      |
+| `GET /api/servers/:id/players/marks?ids=a,b`             | watched, first visit and risk score for up to 200 SteamIDs                                                                                                                                                                                                                                                                                                                          |
+| `GET /api/servers/:id/kills`                             | the stored kill feed, newest first (see [Kill feed](#kill-feed)): `killer`, `victim`, `player` (a SteamID, or part of a name), `kind` (`headshot`, `teamKill`, `suicide`, `vehicle`, `environment`), `cause`, `minM` (metres), `match`, `limit` (up to 200); `count=1` adds the total. For the next page, send the last kill's `ts` as `before` and its `eventTime` as `beforeTime` |
+| `GET /api/servers/:id/matches?page=`                     | the match history, fifty a page, newest first; the match in progress has no `endedAt`                                                                                                                                                                                                                                                                                               |
+| `GET /api/servers/:id/matches/:matchId`                  | a match that has ended: each player's line, the score timeline, awards                                                                                                                                                                                                                                                                                                              |
+| `GET /api/servers/:id/leaderboard`                       | `scope` (`server` or `org`), `range` (`7d`, `30d`, `90d`, `all`), `sort` (`kills`, `deaths`, `kd`, `perHour`, `playtime`, `seeded`, `matches`, `wins`, `winRate`, `cash`), `dir`, `page` (fifty a page), `minMinutes` (default 60)                                                                                                                                                  |
+| `GET /api/servers/:id/analytics?range=`                  | population, uptime and, with a kill feed, combat, over `24h`, `7d` or `30d`                                                                                                                                                                                                                                                                                                         |
+| `GET /api/orgs/:orgId/players`                           | either org list: the organisation's players on the servers the key can see, with the filters of `players/seen` and `server`; `limit` up to 200                                                                                                                                                                                                                                      |
+| `GET /api/steam/profiles?ids=a,b`                        | Steam name and avatar for up to 100 SteamIDs, as `{"<steamId>": {"name", "avatar"}}` (null for one Steam does not know; no `ok`); 404 `steam_disabled` when the panel has no Steam key                                                                                                                                                                                              |
+| `POST /api/servers/:id/players/:steamId/steam`           | asks Steam about the player again and answers the dossier                                                                                                                                                                                                                                                                                                                           |
+| `POST /api/servers/:id/players/:steamId/notes`           | _Notes & watchlist_: `{"body": "…"}` adds a note                                                                                                                                                                                                                                                                                                                                    |
+| `DELETE /api/servers/:id/players/:steamId/notes/:noteId` | _Notes & watchlist_: the key's own notes; anyone's with _Others' notes_                                                                                                                                                                                                                                                                                                             |
+| `PUT /api/servers/:id/players/:steamId/watch`            | _Notes & watchlist_: `{"watched": true, "reason": "…"}` puts the player on the organisation's watchlist, `false` takes them off                                                                                                                                                                                                                                                     |
+
+A kill, as the kills route and the event stream carry it (`ts` is when the panel received it,
+`eventTime` the seconds on the match clock, `killer` is null for the environment):
+
+```json
+{
+	"eventId": "A1B5F452-4303-444B-AC04-984F47A6D27F",
+	"ts": "2026-09-24T13:00:59.233Z",
+	"map": "Kavkazi",
+	"eventTime": 130.91799926757812,
+	"killer": { "steamId": "76561198100000107", "name": "KillustratorPro", "faction": "Lonestar" },
+	"victim": { "steamId": "76561198100000110", "name": "Dutchie", "faction": "Manticore" },
+	"cause": "Id.Item.WEPN_029",
+	"distanceM": 118.33999633789062,
+	"headshot": false,
+	"suicide": false,
+	"teamKill": false,
+	"tags": []
+}
+```
+
+#### Automation and audit
+
+| Route                                          | Needs                                                                                                                                                                                                            |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/servers/:id/triggers`                | _Automation_                                                                                                                                                                                                     |
+| `POST /api/servers/:id/triggers`               | _Automation_, and what the rule does (_Chat_ to send messages, _Kick, kill, move_ to kick, and so on; the refusal names it): `{"kind", "name", "enabled", "config"}`                                             |
+| `PATCH /api/servers/:id/triggers/:triggerId`   | the same; `{"enabled": false}` switches a rule off                                                                                                                                                               |
+| `DELETE /api/servers/:id/triggers/:triggerId`  | _Automation_                                                                                                                                                                                                     |
+| `POST /api/servers/:id/triggers/dry-run`       | as for `POST`: `{"kind", "config"}`, and the answer is what the rule would have done over the last 24 hours                                                                                                      |
+| `GET /api/servers/:id/outbox`                  | _Automation_: the last 40 actions the rules took, and how each went                                                                                                                                              |
+| `GET /api/audit`                               | the key's own actions, and every row on servers where it holds _Audit trail_: `server`, `actor`, `category`, `action`, `outcome`, `q`, `from`, `to`, `limit` (up to 500); the next page is `before=<nextBefore>` |
+| `GET /api/audit/export?format=csv` (or `json`) | the same rows as a file, up to 10,000                                                                                                                                                                            |
+
+A rule's `config` is what the Automation tab's form saves for its kind, so the quickest way to a
+valid one is to make the rule in the panel and read it back.
+
+#### Limits
+
+| Calls                                                                        | Limit                                                                                        |
+| ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| game actions                                                                 | 120 a minute per key, `raw` at most 30 of them                                               |
+| `GET /api/servers/:id/players/seen`                                          | 60 a minute per key                                                                          |
+| `GET /api/steam/profiles` and `POST /api/servers/:id/players/:steamId/steam` | 60 and 20 a minute per key, counted together                                                 |
+| `POST /api/servers/:id/test`                                                 | 20 a minute per key                                                                          |
+| tokens the panel refuses                                                     | 20 a minute from one address; then a 429 for each further bad token (good keys keep working) |
+
+Other routes have no limit of their own. The live view changes at most every second, so polling it
+faster than that gains nothing.
+
+#### Without a key
+
+A server whose public pages are on has JSON anyone can read, no key needed:
+`GET /api/public/servers/:id` (the status page), and while its leaderboards are public
+`.../leaderboard` (the leaderboard query above, twenty pages at most), `.../matches`,
+`.../matches/:matchId` and `.../players/:steamId` (a career). Each answers 404 while its page is
+off, and one address may make 120 of these requests a minute. See [Public pages](#public-pages).
+
+#### Stability
+
+This is the API the panel's own pages call, and it carries no version number: fields are added as
+the panel grows, and a route can change between releases. Read the fields you use and ignore the
+rest.
 
 ### Invite links
 
@@ -917,8 +1276,8 @@ docs/wardogs-api.md            the reverse-engineered game-server API
 ### API cheatsheet
 
 All `/api` calls need either the session cookie (mutations then also need
-`X-Requested-With: warcon`) or an organisation API key as `Authorization: Bearer wck_…` (see
-[Bots and API keys](#bots-and-api-keys)).
+`X-Requested-With: warcon`) or, on the routes a key may use, an organisation API key as
+`Authorization: Bearer wck_…` ([Bots and API keys](#bots-and-api-keys) is the guide for bots).
 Sign-in, setup, password change and session revocation are SvelteKit form actions on their pages,
 which call Better Auth server-side behind the login lockout and the audit trail. Of Better Auth's
 own `/api/auth/*` routes only the OAuth callback is reachable over HTTP; everything else answers 404.
