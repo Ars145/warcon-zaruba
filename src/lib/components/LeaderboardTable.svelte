@@ -158,7 +158,7 @@
 					<td class="num">{fmtNum(r.kills)}</td>
 					<td class="num">{fmtNum(r.deaths)}</td>
 					<td class="num">{ratio(kdRatio(r.kills, r.deaths))}</td>
-					<td class="num">{ratio(perHour(r.kills, r.minutes), 1)}</td>
+					<td class="num">{ratio(perHour(r.kills, r.minutes, r.seedMinutes), 1)}</td>
 					<td class="num">{r.headshots}</td>
 					<td class="num {r.teamKills >= 3 ? 'text-warn' : ''}">{r.teamKills}</td>
 					<td class="num">{r.matches}</td>
