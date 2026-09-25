@@ -91,7 +91,7 @@ New files (none of this logic lives in an upstream file):
   (`bun run scripts/migrate-reserve-to-couch.ts`, `COUCH_ORG_ID`, `COUCH_REPL_USER` and
   `COUCH_REPL_PASSWORD` required) and automatically as part of the migrate step. The backfill part
   specifically runs **only once, ever**: see "Backfill marker" below.
-- `drizzle/0034_couch_state.sql` + the `couchState` table in `db/schema.ts` — a tiny generic
+- `drizzle/zaruba_couch_state.sql` + the `couchState` table in `db/couch-state.ts` — a tiny generic
   key/value table holding the `_changes` watch loop's last seq, so a restart resumes instead of
   re-scanning. (`site_settings` was not reused: its values are bounded numeric settings, not an
   opaque cursor.)
@@ -151,8 +151,9 @@ one-line early-return, or a small guard condition, never a rewrite of surroundin
 - `src/lib/server/poller.ts` — `startReserveWatch(env)` / `await stopReserveWatch()` alongside the
   existing `startDelivery`/`startStatusMirror` pair in `startPoller`/`stopPoller` (`stopPoller` was
   already `async`).
-- `src/lib/server/db/schema.ts` — the new `couchState` table (additive; nothing existing changed).
-  Doubles as the backfill marker's storage (see below) and the `_changes` watch's last-seq cursor.
+- `drizzle/meta/_journal.json` — one entry for `zaruba_couch_state`, placed **first** in `entries`
+  (see "Keeping upstream merges clean" below). `couchState` itself doubles as the backfill marker's
+  storage (see below) and the `_changes` watch's last-seq cursor.
 - `src/worker/migrate.ts` — requires `COUCH_ORG_ID`, `COUCH_REPL_USER` and `COUCH_REPL_PASSWORD`
   (fails fast if any is unset) and passes them to
   `migrateReserveToCouch(db, process.env, couchOrgId, { user, password })` after `runMigrations`.
@@ -209,12 +210,25 @@ again.
   steamId that also has no CouchDB doc, `serverListsState`'s `list_entries` lookup will still
   surface it before the CouchDB fallback runs. This is a pre-existing-row edge case, not a new
   write path — the platform and Warcon only ever write to CouchDB going forward for this list.
-- **`drizzle/meta/0034_couch_state_snapshot.json` was not generated** (no local `bun`/`drizzle-kit`
-  available in this environment). The hand-written `0034_couch_state.sql` and the appended
-  `_journal.json` entry are enough for `runMigrations`/`bun run db:migrate` (they only read the SQL
-  files and the journal). Before the *next* schema change, run `bun run db:generate` once so
-  drizzle-kit's snapshot catches up — otherwise it will re-diff against the last real snapshot
-  (0028) and may re-propose the `couch_state` table.
+- **`couch_state` has no drizzle-kit snapshot, on purpose.** Its table lives in `db/couch-state.ts`,
+  outside the `schema.ts` drizzle-kit reads, so `bun run db:generate` never sees or re-proposes it;
+  the hand-written `zaruba_couch_state.sql` and its journal entry are all `runMigrations` needs.
+
+## Keeping upstream merges clean
+
+`sync-upstream.yml` merges upstream on its own and stops at the first conflict, and upstream appends
+to the **end** of its lists (new migrations to the journal, new webhook events, new tables). So the
+fork adds to the **top** of an upstream list, never the end, and keeps whole tables out of
+`schema.ts`:
+
+- The `zaruba_couch_state` journal entry is the first element of `entries`, with its original
+  `"when": 1790110972645` and `"idx": -1`. Never renumber it into the `00NN_` sequence and never
+  change `when`: drizzle applies an entry only when its `when` is newer than the newest applied
+  migration, so the array position is irrelevant to an existing database, while a newer `when`
+  would make the live database run `CREATE TABLE couch_state` again and fail. `pendingMigrations`
+  counts journal entries against applied rows, so the entry must stay in the journal too.
+- `'matches'` is the first entry of `WEBHOOK_EVENTS` / `WEBHOOK_EVENT_LABELS` in
+  `webhook-delivery.ts` (it only moves "Match results" to the top of the org page's list).
 
 ## Replication trust
 

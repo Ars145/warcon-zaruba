@@ -10,7 +10,8 @@
 // src/worker/migrate.ts, which calls migrateReserveToCouch after the Postgres migrations apply.
 import { and, eq, gt, isNull, or } from 'drizzle-orm';
 import { connect, type Db } from '../src/lib/server/db';
-import { couchState, listEntries, lists } from '../src/lib/server/db/schema';
+import { couchState } from '../src/lib/server/db/couch-state';
+import { listEntries, lists } from '../src/lib/server/db/schema';
 import {
 	couchConfig,
 	ensureDatabase,
