@@ -89,6 +89,18 @@
 	const duration = (from: string, to: string | null) =>
 		minutes(Math.round((Date.parse(to ?? new Date().toISOString()) - Date.parse(from)) / 60000));
 	let maxMapMinutes = $derived(Math.max(1, ...(a?.maps.map((m) => m.minutes) ?? [])));
+	let maxTeamWins = $derived(Math.max(1, ...(a?.wins.teams.map((t) => t.wins) ?? [])));
+	const plural = (n: number, one: string, many = `${one}s`) =>
+		`${fmtNum(n)} ${n === 1 ? one : many}`;
+	let winsFoot = $derived(
+		a
+			? [
+					plural(a.wins.decided, 'match', 'matches'),
+					...(a.wins.draws ? [plural(a.wins.draws, 'draw')] : []),
+					...(a.wins.noResult ? [`${fmtNum(a.wins.noResult)} with no result`] : [])
+				].join(' · ')
+			: ''
+	);
 	let maxHourly = $derived(Math.max(1, ...(a?.hourly.map((h) => h.avg) ?? [])));
 	// Derived rather than inlined in the each: state read only inside a callback of the each
 	// expression compiles to non-reactive items, so the bars would freeze on their first values.
@@ -194,7 +206,7 @@
 		/>
 	</div>
 
-	<div class="mb-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+	<div class="mb-4 grid grid-cols-1 gap-4 lg:grid-cols-2 xl:grid-cols-3">
 		<div class="panel">
 			<span class="label-sm">Time per map</span>
 			{#each a.maps as m (m.map)}
@@ -215,6 +227,30 @@
 			{/each}
 		</div>
 		<div class="panel">
+			<span class="label-sm">Wins per team</span>
+			{#each a.wins.teams as t (t.name)}
+				{@const color = t.colorHex || factionColor(t.name)}
+				<div class="mb-2.5">
+					<div class="mb-1 flex justify-between text-[13px]">
+						<span style="color:{color}"
+							>{t.name} <span class="text-mist-600">· {pct(t.wins, a.wins.decided)}</span></span
+						><span class="font-mono text-mist-400 tabular">{plural(t.wins, 'win')}</span>
+					</div>
+					<div class="progress">
+						<span
+							class="progress-bar"
+							style="width:{(t.wins / maxTeamWins) * 100}%;background:{color}"
+						></span>
+					</div>
+				</div>
+			{:else}
+				<div class="text-mist-600">No data yet.</div>
+			{/each}
+			{#if a.wins.decided || a.wins.noResult}
+				<p class="mt-3 text-[12.5px] text-mist-600">{winsFoot}</p>
+			{/if}
+		</div>
+		<div class="panel lg:col-span-2 xl:col-span-1">
 			<span class="label-sm">Average players by hour (UTC)</span>
 			{#if a.hourly.length}
 				<div
