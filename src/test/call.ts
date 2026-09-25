@@ -42,6 +42,16 @@ function eventFor(user: SessionUser | null, input: CallInput): RequestEvent {
 	} as unknown as RequestEvent;
 }
 
+/** A handler's Response as it is, for answers that are not JSON (a CSV download). */
+export async function callRaw(
+	handler: (event: RequestEvent) => Response | Promise<Response>,
+	user: SessionUser | null,
+	input: CallInput = {}
+): Promise<Response> {
+	resetRates();
+	return handler(eventFor(user, input));
+}
+
 /** An API handler's answer. Handlers are wrapped in route(), so refusals come back as JSON. */
 export async function callApi(
 	handler: (event: RequestEvent) => Response | Promise<Response>,

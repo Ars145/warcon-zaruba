@@ -140,6 +140,27 @@ export const zoneLabel = (tag: string | null | undefined) => {
 	);
 };
 
+/**
+ * A faction colour from the game as `#rrggbb`, else ''. It lands in style attributes, where
+ * anything else could carry CSS: a background image that reports every viewer, an overlay.
+ */
+export function hexColor(v: unknown): string {
+	return typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v) ? v : '';
+}
+
+/** Faction scores as the game sent them, kept only in the shapes the panel renders: a name, a
+ *  `#rrggbb` colour or '', a finite number. */
+export function saneScores(raw: unknown): FactionScore[] {
+	if (!Array.isArray(raw)) return [];
+	return raw
+		.filter((f): f is Record<string, unknown> => !!f && typeof f === 'object')
+		.map((f) => ({
+			name: String(f.name ?? ''),
+			colorHex: hexColor(f.colorHex),
+			score: Number.isFinite(Number(f.score)) ? Number(f.score) : 0
+		}));
+}
+
 const FACTION_FALLBACK: Record<string, string> = { RED: '#D86060', BLU: '#5B95D8', GRN: '#7BC462' };
 export function factionColor(
 	faction: string | null | undefined,
@@ -147,7 +168,7 @@ export function factionColor(
 ): string {
 	if (!faction) return '#5E5E66';
 	const hit = (scores || []).find((s) => s.name === faction);
-	return hit?.colorHex || FACTION_FALLBACK[faction] || '#5E5E66';
+	return hexColor(hit?.colorHex) || FACTION_FALLBACK[faction] || '#5E5E66';
 }
 
 export function prettyJson(text: string): string {
@@ -179,4 +200,23 @@ export function fmtCompact(n: number): string {
 	if (v >= 1e6) return `${scaled(v / 1e6)} M`;
 	if (v >= 1e3) return `${scaled(v / 1e3)} K`;
 	return String(Math.round(v));
+}
+
+/**
+ * The Steam name to show under an in-game name, or null when there is none or the in-game name
+ * already carries it (a clan tag around the same name): what a name that hides the player, such
+ * as a streamer's, does not say.
+ */
+export function steamNameBeside(inGame: string, steam: string | null | undefined): string | null {
+	const name = (steam ?? '').trim();
+	if (!name) return null;
+	const fold = (v: string) => v.normalize('NFKC').toLowerCase();
+	const whole = fold(inGame);
+	const part = fold(name);
+	// Carried only where it stands on its own (a clan tag around it), not inside another word:
+	// "dan" is not in "Jordan".
+	const wordChar = (c: string | undefined) => !!c && /[\p{L}\p{N}]/u.test(c);
+	for (let at = whole.indexOf(part); at >= 0; at = whole.indexOf(part, at + 1))
+		if (!wordChar(whole[at - 1]) && !wordChar(whole[at + part.length])) return null;
+	return name;
 }

@@ -17,7 +17,7 @@ export interface GameTarget {
 }
 
 /** Wrap an IPv6 literal in brackets for a URL authority; leave a hostname or IPv4 as is. */
-const forAuthority = (addr: string): string => (isIP(addr) === 6 ? `[${addr}]` : addr);
+export const forAuthority = (addr: string): string => (isIP(addr) === 6 ? `[${addr}]` : addr);
 
 export interface GameRequestInit {
 	method: string;
@@ -119,7 +119,7 @@ const NEVER_OPENED = new Set([
 	'EADDRNOTAVAIL'
 ]);
 
-function neverOpened(err: unknown): boolean {
+export function neverOpened(err: unknown): boolean {
 	const e = err as { code?: string; cause?: { code?: string } };
 	return NEVER_OPENED.has(e.code ?? '') || NEVER_OPENED.has(e.cause?.code ?? '');
 }
@@ -141,7 +141,7 @@ const REASONS: [RegExp, string][] = [
 	[/^Malformed_HTTP_Response$/, 'the answer was not HTTP']
 ];
 
-function reasonOf(err: unknown, timedOut: boolean): string {
+export function reasonOf(err: unknown, timedOut: boolean): string {
 	if (timedOut) return 'no answer in time';
 	const e = err as { code?: string; cause?: { code?: string } };
 	const code = e.code || e.cause?.code || '';

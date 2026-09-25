@@ -50,7 +50,8 @@ const lines = (ids: string[], from: Date, steamId: string | string[] | null) => 
 		                 THEN NULL
 		            WHEN m.winner IS NOT NULL THEN CASE WHEN m.winner = p.faction THEN 'win' ELSE 'loss' END
 		            WHEN jsonb_typeof(m.final_scores) = 'array'
-		                 AND (SELECT MAX((e->>'score')::numeric) FROM jsonb_array_elements(m.final_scores) e) > 0 THEN 'draw'
+		                 AND (SELECT MAX(CASE WHEN jsonb_typeof(e->'score') = 'number' THEN (e->>'score')::numeric END)
+		                        FROM jsonb_array_elements(m.final_scores) e) > 0 THEN 'draw'
 		            ELSE NULL END AS result
 		  FROM matches m
 		  JOIN match_players p ON p.match_id = m.id AND p.server_id = m.server_id
@@ -203,30 +204,46 @@ async function anyFeed(env: Env, ids: string[]): Promise<boolean> {
 }
 
 /** One page of the board over these servers. */
+/** The most rows an export writes: the top ten thousand of the board as it is set. */
+export const EXPORT_ROWS = 10_000;
+
+/**
+ * `limit` rows of the board as `q` sets it (scope, range, sort, floor), from `offset`: the
+ * aggregate covers the whole range either way, then the page, or an export, takes its slice.
+ */
+async function boardSlice(
+	env: Env,
+	ids: string[],
+	q: BoardQuery,
+	limit: number,
+	offset: number
+): Promise<BaseRow[]> {
+	const from = rangeStart(q.range) ?? EPOCH;
+	const order = q.dir === 'asc' ? sql`ASC NULLS LAST` : sql`DESC NULLS LAST`;
+	return (await env.db.execute<BaseRow>(sql`
+		WITH ${base(ids, from)},
+		page AS (
+			SELECT *, COUNT(*) OVER () AS total FROM base
+			 WHERE minutes >= ${q.minMinutes}
+			 ORDER BY ${METRIC_SQL[q.sort]} ${order}, kills DESC, steam_id
+			 LIMIT ${limit} OFFSET ${offset})
+		SELECT r.steam_id AS "steamId", r.minutes, r.seed_minutes AS "seedMinutes", r.cash, r.last_seen AS "lastSeen",
+		       r.kills, r.headshots, r.team_kills AS "teamKills", r.deaths, r.suicides,
+		       r.vehicle_kills AS "vehicleKills", r.kill_streak AS "killStreak", r.death_streak AS "deathStreak",
+		       r.matches, r.wins, r.losses, r.draws, r.total,
+		       (SELECT name FROM player_sessions ps WHERE ps.steam_id = r.steam_id AND ps.server_id IN ${ids}
+		         ORDER BY ps.last_seen DESC LIMIT 1) AS name
+		  FROM page r`)) as BaseRow[];
+}
+
 export async function loadBoard(env: Env, ids: string[], q: BoardQuery): Promise<BoardView> {
 	const empty: BoardView = { query: q, rows: [], total: 0, pageSize: BOARD_PAGE, hasFeed: false };
 	if (!ids.length) return empty;
-	const from = rangeStart(q.range) ?? EPOCH;
-	const order = q.dir === 'asc' ? sql`ASC NULLS LAST` : sql`DESC NULLS LAST`;
 	const offset = (q.page - 1) * BOARD_PAGE;
-	const [rowsRaw, hasFeed] = await Promise.all([
-		env.db.execute<BaseRow>(sql`
-			WITH ${base(ids, from)},
-			page AS (
-				SELECT *, COUNT(*) OVER () AS total FROM base
-				 WHERE minutes >= ${q.minMinutes}
-				 ORDER BY ${METRIC_SQL[q.sort]} ${order}, kills DESC, steam_id
-				 LIMIT ${BOARD_PAGE} OFFSET ${offset})
-			SELECT r.steam_id AS "steamId", r.minutes, r.seed_minutes AS "seedMinutes", r.cash, r.last_seen AS "lastSeen",
-			       r.kills, r.headshots, r.team_kills AS "teamKills", r.deaths, r.suicides,
-			       r.vehicle_kills AS "vehicleKills", r.kill_streak AS "killStreak", r.death_streak AS "deathStreak",
-			       r.matches, r.wins, r.losses, r.draws, r.total,
-			       (SELECT name FROM player_sessions ps WHERE ps.steam_id = r.steam_id AND ps.server_id IN ${ids}
-			         ORDER BY ps.last_seen DESC LIMIT 1) AS name
-			  FROM page r`),
+	const [rows, hasFeed] = await Promise.all([
+		boardSlice(env, ids, q, BOARD_PAGE, offset),
 		anyFeed(env, ids)
 	]);
-	const rows = rowsRaw as BaseRow[];
 	return {
 		query: q,
 		rows: rows.map((r, i) => shapeRow(r, offset + i + 1)),
@@ -234,6 +251,12 @@ export async function loadBoard(env: Env, ids: string[], q: BoardQuery): Promise
 		pageSize: BOARD_PAGE,
 		hasFeed
 	};
+}
+
+/** The board as `q` sets it from the top, every page of it up to EXPORT_ROWS; `q.page` is ignored. */
+export async function exportBoard(env: Env, ids: string[], q: BoardQuery): Promise<BoardRow[]> {
+	if (!ids.length) return [];
+	return (await boardSlice(env, ids, q, EXPORT_ROWS, 0)).map((r, i) => shapeRow(r, i + 1));
 }
 
 const shapeRow = (r: BaseRow, rank: number): BoardRow => ({

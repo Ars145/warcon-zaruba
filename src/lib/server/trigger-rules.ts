@@ -2,8 +2,9 @@
 // kick-on-connect verdict. No database, no game server, so it is unit-testable on its own;
 // triggers.ts holds the engine that runs these against live ticks.
 import { ApiError, int, str } from './http';
-import { accountAgeDays, assessRisk, type RiskLevel, type RiskPerformance } from './risk';
+import { accountAgeDays, assessRisk, RISK_HIGH, RISK_MEDIUM, type RiskPerformance } from './risk';
 import { validateNameFilter, type NameFilterConfig } from './name-filter';
+import { validateKillRate, type KillRateConfig } from './kill-rate';
 import { RESTART_AFTER_HOURS, restartWindow } from '$lib/uptime';
 import type { SteamProfileRow } from './db/schema';
 import type { TriggerKind } from '$lib/types';
@@ -19,7 +20,8 @@ export const TRIGGER_KINDS: TriggerKind[] = [
 	'team_kill',
 	'seed_reward',
 	'match_broadcast',
-	'name_filter'
+	'name_filter',
+	'kill_rate'
 ];
 export const TRIGGER_LABELS: Record<TriggerKind, string> = {
 	welcome: 'Welcome whisper',
@@ -32,7 +34,8 @@ export const TRIGGER_LABELS: Record<TriggerKind, string> = {
 	team_kill: 'Team kill limit',
 	seed_reward: 'Seeding reward',
 	match_broadcast: 'Match broadcast',
-	name_filter: 'Name filter'
+	name_filter: 'Name filter',
+	kill_rate: 'Kill rate watch'
 };
 
 export interface WelcomeConfig {
@@ -70,8 +73,8 @@ export interface RiskKickConfig {
 	privateProfiles: boolean;
 	bannedElsewhere: boolean;
 	watchlist: boolean;
-	/** also kick at this advisory risk level or worse (the score the players table shows); null is off */
-	kickAtLevel: Exclude<RiskLevel, 'low'> | null;
+	/** also kick at this advisory risk score or more (the score the players table shows); null is off */
+	kickAtScore: number | null;
 	spareReserved: boolean;
 	reason: string;
 }
@@ -181,12 +184,26 @@ export type TriggerConfig =
 	| TeamKillConfig
 	| SeedRewardConfig
 	| MatchBroadcastConfig
-	| NameFilterConfig;
+	| NameFilterConfig
+	| KillRateConfig;
 
 const MAX_MESSAGE = 200;
 
 export const isTriggerKind = (v: unknown): v is TriggerKind =>
 	TRIGGER_KINDS.includes(v as TriggerKind);
+
+/**
+ * The score a risk_kick rule kicks at, or null when off. Rules saved before the score existed
+ * carry `kickAtLevel` ('medium' or 'high') instead; those keep their old threshold.
+ */
+export function riskKickScore(c: Record<string, unknown> | RiskKickConfig): number | null {
+	const r = c as Record<string, unknown>;
+	if (r.kickAtScore !== undefined && r.kickAtScore !== null) {
+		const n = Math.trunc(Number(r.kickAtScore));
+		return Number.isFinite(n) && n >= 1 ? Math.min(n, 100) : null;
+	}
+	return r.kickAtLevel === 'high' ? RISK_HIGH : r.kickAtLevel === 'medium' ? RISK_MEDIUM : null;
+}
 
 /** Checks and normalises a kind's settings; throws a 400 with a reason people can act on. */
 export function validateConfig(kind: TriggerKind, raw: unknown): TriggerConfig {
@@ -249,7 +266,7 @@ export function validateConfig(kind: TriggerKind, raw: unknown): TriggerConfig {
 				privateProfiles: !!c.privateProfiles,
 				bannedElsewhere: !!c.bannedElsewhere,
 				watchlist: !!c.watchlist,
-				kickAtLevel: c.kickAtLevel === 'high' || c.kickAtLevel === 'medium' ? c.kickAtLevel : null,
+				kickAtScore: riskKickScore(c),
 				spareReserved: c.spareReserved === undefined ? true : !!c.spareReserved,
 				reason:
 					str(c.reason, MAX_MESSAGE) || 'Your account does not meet this server’s requirements.'
@@ -260,7 +277,7 @@ export function validateConfig(kind: TriggerKind, raw: unknown): TriggerConfig {
 				!cfg.minAccountDays &&
 				!cfg.bannedElsewhere &&
 				!cfg.watchlist &&
-				!cfg.kickAtLevel
+				!cfg.kickAtScore
 			)
 				throw new ApiError(400, 'Turn on at least one rule.');
 			return cfg;
@@ -346,6 +363,8 @@ export function validateConfig(kind: TriggerKind, raw: unknown): TriggerConfig {
 		}
 		case 'name_filter':
 			return validateNameFilter(c);
+		case 'kill_rate':
+			return validateKillRate(c);
 	}
 }
 
@@ -519,6 +538,8 @@ export interface RestartNoticeStage {
  * the window is `leadMinutes` away or less; the main message once the window is open, and again
  * every `repeatMinutes` when set. A start time the rule has not seen resets both.
  */
+const SAME_START_MS = 60_000;
+
 export function restartNoticeStage(
 	cfg: Pick<RestartNoticeConfig, 'leadMinutes' | 'repeatMinutes' | 'minPlayers'>,
 	prev: RestartNoticeState | null | undefined,
@@ -527,8 +548,12 @@ export function restartNoticeStage(
 	if (!input.startedAt || input.playerCount < cfg.minPlayers) return null;
 	const w = restartWindow(new Date(input.startedAt).toISOString(), RESTART_AFTER_HOURS, input.now);
 	if (!w) return null;
+	// The start is derived from the uptime at each look, so it moves by the look's latency: a
+	// start within SAME_START_MS of the one on record is the same run, not a restart.
 	const state: RestartNoticeState =
-		prev && prev.startedAt === input.startedAt ? { ...prev } : { startedAt: input.startedAt };
+		prev && Math.abs(prev.startedAt - input.startedAt) <= SAME_START_MS
+			? { ...prev }
+			: { startedAt: input.startedAt };
 	if (w.due) {
 		const again =
 			cfg.repeatMinutes > 0 && input.now - (state.dueAt ?? 0) >= cfg.repeatMinutes * 60_000;
@@ -641,6 +666,38 @@ export function matchBroadcastMessages(
 	return out;
 }
 
+/** How long a match end waits for the server to hold the rule's players again: the game shows
+ *  nobody on for half a minute or so while the next map loads, which is just when a match ends. */
+export const MATCH_HOLD_MS = 3 * 60_000;
+
+export interface HeldMatchEnd {
+	end: MatchEnd;
+	lines: MatchLineVars[];
+	at: number;
+}
+
+/**
+ * One look of a match broadcast rule: a match end is held until the server has the rule's
+ * players on (at once when it already has), for at most MATCH_HOLD_MS; a newer end replaces it.
+ * Returns what is still held and the end to announce now, if any.
+ */
+export function matchBroadcastStep(
+	held: HeldMatchEnd | null,
+	end: MatchEnd | null,
+	lines: MatchLineVars[],
+	playerCount: number,
+	now: number,
+	minPlayers: number
+): { held: HeldMatchEnd | null; fire: HeldMatchEnd | null } {
+	// A second end with no result inside the hold (the scores reset, then the map changes) keeps
+	// the result already held.
+	const live = held && now - held.at <= MATCH_HOLD_MS ? held : null;
+	const h = end ? (live && !end.leaders.length ? live : { end, lines, at: now }) : held;
+	if (!h || now - h.at > MATCH_HOLD_MS) return { held: null, fire: null };
+	if (playerCount < minPlayers) return { held: h, fire: null };
+	return { held: null, fire: h };
+}
+
 export interface MatchSample {
 	ts: number;
 	ok: boolean;
@@ -660,11 +717,17 @@ export function matchReplay(
 ): { ts: number; count: number; map: string; end: MatchEnd }[] {
 	const out: { ts: number; count: number; map: string; end: MatchEnd }[] = [];
 	let prev: MatchSample | null = null;
+	// Live, a failed look or two is a blip (the worker keeps the match it saw until the server is
+	// offline, and the one live map change on record had a failed status look in it); the first
+	// failure writes a failed sample and a longer outage one every sample period after, so a
+	// single failed sample is compared across and a second one in a row starts again.
+	let failed = 0;
 	for (const r of rows) {
 		if (!r.ok) {
-			prev = null;
+			if (++failed > 1) prev = null;
 			continue;
 		}
+		failed = 0;
 		const look = { map: r.map, scores: r.scores, matchSeconds: null };
 		if (prev && r.ts - prev.ts <= maxHoldMs) {
 			const end = matchBoundary({ map: prev.map, scores: prev.scores, matchSeconds: null }, look);
@@ -711,7 +774,7 @@ export interface RiskKickSignals {
 	steamEnabled: boolean;
 	bannedOn: { serverName: string; reason: string }[];
 	watched: { reason: string } | null;
-	/** banned players whose last known name looks like this one; only the risk level uses it */
+	/** banned players whose last known name looks like this one; only the risk score uses it */
 	resembles?: { name: string; steamId: string; serverName: string }[];
 	reserved: boolean;
 	performance?: RiskPerformance | null;
@@ -745,7 +808,8 @@ export function riskKickVerdict(cfg: RiskKickConfig, s: RiskKickSignals): string
 			}
 		}
 	}
-	if (cfg.kickAtLevel) {
+	const minScore = riskKickScore(cfg);
+	if (minScore) {
 		const risk = assessRisk({
 			profile: s.profile,
 			steamEnabled: s.steamEnabled,
@@ -755,14 +819,15 @@ export function riskKickVerdict(cfg: RiskKickConfig, s: RiskKickSignals): string
 			performance: s.performance,
 			now: s.now
 		});
-		const bad = risk.level === 'high' || (cfg.kickAtLevel === 'medium' && risk.level === 'medium');
-		if (bad) {
+		if (risk.score >= minScore) {
 			const why = [...risk.reasons]
 				.sort((a, b) => b.weight - a.weight)
 				.slice(0, 3)
 				.map((r) => r.text)
 				.join('; ');
-			return `${risk.level} risk (${risk.score}): ${why}${risk.steamChecked ? '' : ' [Steam not checked]'}`;
+			const what =
+				risk.level === 'low' ? `risk ${risk.score}` : `${risk.level} risk (${risk.score})`;
+			return `${what}: ${why}${risk.steamChecked ? '' : ' [Steam not checked]'}`;
 		}
 	}
 	return null;

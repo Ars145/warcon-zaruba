@@ -9,6 +9,7 @@ import { and, count, desc, eq, gte, isNull, sql } from 'drizzle-orm';
 import type { Env } from './env';
 import { matches, playerSessions, servers } from './db/schema';
 import { settings } from './settings';
+import { liveFactions } from './matches';
 
 import { MAX_COVER_S } from './rollups';
 
@@ -47,6 +48,19 @@ export interface MapShare {
 	map: string;
 	minutes: number;
 	matches: number;
+}
+/**
+ * Wins per side over the matches that ended in the range, by the boards' rule: the winner is the
+ * side that led when the scores reset; with no winner, a match somebody scored in is a draw, and
+ * one that ended with no scores (abandoned) or with nobody scoring has no result.
+ */
+export interface TeamWins {
+	/** every side on the scoreboard of a match with a result, most wins first */
+	teams: { name: string; wins: number; colorHex: string | null }[];
+	/** matches with a result: won, or drawn */
+	decided: number;
+	draws: number;
+	noResult: number;
 }
 export interface TopPlayer {
 	steamId: string;
@@ -124,6 +138,7 @@ export interface Analytics {
 	population: PopulationPoint[];
 	cash: CashPoint[];
 	maps: MapShare[];
+	wins: TeamWins;
 	players: TopPlayer[];
 	matches: MatchRow[];
 	hourly: { hour: number; avg: number }[];
@@ -242,6 +257,8 @@ export async function loadAnalytics(env: Env, serverId: string, range: Range): P
 		matches: num(r.matches)
 	}));
 
+	const wins = await teamWins(env, serverId, from);
+
 	const seen = (await db.execute<{
 		steamId: string;
 		name: string;
@@ -337,6 +354,7 @@ export async function loadAnalytics(env: Env, serverId: string, range: Range): P
 		population,
 		cash,
 		maps,
+		wins,
 		players,
 		matches: matchRows.map((r) => ({
 			id: r.id,
@@ -351,6 +369,66 @@ export async function loadAnalytics(env: Env, serverId: string, range: Range): P
 		})),
 		hourly,
 		combat
+	};
+}
+
+/**
+ * One pass over the server's matches that ended since `from`: the counts by result, then each side
+ * on those scoreboards with its wins. A side that played and never won is listed with none.
+ * Colours come from the live scoreboard. A match counts by when it ended, but the index is on
+ * when it started: the read starts a day before `from`, since no match runs that long, so it
+ * reads the range and not the server's whole history.
+ */
+async function teamWins(env: Env, serverId: string, from: Date): Promise<TeamWins> {
+	const [rows, live] = await Promise.all([
+		env.db.execute<{
+			name: string | null;
+			wins: string;
+			decided: string;
+			draws: string;
+			none: string;
+		}>(sql`
+			WITH m AS (
+				SELECT winner,
+				       CASE WHEN jsonb_typeof(final_scores) = 'array' THEN final_scores ELSE '[]'::jsonb END AS scores
+				  FROM matches
+				 WHERE server_id = ${serverId} AND started_at >= ${new Date(from.getTime() - 86_400_000)}
+				   AND ended_at IS NOT NULL AND ended_at >= ${from}),
+			r AS (
+				SELECT winner, scores,
+				       CASE WHEN winner IS NOT NULL THEN 'win'
+				            WHEN (SELECT MAX(CASE WHEN jsonb_typeof(e->'score') = 'number' THEN (e->>'score')::numeric END)
+				                    FROM jsonb_array_elements(scores) e) > 0 THEN 'draw'
+				            ELSE 'none' END AS result
+				  FROM m)
+			SELECT NULL AS name, 0 AS wins,
+			       COUNT(*) FILTER (WHERE result <> 'none') AS decided,
+			       COUNT(*) FILTER (WHERE result = 'draw') AS draws,
+			       COUNT(*) FILTER (WHERE result = 'none') AS none
+			  FROM r
+			UNION ALL
+			SELECT f.name, COUNT(*) FILTER (WHERE r.winner = f.name), 0, 0, 0
+			  FROM r CROSS JOIN LATERAL (
+			       SELECT e->>'name' AS name FROM jsonb_array_elements(r.scores) e
+			        UNION SELECT r.winner) f
+			 WHERE r.result <> 'none' AND f.name IS NOT NULL AND f.name <> ''
+			 GROUP BY f.name`),
+		liveFactions(env, serverId)
+	]);
+	const totals = rows.find((r) => r.name === null);
+	const teams = rows
+		.filter((r) => r.name !== null)
+		.map((r) => ({
+			name: r.name as string,
+			wins: num(r.wins),
+			colorHex: live.find((f) => f.name === r.name)?.colorHex ?? null
+		}))
+		.sort((a, b) => b.wins - a.wins || a.name.localeCompare(b.name));
+	return {
+		teams,
+		decided: num(totals?.decided),
+		draws: num(totals?.draws),
+		noResult: num(totals?.none)
 	};
 }
 

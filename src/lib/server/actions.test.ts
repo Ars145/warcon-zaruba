@@ -634,3 +634,23 @@ test('raw passes on the documented headers only: a proxy in front of the listene
 	const res: any = await ACTIONS.raw.run(client, { method: 'GET', path: '/v1/status' });
 	expect(res.headers).toEqual({ 'content-type': 'text/html', etag: '"abc"' });
 });
+
+test('status keeps only safe faction colours, names and scores from the game', async () => {
+	const client: any = {
+		json: async () => ({
+			map: 'Ozeti',
+			players: { current: 3, max: 64 },
+			factionScores: [
+				{ name: 'Valkyra', colorHex: '#D86060', score: 34 },
+				{ name: 'Lonestar', colorHex: 'red;background:url(https://evil.example/b)', score: 'abc' }
+			]
+		})
+	};
+	const status = (await ACTIONS.status.run(client, {})) as {
+		scores: { name: string; colorHex: string; score: number }[];
+	};
+	expect(status.scores).toEqual([
+		{ name: 'Valkyra', colorHex: '#D86060', score: 34 },
+		{ name: 'Lonestar', colorHex: '', score: 0 }
+	]);
+});

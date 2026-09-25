@@ -23,6 +23,10 @@
 	let loading = $state(false);
 	let seq = 0;
 	let publicOn = $derived(effectiveFeatures(data.server, data.server).leaderboards);
+	/** the whole board as it is set, from the top */
+	let exportHref = $derived(
+		`/api/servers/${encodeURIComponent(id)}/leaderboard/export${qs(boardQueryParams({ ...query, page: 1 }))}`
+	);
 
 	async function load(q: BoardQuery) {
 		const my = ++seq;
@@ -58,6 +62,7 @@
 		hrefFor={(steamId) => `/server/${encodeURIComponent(id)}/players/${steamId}`}
 		orgName={data.server.orgName}
 		showIds
+		{exportHref}
 	/>
 	<p class="note">
 		Kills and deaths are the game's own scoreboard counters, recorded per match; headshots, team

@@ -10,7 +10,8 @@ import { and, eq, isNull } from 'drizzle-orm';
 import type { Env } from './env';
 import { changes, couchConfig, CouchConflict, type CouchChange } from './couch';
 import { resolveConflict } from './wardogs-reserve';
-import { couchState, lists, organizations, type OrgRow } from './db/schema';
+import { couchState } from './db/couch-state';
+import { lists, organizations, type OrgRow } from './db/schema';
 import { gateway } from './gateway';
 
 /** The remote/local CouchDB restarts; a failed poll is retried after this rather than given up on. */
