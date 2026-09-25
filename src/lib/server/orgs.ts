@@ -7,6 +7,7 @@ import { writeAudit } from './audit';
 import { ORG_ROLES, type OrgRole, type OrgRow, type SessionUser } from './access';
 import {
 	apiKeys,
+	jsonWebhooks,
 	orgInvites,
 	orgMembers,
 	orgRoles,
@@ -20,6 +21,7 @@ import type { Db, DbOrTx } from './db';
 import { ensureOrgLists } from './lists';
 import { ensureOrgRoles, roleInOrg, rolesOf } from './roles';
 import { gateway } from './gateway';
+import { skipQueued } from './json-webhook-queue';
 import type { InviteStatus, InviteView, ListSyncSummary, OrgMemberView, OrgView } from '$lib/types';
 import { parseDiscordInvite } from '$lib/discord-invite';
 import {
@@ -511,15 +513,17 @@ export async function setMemberRole(
 
 /**
  * Ends the invite links and API keys this person minted, in one org or (deleting the account) in
- * all of them. Both are an owner's to make and both work without their maker: left live, an
- * owner-role link lets a removed owner straight back in, and their key goes on driving the
- * servers. Returns how many of each it ended, for the audit trail.
+ * all of them, and pauses the JSON webhooks they added. All are an owner's to make and all work
+ * without their maker: left live, an owner-role link lets a removed owner straight back in, their
+ * key goes on driving the servers, and their webhook goes on sending the org's events to an
+ * address they chose, signed with a secret only they were shown. Returns how many of each, for
+ * the audit trail.
  */
 export async function revokeMintedBy(
 	db: DbOrTx,
 	userId: string,
 	orgId?: string
-): Promise<{ invitesRevoked: number; keysRevoked: number }> {
+): Promise<{ invitesRevoked: number; keysRevoked: number; jsonWebhooksPaused: number }> {
 	const now = new Date();
 	const links = await db
 		.update(orgInvites)
@@ -543,7 +547,31 @@ export async function revokeMintedBy(
 			)
 		)
 		.returning({ id: apiKeys.id });
-	return { invitesRevoked: links.length, keysRevoked: keys.length };
+	const hooks = await db
+		.update(jsonWebhooks)
+		.set({
+			enabled: false,
+			lastError: 'Paused: whoever added it is no longer an owner.',
+			updatedAt: now
+		})
+		.where(
+			and(
+				eq(jsonWebhooks.createdBy, userId),
+				eq(jsonWebhooks.enabled, true),
+				orgId ? eq(jsonWebhooks.orgId, orgId) : undefined
+			)
+		)
+		.returning({ id: jsonWebhooks.id });
+	await skipQueued(
+		db,
+		hooks.map((h) => h.id),
+		'The webhook was paused.'
+	);
+	return {
+		invitesRevoked: links.length,
+		keysRevoked: keys.length,
+		jsonWebhooksPaused: hooks.length
+	};
 }
 
 /** Removes the membership, every grant on the org's servers, and the links and keys they minted. */

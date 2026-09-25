@@ -533,6 +533,23 @@ export interface WebhookView {
 	createdAt: string | null;
 }
 
+/** A JSON webhook as its org's owners see it: never the address or the signing secret. */
+export interface JsonWebhookView {
+	id: string;
+	label: string;
+	/** the address's host, and port when not 443 */
+	urlHint: string;
+	events: string[];
+	serverIds: string[] | null;
+	enabled: boolean;
+	/** the last delivery that got a 2xx */
+	lastSentAt: string | null;
+	lastStatus: number | null;
+	/** '' after a delivery, else a fixed phrase */
+	lastError: string;
+	createdAt: string | null;
+}
+
 // ---- organisation lists (bans and reserved slots pushed to every server) ------------------------
 
 export type ListKind = 'ban' | 'reserve';

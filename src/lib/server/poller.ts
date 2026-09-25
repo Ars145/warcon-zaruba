@@ -20,6 +20,7 @@ import {
 import { loadSettings, settings, settingsVersion } from './settings';
 import { watchedCount } from './interest';
 import { deliveryStats, outboxDepth, startDelivery, stopDelivery } from './outbox';
+import { pendingPosts, startJsonWebhookPosts, stopJsonWebhookPosts } from './json-webhook-queue';
 import { startStatusMirror, stopStatusMirror } from './webhook-status';
 import {
 	allMemory,
@@ -97,6 +98,8 @@ async function collectWorkerMetrics(): Promise<void> {
 	metrics.leaseHeld.set(st.owner ? 1 : 0);
 	metrics.outboxPending.set(st.delivery.pending);
 	metrics.outboxOldestSeconds.set((st.delivery.oldestMs ?? 0) / 1000);
+	if (envRef && isOwner())
+		metrics.jsonWebhookPostsPending.set(await pendingPosts(envRef).catch(() => 0));
 }
 
 export function startPoller(env: Env, label = 'worker'): void {
@@ -128,6 +131,7 @@ export function startPoller(env: Env, label = 'worker'): void {
 	);
 	globalThis.__warconRenew = scheduler.renewTimer;
 	startDelivery(env);
+	startJsonWebhookPosts(env);
 	startStatusMirror(env);
 	if (unregisterMetrics) unregisterMetrics();
 	unregisterMetrics = metrics.registerCollector(collectWorkerMetrics);
@@ -142,6 +146,7 @@ export async function stopPoller(): Promise<void> {
 	if (globalThis.__warconRenew) clearInterval(globalThis.__warconRenew);
 	globalThis.__warconRenew = undefined;
 	stopDelivery();
+	stopJsonWebhookPosts();
 	stopStatusMirror();
 	if (unregisterMetrics) unregisterMetrics();
 	unregisterMetrics = null;

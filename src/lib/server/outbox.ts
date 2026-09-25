@@ -10,7 +10,7 @@ import type { DbOrTx } from './db';
 import { outbox, triggers, type OutboxRow } from './db/schema';
 import { ACTIONS } from './actions';
 import { GameError, WardogsClient } from './rcon';
-import { ApiError } from './http';
+import { ApiError, forLog } from './http';
 import { LaneFull, LaneTimeout, PRIORITY, withServer } from './dispatcher';
 import { emit } from './events';
 import { isOwner, LostOwnership, withOwnedTransaction } from './leadership';
@@ -23,6 +23,8 @@ import { gateway } from './gateway';
 import { deliveries } from './metrics';
 import { NAME_FLAG } from './name-filter';
 import { KILL_RATE_FLAG } from './kill-rate';
+import { queueEvent } from './json-webhook-queue';
+import { seedRewardGranted } from './json-webhook-events';
 import type { OutboxView } from '$lib/types';
 
 const CLAIM_LIMIT = 50;
@@ -272,7 +274,7 @@ async function deliverSeedReward(env: Env, row: OutboxRow): Promise<void> {
 			? await serverListOf(env, server, 'reserve')
 			: await listOf(env, org.id, 'reserve');
 		const expiresAt = new Date(Date.now() + p.slotDays * 86400_000);
-		const { added } = await grantEntry(env, list, {
+		const { id: entryId, added } = await grantEntry(env, list, {
 			steamId: p.steamId,
 			reason: p.reason,
 			expiresAt,
@@ -291,6 +293,29 @@ async function deliverSeedReward(env: Env, row: OutboxRow): Promise<void> {
 		if (m) {
 			m.syncAt = 0;
 			gateway().observeSoon(row.serverId, { lists: true });
+		}
+		// The org's JSON webhooks hear of it once the slot is on the list. A failure to queue the
+		// event leaves the grant as it is: the slot was earned and given.
+		try {
+			await withOwnedTransaction(env, (tx) =>
+				queueEvent(
+					tx,
+					seedRewardGranted({
+						entryId,
+						org: { id: org.id, name: org.name },
+						server: { id: server.id, name: server.name },
+						player: { steamId: p.steamId, name: p.name },
+						scope: here ? 'server' : 'org',
+						expiresAt,
+						days: p.slotDays,
+						rule: { id: row.triggerId, name: row.triggerName },
+						seedMinutes: (row.detail as { minutes?: number } | null)?.minutes ?? null
+					})
+				)
+			);
+		} catch (err) {
+			if (err instanceof LostOwnership) throw err;
+			console.error('[warcon] json webhooks for a grant', forLog(err));
 		}
 		await finish(
 			env,

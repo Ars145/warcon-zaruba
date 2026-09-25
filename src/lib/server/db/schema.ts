@@ -732,6 +732,92 @@ export const webhooks = pgTable(
 	(t) => [index('webhooks_org_idx').on(t.orgId)]
 );
 
+/**
+ * An org's JSON webhooks: HTTPS addresses its owners run, sent a signed JSON POST per event they
+ * tick (json-webhooks.ts keeps the records, json-webhook-send.ts sends). The address may carry a
+ * token and the signing secret proves a request is Warcon's, so both are stored encrypted like an
+ * RCON password; the panel only ever sees the host.
+ */
+export const jsonWebhooks = pgTable(
+	'json_webhooks',
+	{
+		id: text('id').primaryKey(),
+		orgId: text('org_id')
+			.notNull()
+			.references(() => organizations.id, { onDelete: 'cascade' }),
+		label: text('label').notNull().default(''),
+		urlEnc: text('url_enc').notNull(),
+		/** what the panel shows instead of the address: its host, and port when not 443 */
+		urlHint: text('url_hint').notNull().default(''),
+		secretEnc: text('secret_enc').notNull(),
+		/** event kinds to send; see json-webhook-send.ts */
+		events: jsonb('events').notNull(),
+		/** null = every server in the org */
+		serverIds: jsonb('server_ids'),
+		enabled: boolean('enabled').notNull().default(true),
+		/** saved by the site owner, who may send to a private address, as they may add a server there */
+		allowPrivate: boolean('allow_private').notNull().default(false),
+		lastSentAt: ts('last_sent_at'),
+		lastStatus: integer('last_status'),
+		/** one of a few fixed phrases, never the reply's text */
+		lastError: text('last_error').notNull().default(''),
+		createdBy: text('created_by'),
+		createdAt: ts('created_at').notNull().defaultNow(),
+		updatedAt: ts('updated_at').notNull().defaultNow()
+	},
+	(t) => [index('json_webhooks_org_idx').on(t.orgId)]
+);
+
+/**
+ * The POSTs to JSON webhooks: one row per event per webhook that takes it (json-webhook-queue.ts).
+ * A queue of its own, apart from the outbox on purpose: a receiver that is slow or down costs this
+ * queue, never a game action. Rows are kept, like the outbox's.
+ */
+export const jsonWebhookPosts = pgTable(
+	'json_webhook_posts',
+	{
+		id: bigserial('id', { mode: 'number' }).primaryKey(),
+		webhookId: text('webhook_id')
+			.notNull()
+			.references(() => jsonWebhooks.id, { onDelete: 'cascade' }),
+		/**
+		 * the server the event happened on; null for an organisation-wide event. No foreign key: a
+		 * POST for a server since deleted is dropped when its turn comes, and deleting a server
+		 * need not scan a table that is kept for good.
+		 */
+		serverId: text('server_id'),
+		/** the event kind the webhook ticks (json-webhook-events.ts) */
+		kind: text('kind').notNull(),
+		/** "<event>:<key>": unique per event, the id receivers dedupe on */
+		eventId: text('event_id').notNull(),
+		/** the JSON body exactly as sent, final when queued, so every attempt sends the same bytes */
+		body: text('body').notNull(),
+		/** pending | sending | delivered | failed | skipped */
+		state: text('state').notNull().default('pending'),
+		attempts: integer('attempts').notNull().default(0),
+		notBefore: ts('not_before').notNull().defaultNow(),
+		leaseUntil: ts('lease_until'),
+		/** a status code or one of a few fixed phrases, never what the receiver answered */
+		outcome: text('outcome').notNull().default(''),
+		createdAt: ts('created_at').notNull().defaultNow(),
+		doneAt: ts('done_at')
+	},
+	(t) => [
+		uniqueIndex('json_webhook_posts_event_idx').on(t.webhookId, t.eventId),
+		/**
+		 * each webhook's open POSTs, oldest first: the claim steps from one webhook's oldest to the
+		 * next webhook's, so it reads one entry per webhook with anything open, however many exist
+		 */
+		index('json_webhook_posts_next_idx')
+			.on(t.webhookId, t.id)
+			.where(sql`${t.state} in ('pending', 'sending')`),
+		/** what is not finished, for the lease sweep and the backlog count; delivered rows stay out */
+		index('json_webhook_posts_open_idx')
+			.on(t.state)
+			.where(sql`${t.state} in ('pending', 'sending')`)
+	]
+);
+
 // ---- Organisation lists: bans and reserved slots kept in the panel and pushed to every server --
 
 /**
@@ -998,6 +1084,8 @@ export type SampleRow = typeof samples.$inferSelect;
 export type SteamProfileRow = typeof steamProfiles.$inferSelect;
 export type TriggerRow = typeof triggers.$inferSelect;
 export type WebhookRow = typeof webhooks.$inferSelect;
+export type JsonWebhookRow = typeof jsonWebhooks.$inferSelect;
+export type JsonWebhookPostRow = typeof jsonWebhookPosts.$inferSelect;
 export type PlayerNoteRow = typeof playerNotes.$inferSelect;
 export type PlayerMarkRow = typeof playerMarks.$inferSelect;
 export type ListRow = typeof lists.$inferSelect;

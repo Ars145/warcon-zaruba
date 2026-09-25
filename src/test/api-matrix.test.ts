@@ -89,6 +89,11 @@ const MATRIX: Record<string, Policy | typeof PER_LIST> = {
 	'DELETE api/orgs/[id]/webhooks/[webhookId]': 'orgOwner',
 	'POST api/orgs/[id]/webhooks/[webhookId]/card': 'orgOwner',
 	'POST api/orgs/[id]/webhooks/[webhookId]/test': 'orgOwner',
+	'GET api/orgs/[id]/json-webhooks': 'orgOwner',
+	'POST api/orgs/[id]/json-webhooks': 'orgOwner',
+	'PATCH api/orgs/[id]/json-webhooks/[webhookId]': 'orgOwner',
+	'DELETE api/orgs/[id]/json-webhooks/[webhookId]': 'orgOwner',
+	'POST api/orgs/[id]/json-webhooks/[webhookId]/test': 'orgOwner',
 
 	// its ban and reserved-slot lists
 	'GET api/orgs/[id]/lists': 'lists',
