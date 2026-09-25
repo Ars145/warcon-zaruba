@@ -6,6 +6,7 @@ import { ApiError, int, str } from './http';
 import { gamePath } from './hostpolicy';
 import { classifyGameError, etagOf, GameError, parseJson, WardogsClient } from './rcon';
 import { reservedFromText, reservedIntoText } from '../reserved-doc';
+import { saneScores } from '../format';
 import { hideSecretValues, redactSecrets, restoreSecrets, SECRET_PLACEHOLDER } from '../config-doc';
 
 export interface ActionDef {
@@ -100,11 +101,8 @@ async function getStatus(client: WardogsClient, raw = false) {
 		matchSeconds: s.matchSeconds ?? null,
 		playerCount: s.players?.current ?? 0,
 		maxPlayers: s.players?.max ?? 0,
-		scores: (s.factionScores || []).map((f: any) => ({
-			name: f.name,
-			colorHex: f.colorHex,
-			score: f.score
-		})),
+		// The game's own words, bound for style attributes and numeric reads: only safe shapes.
+		scores: saneScores(s.factionScores),
 		rotationNow: idx(rot.nowIndex),
 		rotationNext: idx(rot.nextIndex),
 		// Only for the connection test: fields the normaliser does not know (a build may add some).

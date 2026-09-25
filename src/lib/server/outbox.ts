@@ -10,7 +10,7 @@ import type { DbOrTx } from './db';
 import { outbox, triggers, type OutboxRow } from './db/schema';
 import { ACTIONS } from './actions';
 import { GameError, WardogsClient } from './rcon';
-import { ApiError } from './http';
+import { ApiError, forLog } from './http';
 import { LaneFull, LaneTimeout, PRIORITY, withServer } from './dispatcher';
 import { emit } from './events';
 import { isOwner, LostOwnership, withOwnedTransaction } from './leadership';
@@ -22,6 +22,9 @@ import { getOrg, getServer } from './access';
 import { gateway } from './gateway';
 import { deliveries } from './metrics';
 import { NAME_FLAG } from './name-filter';
+import { KILL_RATE_FLAG } from './kill-rate';
+import { queueEvent } from './json-webhook-queue';
+import { seedRewardGranted } from './json-webhook-events';
 import type { OutboxView } from '$lib/types';
 
 const CLAIM_LIMIT = 50;
@@ -148,21 +151,66 @@ function skipReason(row: OutboxRow, m: ReturnType<typeof memoryOf>): string | nu
 	if (!m) return 'Server no longer polled.';
 	const age = Date.now() - new Date(row.createdAt).getTime();
 	if (age > settings().outboxMaxAgeMs) return `Stale (${Math.round(age / 1000)}s old).`;
-	if (row.steamId && m.playersAt && !m.players.some((p) => p.steamId === row.steamId))
+	if (
+		row.steamId &&
+		m.playersAt &&
+		!m.players.some((p) => p.steamId === row.steamId) &&
+		!m.presence.open.has(row.steamId)
+	)
 		return 'Player already left.';
 	if (row.action === 'empty_reset' && (m.players.length > 0 || (m.status?.playerCount ?? 0) > 0))
 		return 'Players arrived before the reset.';
 	return null;
 }
 
+/**
+ * True when the row's player is off the list but their session is still open: the list empties
+ * for half a minute at a map change, so they may be back. The row waits (until the session
+ * closes, then it is skipped, or the stale cut-off) rather than being dropped or sent now.
+ */
+function mustWait(row: OutboxRow, m: ReturnType<typeof memoryOf>): boolean {
+	return (
+		!!row.steamId &&
+		!!m?.playersAt &&
+		!m.players.some((p) => p.steamId === row.steamId) &&
+		m.presence.open.has(row.steamId)
+	);
+}
+
+/** How long a row whose player is off the list waits before it is looked at again. */
+const WAIT_MS = 5000;
+
 class Skipped extends Error {}
+class Waiting extends Error {}
+
+/** Puts a claimed row back to pending, to be claimed again after WAIT_MS. */
+async function release(env: Env, row: OutboxRow): Promise<void> {
+	try {
+		await withOwnedTransaction(env, (tx) =>
+			tx
+				.update(outbox)
+				.set({
+					state: 'pending',
+					leaseUntil: null,
+					notBefore: sql`now() + (${WAIT_MS} || ' milliseconds')::interval`
+				})
+				.where(and(eq(outbox.id, row.id), eq(outbox.state, 'sending')))
+		);
+	} catch (err) {
+		if (err instanceof LostOwnership) return; // the lease sweep marks it unknown
+		console.error('[warcon] outbox update', err);
+	}
+}
 
 async function deliverOne(env: Env, row: OutboxRow): Promise<void> {
 	if (row.action === 'seed_reward') return deliverSeedReward(env, row);
-	// An alert-only Name filter match: the audit row (and its Discord card) is the whole delivery.
-	if (row.action === NAME_FLAG) return finish(env, row, 'delivered', row.okMessage);
+	// An alert-only Name filter match or a Kill rate flag: the audit row (and its Discord card) is
+	// the whole delivery.
+	if (row.action === NAME_FLAG || row.action === KILL_RATE_FLAG)
+		return finish(env, row, 'delivered', row.okMessage);
 	const early = skipReason(row, memoryOf(row.serverId));
 	if (early) return finish(env, row, 'skipped', early);
+	if (mustWait(row, memoryOf(row.serverId))) return release(env, row);
 	stats.inFlight++;
 	try {
 		const result = await withServer(
@@ -173,6 +221,7 @@ async function deliverOne(env: Env, row: OutboxRow): Promise<void> {
 				const m = memoryOf(row.serverId);
 				const late = skipReason(row, m);
 				if (late) throw new Skipped(late);
+				if (mustWait(row, m)) throw new Waiting();
 				if (!isOwner()) throw new LostOwnership();
 				const client = await WardogsClient.forServer(env, m!.server);
 				return execute(client, row);
@@ -182,6 +231,7 @@ async function deliverOne(env: Env, row: OutboxRow): Promise<void> {
 		await finish(env, row, 'delivered', messageOf(result) || row.okMessage);
 	} catch (err) {
 		if (err instanceof Skipped) return finish(env, row, 'skipped', err.message);
+		if (err instanceof Waiting) return release(env, row);
 		if (err instanceof LostOwnership) return; // the lease sweep marks it unknown
 		if (err instanceof LaneFull || err instanceof LaneTimeout)
 			return finish(env, row, 'skipped', err.message);
@@ -224,7 +274,7 @@ async function deliverSeedReward(env: Env, row: OutboxRow): Promise<void> {
 			? await serverListOf(env, server, 'reserve')
 			: await listOf(env, org.id, 'reserve');
 		const expiresAt = new Date(Date.now() + p.slotDays * 86400_000);
-		const { added } = await grantEntry(env, list, {
+		const { id: entryId, added } = await grantEntry(env, list, {
 			steamId: p.steamId,
 			reason: p.reason,
 			expiresAt,
@@ -243,6 +293,29 @@ async function deliverSeedReward(env: Env, row: OutboxRow): Promise<void> {
 		if (m) {
 			m.syncAt = 0;
 			gateway().observeSoon(row.serverId, { lists: true });
+		}
+		// The org's JSON webhooks hear of it once the slot is on the list. A failure to queue the
+		// event leaves the grant as it is: the slot was earned and given.
+		try {
+			await withOwnedTransaction(env, (tx) =>
+				queueEvent(
+					tx,
+					seedRewardGranted({
+						entryId,
+						org: { id: org.id, name: org.name },
+						server: { id: server.id, name: server.name },
+						player: { steamId: p.steamId, name: p.name },
+						scope: here ? 'server' : 'org',
+						expiresAt,
+						days: p.slotDays,
+						rule: { id: row.triggerId, name: row.triggerName },
+						seedMinutes: (row.detail as { minutes?: number } | null)?.minutes ?? null
+					})
+				)
+			);
+		} catch (err) {
+			if (err instanceof LostOwnership) throw err;
+			console.error('[warcon] json webhooks for a grant', forLog(err));
 		}
 		await finish(
 			env,

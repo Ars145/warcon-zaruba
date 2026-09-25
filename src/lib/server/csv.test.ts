@@ -1,5 +1,22 @@
 import { describe, expect, test } from 'bun:test';
-import { csvCell } from './csv';
+import { csvCell, fileSlug } from './csv';
+
+describe('fileSlug', () => {
+	test('keeps letters and digits, dashes the rest, drops what a header would need quoted', () => {
+		expect(fileSlug('Clan UK #1')).toBe('clan-uk-1');
+		expect(fileSlug('[ABC] Late Nights')).toBe('abc-late-nights');
+		expect(fileSlug('Night Ops // EU')).toBe('night-ops-eu');
+		expect(fileSlug('José\'s "server"; rm -rf')).toBe('jose-s-server-rm-rf');
+		expect(fileSlug('Ünïcödé')).toBe('unicode');
+	});
+
+	test('falls back when nothing is left, and stays short', () => {
+		expect(fileSlug('★彡')).toBe('warcon');
+		expect(fileSlug('')).toBe('warcon');
+		expect(fileSlug('a'.repeat(39) + ' b c')).toBe('a'.repeat(39));
+		expect(fileSlug('x'.repeat(80)).length).toBe(40);
+	});
+});
 
 describe('csvCell', () => {
 	test('plain values pass through, delimiters and quotes are quoted', () => {
