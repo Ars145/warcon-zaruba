@@ -219,7 +219,8 @@ export async function marksFor(
 			watched: !!l?.watched,
 			reason: staff ? (l?.watched?.reason ?? '') : '',
 			firstVisit: (visits.get(steamId) ?? 0) <= 1,
-			risk: riskFor(env, profiles.get(steamId), l, performance.get(steamId), staff)
+			risk: riskFor(env, profiles.get(steamId), l, performance.get(steamId), staff),
+			steamName: profiles.get(steamId)?.persona || null
 		};
 	});
 }

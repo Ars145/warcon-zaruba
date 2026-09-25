@@ -1,5 +1,13 @@
 import { describe, expect, test } from 'bun:test';
-import { factionColor, fmtAgo, fmtSpan, hexColor, mapId, saneScores } from './format';
+import {
+	factionColor,
+	fmtAgo,
+	fmtSpan,
+	hexColor,
+	mapId,
+	saneScores,
+	steamNameBeside
+} from './format';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -42,6 +50,29 @@ test('mapId: the name players know and the catalog id are one map', () => {
 	expect(mapId('bakurani')).toBe('Kavkazi');
 	expect(mapId('SomeNewMap')).toBe('SomeNewMap');
 	expect(mapId('')).toBe('');
+});
+
+describe('steamNameBeside', () => {
+	test('shows the Steam name when the in-game name does not carry it', () => {
+		expect(steamNameBeside('Anonymous', 'shadowfox')).toBe('shadowfox');
+		expect(steamNameBeside('Lt. Dan', 'dan_1987')).toBe('dan_1987');
+		expect(steamNameBeside('Anonymous', '  Kestrel ')).toBe('Kestrel');
+		// inside another word is not carrying it
+		expect(steamNameBeside('Jordan', 'dan')).toBe('dan');
+		expect(steamNameBeside('Ghostpepper2', 'Ghostpepper')).toBe('Ghostpepper');
+	});
+
+	test('says nothing when the in-game name already has it, or there is none', () => {
+		expect(steamNameBeside('[ABC] Night Owl', 'Night Owl')).toBeNull();
+		expect(steamNameBeside('ghostpepper', 'GhostPepper')).toBeNull();
+		expect(steamNameBeside('Lt. Dan', 'dan')).toBeNull();
+		expect(steamNameBeside('[ABC]xX_Sn1per_Xx', 'xx_sn1per_xx')).toBeNull();
+		expect(steamNameBeside('Ｋｅｓｔｒｅｌ', 'Kestrel')).toBeNull();
+		expect(steamNameBeside('Anonymous', '')).toBeNull();
+		expect(steamNameBeside('Anonymous', '   ')).toBeNull();
+		expect(steamNameBeside('Anonymous', null)).toBeNull();
+		expect(steamNameBeside('Anonymous', undefined)).toBeNull();
+	});
 });
 
 // A game server's colours land in style attributes on every viewer's page: anything but #rrggbb

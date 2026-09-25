@@ -367,6 +367,8 @@ export interface PlayerMark {
 	reason: string;
 	firstVisit: boolean;
 	risk: RiskView;
+	/** the Steam profile's name, as the dossier shows it; null without a profile on record */
+	steamName: string | null;
 }
 
 export interface PlayerNoteView {

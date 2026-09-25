@@ -201,3 +201,22 @@ export function fmtCompact(n: number): string {
 	if (v >= 1e3) return `${scaled(v / 1e3)} K`;
 	return String(Math.round(v));
 }
+
+/**
+ * The Steam name to show under an in-game name, or null when there is none or the in-game name
+ * already carries it (a clan tag around the same name): what a name that hides the player, such
+ * as a streamer's, does not say.
+ */
+export function steamNameBeside(inGame: string, steam: string | null | undefined): string | null {
+	const name = (steam ?? '').trim();
+	if (!name) return null;
+	const fold = (v: string) => v.normalize('NFKC').toLowerCase();
+	const whole = fold(inGame);
+	const part = fold(name);
+	// Carried only where it stands on its own (a clan tag around it), not inside another word:
+	// "dan" is not in "Jordan".
+	const wordChar = (c: string | undefined) => !!c && /[\p{L}\p{N}]/u.test(c);
+	for (let at = whole.indexOf(part); at >= 0; at = whole.indexOf(part, at + 1))
+		if (!wordChar(whole[at - 1]) && !wordChar(whole[at + part.length])) return null;
+	return name;
+}
