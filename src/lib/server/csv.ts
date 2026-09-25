@@ -17,3 +17,19 @@ export function csvCell(v: unknown): string {
 	if (formula) s = `'${s}`;
 	return formula || /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
+
+/**
+ * A server or org name as the start of a download's file name: lowercase ASCII letters and
+ * digits joined by dashes, at most 40 characters, so it needs no quoting in Content-Disposition.
+ */
+export function fileSlug(name: string): string {
+	const slug = name
+		.normalize('NFKD')
+		.replace(/[̀-ͯ]/g, '')
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, '-')
+		.replace(/^-+|-+$/g, '')
+		.slice(0, 40)
+		.replace(/-+$/, '');
+	return slug || 'warcon';
+}
