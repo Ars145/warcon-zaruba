@@ -281,7 +281,9 @@
 										<Badge tone="accent">member</Badge>
 									{:else if r.managed}
 										<Badge tone={STATE_TONE[r.state]}
-											>org{r.state === 'applied' ? '' : ` · ${r.state}`}</Badge
+											>{r.scope === 'server' ? 'here' : 'org'}{r.state === 'applied'
+												? ''
+												: ` · ${r.state}`}</Badge
 										>
 									{:else}
 										<Badge>local</Badge>
