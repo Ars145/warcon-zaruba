@@ -74,9 +74,12 @@ describe('killMatches', () => {
 		expect(killMatches(f({ kind: 'environment' }), kill())).toBe(false);
 	});
 
-	test('cause exactly, distance at least', () => {
+	test('cause whole in any case, distance at least', () => {
 		expect(killMatches(f({ cause: 'Id.Item.AK74M' }), kill())).toBe(true);
+		expect(killMatches(f({ cause: 'ID.ITEM.ak74m' }), kill())).toBe(true);
+		expect(killMatches(f({ cause: 'Id.Item.AK74' }), kill())).toBe(false);
 		expect(killMatches(f({ cause: 'Id.Item.Mosin' }), kill())).toBe(false);
+		expect(killMatches(f({ cause: 'Id.Item.AK74M' }), kill({ cause: null }))).toBe(false);
 		expect(killMatches(f({ minM: 42 }), kill())).toBe(true);
 		expect(killMatches(f({ minM: 43 }), kill())).toBe(false);
 		expect(killMatches(f({ minM: 1 }), kill({ distanceM: null }))).toBe(false);

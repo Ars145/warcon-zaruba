@@ -340,7 +340,7 @@ function killWhere(
 				sideIs(f.player, kills.victimSteamId, kills.victimName)
 			)
 		);
-	if (f.cause) conds.push(eq(kills.cause, f.cause));
+	if (f.cause) conds.push(sql`lower(${kills.cause}) = lower(${f.cause})`);
 	if (f.minM !== null) conds.push(gte(kills.distanceM, f.minM));
 	switch (f.kind) {
 		case 'headshot':
