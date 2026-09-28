@@ -5,6 +5,7 @@ import { ApiError, int, str } from './http';
 import { accountAgeDays, assessRisk, RISK_HIGH, RISK_MEDIUM, type RiskPerformance } from './risk';
 import { validateNameFilter, type NameFilterConfig } from './name-filter';
 import { validateKillRate, type KillRateConfig } from './kill-rate';
+import { validateTwoTeams, type TwoTeamsConfig } from './two-teams';
 import { RESTART_AFTER_HOURS, restartWindow } from '$lib/uptime';
 import type { SteamProfileRow } from './db/schema';
 import type { TriggerKind } from '$lib/types';
@@ -21,7 +22,8 @@ export const TRIGGER_KINDS: TriggerKind[] = [
 	'seed_reward',
 	'match_broadcast',
 	'name_filter',
-	'kill_rate'
+	'kill_rate',
+	'two_teams'
 ];
 export const TRIGGER_LABELS: Record<TriggerKind, string> = {
 	welcome: 'Welcome whisper',
@@ -35,7 +37,8 @@ export const TRIGGER_LABELS: Record<TriggerKind, string> = {
 	seed_reward: 'Seeding reward',
 	match_broadcast: 'Match broadcast',
 	name_filter: 'Name filter',
-	kill_rate: 'Kill rate watch'
+	kill_rate: 'Kill rate watch',
+	two_teams: 'Two-team mode'
 };
 
 export interface WelcomeConfig {
@@ -185,7 +188,8 @@ export type TriggerConfig =
 	| SeedRewardConfig
 	| MatchBroadcastConfig
 	| NameFilterConfig
-	| KillRateConfig;
+	| KillRateConfig
+	| TwoTeamsConfig;
 
 const MAX_MESSAGE = 200;
 
@@ -365,6 +369,8 @@ export function validateConfig(kind: TriggerKind, raw: unknown): TriggerConfig {
 			return validateNameFilter(c);
 		case 'kill_rate':
 			return validateKillRate(c);
+		case 'two_teams':
+			return validateTwoTeams(c);
 	}
 }
 

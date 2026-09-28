@@ -160,6 +160,12 @@ function skipReason(row: OutboxRow, m: ReturnType<typeof memoryOf>): string | nu
 		return 'Player already left.';
 	if (row.action === 'empty_reset' && (m.players.length > 0 || (m.status?.playerCount ?? 0) > 0))
 		return 'Players arrived before the reset.';
+	// A Two-team move asked for again while the first was queued: moving (and killing) twice is not harmless.
+	if (row.triggerKind === 'two_teams' && row.action === 'changeTeam') {
+		const from = (row.params as { from?: string } | null)?.from;
+		const p = m.players.find((q) => q.steamId === row.steamId);
+		if (from && p && p.faction !== from) return `Already off ${from}.`;
+	}
 	return null;
 }
 

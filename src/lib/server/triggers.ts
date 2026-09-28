@@ -11,6 +11,8 @@
 //                (kill-rate.ts, acted on in feed-events.ts)
 //   seed_reward  hand players who stay through a low population a reserved slot, on this server
 //                or across the org
+//   two_teams    close one faction and move its players to the smaller of the other two
+//                (two-teams.ts)
 // The worker evaluates them on every observation and writes the actions they want to the outbox
 // (outbox.ts delivers, and every delivery lands in the audit trail as category "trigger"). A dry
 // run replays the last 24 hours from the samples and sessions tables so a rule can be checked
@@ -82,6 +84,7 @@ import {
 	type KillRateConfig,
 	type RateKill
 } from './kill-rate';
+import { teamName, twoTeamsStep, type TwoTeamsConfig, type TwoTeamsState } from './two-teams';
 import { fmtUptime, RESTART_AFTER_HOURS, restartWindow } from '$lib/uptime';
 import { DEFAULT_SCORE_CAP, scoreCapOf } from '$lib/match';
 import { settings } from './settings';
@@ -142,7 +145,8 @@ const RULE_NEEDS: Record<Exclude<TriggerKind, 'seed_reward'>, [Capability, strin
 	name_filter: ['players.moderate', 'kicks players'],
 	ping_kick: ['players.moderate', 'kicks players'],
 	team_kill: ['players.moderate', 'kicks players'],
-	kill_rate: ['players.moderate', 'flags players']
+	kill_rate: ['players.moderate', 'flags players'],
+	two_teams: ['players.moderate', 'moves players between teams']
 };
 
 /** What one rule needs of whoever saves it. The Seeding reward reserves slots: here, or on the organisation's list. */
@@ -236,7 +240,10 @@ export async function updateTrigger(
 	if (body.name !== undefined) set.name = str(body.name, 60) || row.name;
 	if (body.enabled !== undefined) set.enabled = !!body.enabled;
 	if (body.config !== undefined) set.config = validateConfig(row.kind, body.config);
-	if (row.kind === 'ping_kick' && (body.config !== undefined || body.enabled !== undefined))
+	if (
+		(row.kind === 'ping_kick' || row.kind === 'two_teams') &&
+		(body.config !== undefined || body.enabled !== undefined)
+	)
 		set.state = null;
 	requireRuleCaps(row.kind, set.config ?? row.config, server, access);
 	if (!Object.keys(set).length) throw new ApiError(400, 'Nothing to update.');
@@ -468,6 +475,9 @@ export async function evaluateTriggers(
 					break;
 				case 'name_filter':
 					evalNameFilter(ctx, row, row.config as NameFilterConfig, out);
+					break;
+				case 'two_teams':
+					evalTwoTeams(ctx, row, row.config as TwoTeamsConfig, out);
 					break;
 			}
 		} catch (err) {
@@ -752,6 +762,61 @@ function evalPingKick(ctx: TickContext, row: TriggerRow, cfg: PingKickConfig, ou
 					? `Kicking ${ctx.players.find((p) => p.steamId === kicks[0])?.name}: high ping`
 					: `Kicking ${kicks.length} players: high ping`
 		};
+}
+
+function evalTwoTeams(ctx: TickContext, row: TriggerRow, cfg: TwoTeamsConfig, out: Evaluation) {
+	if (!ctx.playersObserved) return;
+	// The match's factions, less the closed one; nothing is placed until both others are known.
+	const open = (ctx.status.scores ?? [])
+		.map((s) => s.name)
+		.filter((f) => f && f !== cfg.closedFaction);
+	const now = ctx.ts.getTime();
+	const step = twoTeamsStep(cfg, row.state as TwoTeamsState | null, ctx.players, open, now);
+	// The state is written with any intents, and kept in the cached row for the next poll.
+	row.state = step.state;
+	for (const m of step.moves)
+		out.intents.push({
+			trigger: row,
+			action: 'changeTeam',
+			params: { steamId: m.steamId, faction: m.to, from: m.from },
+			target: m.steamId,
+			okMessage: `Moved ${m.name} to ${teamName(cfg, m.to)}.`,
+			detail: { name: m.name, from: m.from, to: m.to },
+			steamId: m.steamId,
+			dedupeKey: key(row, m.steamId, now)
+		});
+	for (const w of step.whispers)
+		out.intents.push({
+			trigger: row,
+			action: 'whisper',
+			params: {
+				steamId: w.steamId,
+				message: renderTemplate(cfg.message, {
+					...vars(
+						ctx,
+						ctx.players.find((p) => p.steamId === w.steamId)
+					),
+					team: teamName(cfg, w.faction)
+				})
+			},
+			target: w.steamId,
+			okMessage: `Whispered ${w.name}.`,
+			detail: { name: w.name, team: teamName(cfg, w.faction) },
+			steamId: w.steamId,
+			dedupeKey: key(row, w.steamId, 'told', now)
+		});
+	if (!step.changed) return;
+	const n = step.moves.length;
+	out.updates.push(
+		n
+			? {
+					id: row.id,
+					state: step.state,
+					lastFiredAt: ctx.ts,
+					lastResult: n === 1 ? `Moving ${step.moves[0].name}` : `Moving ${n} players`
+				}
+			: { id: row.id, state: step.state }
+	);
 }
 
 function evalRestartNotice(
@@ -1110,6 +1175,12 @@ export async function dryRun(
 	if (kind === 'faction_change') {
 		result.notes.push(
 			'Faction switches are not kept in the session history, so there is nothing to replay; the rule fires live when a player moves from one faction to another.'
+		);
+		return result;
+	}
+	if (kind === 'two_teams') {
+		result.notes.push(
+			'Faction moves are not kept in the session history, so there is nothing to replay. The live rule moves everyone on the closed faction to the smaller of the other two on each fresh player list, retrying a move that has not landed after 30 seconds.'
 		);
 		return result;
 	}
