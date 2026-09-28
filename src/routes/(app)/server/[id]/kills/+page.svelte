@@ -103,15 +103,20 @@
 		return watchLive([id], onLive, undefined, onKills);
 	});
 
-	/** The named causes plus any the loaded rows carry, so an unnamed weapon is still a choice. */
+	/**
+	 * The named causes plus any the loaded rows carry, so an unnamed weapon is still a choice. One
+	 * choice per tag in any case, the filter's own spelling first so the select still shows it.
+	 */
 	let causeOptions = $derived.by(() => {
-		const seen = new Map(knownCauses().map((c) => [c.cause, c.label]));
-		for (const k of kills)
-			if (k.cause && !seen.has(k.cause)) seen.set(k.cause, causeLabel(k.cause));
-		if (filter.cause && !seen.has(filter.cause)) seen.set(filter.cause, causeLabel(filter.cause));
-		return [...seen]
-			.map(([cause, label]) => ({ cause, label }))
-			.sort((a, b) => a.label.localeCompare(b.label));
+		const seen = new Map<string, { cause: string; label: string }>();
+		const add = (cause: string) => {
+			const key = cause.toLowerCase();
+			if (!seen.has(key)) seen.set(key, { cause, label: causeLabel(cause) });
+		};
+		if (filter.cause) add(filter.cause);
+		for (const c of knownCauses()) add(c.cause);
+		for (const k of kills) if (k.cause) add(k.cause);
+		return [...seen.values()].sort((a, b) => a.label.localeCompare(b.label));
 	});
 	let filtered = $derived(!isEmptyFilter(filter));
 	const clear = () => (filter = { ...EMPTY_FILTER });

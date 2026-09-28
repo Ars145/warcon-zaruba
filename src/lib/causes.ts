@@ -1,6 +1,7 @@
 // Labels for the cause tags the kill feed sends (`Id.Item.AK74M`, `Vehicle.Variant.Air.Rotary.
-// Littlebird.Default`, ...). The game sends no display names, so the ones seen so far are named
-// here and anything else falls back to a readable form of its last segments. Client-safe.
+// Littlebird.Default`, ...). The game sends no display names, so the known ones are named here and
+// anything else falls back to a readable form of its last segments. A tag is looked up in any case:
+// the game writes `ID.Item.` for some items and `Id.Item.` for others. Client-safe.
 
 export type CauseKind = 'weapon' | 'vehicle weapon' | 'vehicle' | 'buildable' | 'none';
 
@@ -18,27 +19,69 @@ const LABELS: Record<string, string> = {
 	'Id.Item.SV98': 'SV-98',
 	'Id.Item.RPG7': 'RPG-7',
 	'Id.Item.MK22': 'MK 22',
-	'Id.Item.M67Grenade': 'M67 grenade',
-	'Id.Item.C4Explosive': 'C4',
 	'Id.Item.Glock17': 'Glock 17',
 	'Id.Item.CombatBow': 'Combat bow',
+	// Explosives and tools
+	'Id.Item.M67Grenade': 'M67 frag grenade',
+	'Id.Item.C4Explosive': 'C4 charge',
+	'Id.Item.IED.Explosive': 'IED',
+	'Id.Item.ATMine': 'AT mine',
+	'Id.Item.Claymore': 'Claymore',
+	'Id.Item.Crowbar': 'Halligan bar',
+	'Id.Item.Fists': 'Fists',
 	'Id.Item.Defibrillator.Standard': 'Defibrillator',
-	'ID.Item.BuildTool.Hammer.Large': 'Hammer (large)',
-	'ID.Item.BuildTool.Hammer.Medium': 'Hammer (medium)',
+	'ID.Item.BuildTool.Hammer.Large': 'Large hammer',
+	'ID.Item.BuildTool.Hammer.Medium': 'Medium hammer',
+	'ID.Item.BuildTool.Hammer.Small': 'Small hammer',
+	'Id.Item.VehicleSupplyCrate.Pallet.MunitionsSupply': 'Ammo supply pallet',
+	// Buildables
 	'Id.Buildable.BremmerWall': 'Bremer wall',
 	'Id.Buildable.BarbedWire': 'Barbed wire',
-	'Id.Vehicle.WeaponExtension.STN_01.MistralAA': 'STN 01 Mistral AA',
+	'Id.Buildable.HBlock': 'H-block',
+	'Id.Buildable.TallHBlock': 'Tall H-block',
+	// Vehicles: the crew's guns or a roadkill
+	'Vehicle.Variant.Air.Rotary.Littlebird.Default': 'MH-6',
+	'Vehicle.Variant.Air.Rotary.Littlebird.MountedMachineGuns': 'AH-6M',
+	'Vehicle.Variant.Air.Rotary.Littlebird.RocketPods': 'AH-6R',
+	'Vehicle.Variant.Air.Rotary.ROT_04.Default': 'Z20 Lakota',
+	'Vehicle.Variant.Air.Rotary.ROT_04.MountedMachineGuns': 'Z20 Lakota (miniguns)',
+	'Vehicle.Variant.Land.Tracked.TNK_01.AntiAir': 'Flakpanzer Gepard',
+	'Vehicle.Variant.Land.Tracked.TNK_01.Heavy': 'L2A6',
+	'Vehicle.Variant.Land.Tracked.TNK_01.Artillery': 'SPH-2',
+	'Vehicle.Variant.Land.Tracked.SpawnVehicle.Lonestar': 'M113 APC',
+	'Vehicle.Variant.Land.Tracked.SpawnVehicle.Valkyra': 'M113 APC',
+	'Vehicle.Variant.Land.Tracked.SpawnVehicle.Manticore': 'M113 APC',
+	'Vehicle.Variant.Land.Wheeled.Humvee.MachineGun': 'Humvee (M249)',
+	'Vehicle.Variant.Land.Wheeled.Humvee.Minigun': 'Humvee (minigun)',
+	'Vehicle.Variant.Land.Wheeled.Kodiak.MachineGun': 'Kodiak (M249)',
+	'Vehicle.Variant.Land.Wheeled.Kodiak.Pickup': 'Kodiak (pickup)',
+	'Vehicle.Variant.Land.Wheeled.Ural.Battle': 'Ural Defender',
+	'Vehicle.Variant.Land.Wheeled.Ural.Attack': 'Ural Defender (M249)',
+	'Vehicle.Variant.Stationary.Phalanx': 'Vanguard CIWS',
+	'Vehicle.Variant.Stationary.Mortar': 'L81 mortar',
+	'Vehicle.Variant.Stationary.MistralAA': 'Talon 9K-SAM',
+	// Vehicle weapons
+	'Id.Vehicle.WeaponExtension.ROT_02.30mmCannon': 'Havoc 2A42 autocannon',
+	'Id.Vehicle.WeaponExtension.ROT_02.122mm': 'Havoc B-13 rockets',
+	'Id.Vehicle.WeaponExtension.ROT_03.MountedMachineGun': 'AH-6M miniguns',
+	'Id.Vehicle.WeaponExtension.ROT_03.RocketPods': 'AH-6R rockets',
+	'Id.Vehicle.WeaponExtension.ROT_04.MountedMachineGun': 'Z20 Lakota miniguns',
+	'Id.Vehicle.WeaponExtension.TNK_01.Artillery': 'SPH-2 artillery',
+	'Id.Vehicle.WeaponExtension.TNK_01.Heavy': 'L2A6 cannon',
+	'Id.Vehicle.WeaponExtension.TNK_01.MachineGun': 'L2A6 machine gun',
+	'Id.Vehicle.WeaponExtension.TNK_01.MountedMachineGun': 'L2A6 mounted MG',
+	'Id.Vehicle.WeaponExtension.WHL_02.SUV.RingTurret': 'Kodiak M249',
+	'Id.Vehicle.WeaponExtension.WHL_05.RingTurret': 'Humvee M249',
+	'Id.Vehicle.WeaponExtension.WHL_05.RingMinigun': 'Humvee minigun',
+	'Id.Vehicle.WeaponExtension.WHL_07.MachineGun': 'Ural Defender M249',
+	'Id.Vehicle.WeaponExtension.STN_01.MistralAA': 'Talon 9K-SAM',
 	'Id.Vehicle.WeaponExtension.STN_02.MainCannon': 'STN 02 main cannon',
-	'Id.Vehicle.WeaponExtension.STN_03.MainBarrel': 'STN 03 main gun',
-	'Id.Vehicle.WeaponExtension.ROT_02.30mmCannon': 'ROT 02 30 mm cannon',
-	'Id.Vehicle.WeaponExtension.ROT_02.122mm': 'ROT 02 122 mm',
-	'Id.Vehicle.WeaponExtension.ROT_03.MountedMachineGun': 'ROT 03 mounted MG',
-	'Id.Vehicle.WeaponExtension.WHL_02.SUV.RingTurret': 'SUV ring turret',
-	'Vehicle.Variant.Air.Rotary.Littlebird.MountedMachineGuns': 'Littlebird (mounted MGs)',
-	'Vehicle.Variant.Land.Wheeled.Kodiak.MachineGun': 'Kodiak (machine gun)',
-	'Vehicle.Variant.Land.Wheeled.Kodiak.Pickup': 'Kodiak pickup',
-	'Vehicle.Variant.Land.Tracked.SpawnVehicle.Lonestar': 'Lonestar'
+	'Id.Vehicle.WeaponExtension.STN_03.MainBarrel': 'STN 03 main gun'
 };
+/** The table by lower-case tag, for a lookup in any case. */
+const BY_TAG = new Map(
+	Object.entries(LABELS).map(([cause, label]) => [cause.toLowerCase(), label])
+);
 
 /** What sort of thing the cause is, from its prefix. */
 export function causeKind(cause: string | null | undefined): CauseKind {
@@ -76,7 +119,7 @@ export function knownCauses(): { cause: string; label: string }[] {
 /** A display name for the tag: the known ones by name, the rest from their meaningful segments. */
 export function causeLabel(cause: string | null | undefined): string {
 	if (!cause) return '';
-	const known = LABELS[cause];
+	const known = BY_TAG.get(cause.toLowerCase());
 	if (known) return known;
 	const segs = cause.split('.').filter(Boolean);
 	switch (causeKind(cause)) {

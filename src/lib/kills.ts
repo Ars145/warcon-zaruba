@@ -11,7 +11,7 @@ export interface KillFilter {
 	player: string;
 	killer: string;
 	victim: string;
-	/** the raw cause tag, exactly */
+	/** the raw cause tag, in any case (the game's own casing varies) */
 	cause: string;
 	kind: KillKind;
 	/** at least this far, in metres */
@@ -88,7 +88,7 @@ export function killMatches(f: KillFilter, k: KillView): boolean {
 	if (!sideMatches(f.killer, k.killer) || !sideMatches(f.victim, k.victim)) return false;
 	if (f.player && !sideMatches(f.player, k.killer) && !sideMatches(f.player, k.victim))
 		return false;
-	if (f.cause && k.cause !== f.cause) return false;
+	if (f.cause && k.cause?.toLowerCase() !== f.cause.toLowerCase()) return false;
 	if (f.minM !== null && (k.distanceM === null || k.distanceM < f.minM)) return false;
 	switch (f.kind) {
 		case 'headshot':
