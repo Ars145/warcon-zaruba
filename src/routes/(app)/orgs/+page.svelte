@@ -4,6 +4,7 @@
 	import { fmtTime } from '$lib/format';
 	import { toast } from '$lib/toast.svelte';
 	import { confirmDialog } from '$lib/confirm.svelte';
+	import { orgHome } from '$lib/orgs';
 	import Badge from '$lib/components/Badge.svelte';
 	import Modal from '$lib/components/Modal.svelte';
 	import RoleBadge from '$lib/components/RoleBadge.svelte';
@@ -145,20 +146,11 @@
 		</thead>
 		<tbody>
 			{#each rows as o (o.id)}
+				{@const home = orgHome(o, siteOwner)}
 				<tr class={o.suspended ? 'text-mist-400' : ''}>
 					<td>
-						{#if o.role === 'owner' && (!o.suspended || siteOwner)}
-							<a
-								href="/orgs/{encodeURIComponent(o.id)}"
-								class="font-medium text-accent hover:underline">{o.name}</a
-							>
-						{:else if o.listKinds.length}
-							<a
-								href="/orgs/{encodeURIComponent(o.id)}/{o.listKinds.includes('ban')
-									? 'bans'
-									: 'reserved'}"
-								class="font-medium text-accent hover:underline">{o.name}</a
-							>
+						{#if home}
+							<a href={home} class="font-medium text-accent hover:underline">{o.name}</a>
 						{:else}
 							<span class="font-medium">{o.name}</span>
 						{/if}

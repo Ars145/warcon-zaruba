@@ -7,9 +7,12 @@
 	import Pulse from '$lib/components/Pulse.svelte';
 	import { health } from '$lib/health.svelte';
 	import { initials } from '$lib/format';
+	import { orgsLink } from '$lib/orgs';
 	import type { LayoutProps } from './$types';
 
 	let { data, children }: LayoutProps = $props();
+	// Someone in one org goes straight to it; the org page links back to the list.
+	let orgsHref = $derived(orgsLink(data.orgs, data.user.role === 'owner'));
 
 	let currentId = $derived(
 		page.route.id?.includes('/server/[id]') ? (page.params.id ?? null) : null
@@ -241,7 +244,7 @@
 					>Servers</a
 				>
 			{/if}
-			<a href="/orgs" class="nav-pill {isActive('/orgs') ? 'nav-pill-active' : ''}">Orgs</a>
+			<a href={orgsHref} class="nav-pill {isActive('/orgs') ? 'nav-pill-active' : ''}">Orgs</a>
 			{#if data.user.role === 'owner'}
 				<a href="/admin" class="nav-pill {isActive('/admin') ? 'nav-pill-active' : ''}">Admin</a>
 			{/if}
@@ -292,7 +295,7 @@
 						{#if data.canManage}
 							<a href="/servers" class="menu-item" role="menuitem">Servers</a>
 						{/if}
-						<a href="/orgs" class="menu-item" role="menuitem">Orgs</a>
+						<a href={orgsHref} class="menu-item" role="menuitem">Orgs</a>
 						{#if data.user.role === 'owner'}
 							<a href="/admin" class="menu-item" role="menuitem">Admin</a>
 						{/if}
