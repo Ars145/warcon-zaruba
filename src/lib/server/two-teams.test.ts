@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import {
 	TWO_TEAMS_FORGET_MS,
-	TWO_TEAMS_RETRY_MS,
 	teamName,
+	twoTeamsRetryMs,
 	twoTeamsStep,
 	validateTwoTeams,
 	type TwoTeamsConfig
@@ -40,7 +40,7 @@ describe('twoTeamsStep', () => {
 			p('4', 'Lonestar'),
 			p('5', 'Lonestar')
 		];
-		const r = twoTeamsStep(cfg, null, players, OPEN, 0, first);
+		const r = twoTeamsStep(cfg, null, players, OPEN, 0, { random: first });
 		expect(r.moves.map((m) => m.to)).toEqual(['Manticore', 'Manticore', 'Valkyra']);
 		expect(r.changed).toBe(true);
 	});
@@ -63,32 +63,55 @@ describe('twoTeamsStep', () => {
 	});
 
 	test('a move in flight is not asked for again, and counts toward its side', () => {
-		const a = twoTeamsStep(cfg, null, [p('1', 'Lonestar')], OPEN, 0, first);
+		const a = twoTeamsStep(cfg, null, [p('1', 'Lonestar')], OPEN, 0, { random: first });
 		expect(a.moves).toHaveLength(1);
 		const to = a.moves[0].to;
-		const b = twoTeamsStep(
-			cfg,
-			a.state,
-			[p('1', 'Lonestar'), p('2', 'Lonestar')],
-			OPEN,
-			5000,
-			first
-		);
+		const b = twoTeamsStep(cfg, a.state, [p('1', 'Lonestar'), p('2', 'Lonestar')], OPEN, 5000, {
+			random: first
+		});
 		expect(b.moves).toEqual([expect.objectContaining({ steamId: '2' })]);
 		expect(b.moves[0].to).not.toBe(to);
 	});
 
-	test('a move that has not landed is retried', () => {
-		const a = twoTeamsStep(cfg, null, [p('1', 'Lonestar')], OPEN, 0, first);
-		const b = twoTeamsStep(cfg, a.state, [p('1', 'Lonestar')], OPEN, TWO_TEAMS_RETRY_MS, first);
-		expect(b.moves).toHaveLength(1);
+	test('a move that has not landed is asked for again only once the first can no longer be sent', () => {
+		const opts = { retryMs: twoTeamsRetryMs(120_000), random: first };
+		const a = twoTeamsStep(cfg, null, [p('1', 'Lonestar')], OPEN, 0, opts);
+		const early = twoTeamsStep(cfg, a.state, [p('1', 'Lonestar')], OPEN, 60_000, opts);
+		expect(early.moves).toEqual([]);
+		const late = twoTeamsStep(cfg, early.state, [p('1', 'Lonestar')], OPEN, 125_000, opts);
+		expect(late.moves).toHaveLength(1);
+	});
+
+	test('placed players are re-stamped together, so a steady server writes about once per 5 min', () => {
+		// Two players told a minute apart; neither moves again.
+		const a = twoTeamsStep(cfg, null, [p('1', 'Lonestar')], OPEN, 0, { random: first });
+		const b = twoTeamsStep(cfg, a.state, [p('1', 'Manticore')], OPEN, 1000);
+		const c = twoTeamsStep(cfg, b.state, [p('1', 'Manticore'), p('2', 'Lonestar')], OPEN, 60_000, {
+			random: first
+		});
+		let state = twoTeamsStep(
+			cfg,
+			c.state,
+			[p('1', 'Manticore'), p('2', 'Valkyra')],
+			OPEN,
+			61_000
+		).state;
+		const on = [p('1', 'Manticore'), p('2', 'Valkyra')];
+		let writes = 0;
+		for (let t = 65_000; t <= 61_000 + 20 * 60_000; t += 5000) {
+			const r = twoTeamsStep(cfg, state, on, OPEN, t);
+			if (r.changed) writes++;
+			state = r.state;
+		}
+		expect(writes).toBe(4);
+		expect(state.told['1']).toBe(state.told['2']);
 	});
 
 	test('a landed player is whispered once, and not again after the next match re-sort', () => {
-		const a = twoTeamsStep(cfg, null, [p('1', 'Lonestar')], OPEN, 0, first);
+		const a = twoTeamsStep(cfg, null, [p('1', 'Lonestar')], OPEN, 0, { random: first });
 		const b = twoTeamsStep(cfg, a.state, [p('1', a.moves[0].to)], OPEN, 5000);
 		expect(b.whispers).toEqual([{ steamId: '1', name: 'P1', faction: a.moves[0].to }]);
-		const c = twoTeamsStep(cfg, b.state, [p('1', 'Lonestar')], OPEN, 60_000, first);
+		const c = twoTeamsStep(cfg, b.state, [p('1', 'Lonestar')], OPEN, 60_000, { random: first });
 		const d = twoTeamsStep(cfg, c.state, [p('1', c.moves[0].to)], OPEN, 65_000);
 		expect(d.whispers).toEqual([]);
 	});
@@ -106,6 +129,12 @@ describe('twoTeamsStep', () => {
 		const gone = twoTeamsStep(cfg, b.state, [], OPEN, 1000 + TWO_TEAMS_FORGET_MS + 1);
 		expect(gone.state.told).toEqual({});
 	});
+});
+
+test('the retry sits just past the stale cut-off, held between 30 s and 5 min', () => {
+	expect(twoTeamsRetryMs(120_000)).toBe(125_000);
+	expect(twoTeamsRetryMs(10_000)).toBe(30_000);
+	expect(twoTeamsRetryMs(3_600_000)).toBe(300_000);
 });
 
 test('teamName falls back to the faction', () => {

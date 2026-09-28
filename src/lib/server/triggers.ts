@@ -84,7 +84,13 @@ import {
 	type KillRateConfig,
 	type RateKill
 } from './kill-rate';
-import { teamName, twoTeamsStep, type TwoTeamsConfig, type TwoTeamsState } from './two-teams';
+import {
+	teamName,
+	twoTeamsRetryMs,
+	twoTeamsStep,
+	type TwoTeamsConfig,
+	type TwoTeamsState
+} from './two-teams';
 import { fmtUptime, RESTART_AFTER_HOURS, restartWindow } from '$lib/uptime';
 import { DEFAULT_SCORE_CAP, scoreCapOf } from '$lib/match';
 import { settings } from './settings';
@@ -771,7 +777,9 @@ function evalTwoTeams(ctx: TickContext, row: TriggerRow, cfg: TwoTeamsConfig, ou
 		.map((s) => s.name)
 		.filter((f) => f && f !== cfg.closedFaction);
 	const now = ctx.ts.getTime();
-	const step = twoTeamsStep(cfg, row.state as TwoTeamsState | null, ctx.players, open, now);
+	const step = twoTeamsStep(cfg, row.state as TwoTeamsState | null, ctx.players, open, now, {
+		retryMs: twoTeamsRetryMs(settings().outboxMaxAgeMs)
+	});
 	// The state is written with any intents, and kept in the cached row for the next poll.
 	row.state = step.state;
 	for (const m of step.moves)
@@ -1180,7 +1188,7 @@ export async function dryRun(
 	}
 	if (kind === 'two_teams') {
 		result.notes.push(
-			'Faction moves are not kept in the session history, so there is nothing to replay. The live rule moves everyone on the closed faction to the smaller of the other two on each fresh player list, retrying a move that has not landed after 30 seconds.'
+			'Faction moves are not kept in the session history, so there is nothing to replay. The live rule moves everyone on the closed faction to the smaller of the other two on each fresh player list, asking again for a move that has not landed once the first can no longer be sent (just past the stale action cut-off).'
 		);
 		return result;
 	}

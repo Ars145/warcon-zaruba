@@ -5,8 +5,13 @@
 // server; triggers.ts runs the step on each fresh player list and writes the moves to the outbox.
 import { ApiError, str } from './http';
 
-/** How long a move is waited on before it is asked for again (the player is still on the closed faction). */
-export const TWO_TEAMS_RETRY_MS = 30_000;
+/**
+ * How long a move is waited on before it is asked for again (the player is still on the closed
+ * faction): just past the outbox's stale cut-off, so the first ask can no longer be sent and a
+ * backed-up outbox is not filled with repeats. Held between 30 s and 5 min.
+ */
+export const twoTeamsRetryMs = (staleCutoffMs: number): number =>
+	Math.min(5 * 60_000, Math.max(30_000, staleCutoffMs + 5000));
 /** A placed player is told once; the note is forgotten after this long away, so a return next day is told again. */
 export const TWO_TEAMS_FORGET_MS = 2 * 3600_000;
 /** How stale a placed player's "last seen" may get before the state is written again. */
@@ -51,10 +56,18 @@ export interface TwoTeamsStep {
 	changed: boolean;
 }
 
+export interface TwoTeamsStepOptions {
+	/** see twoTeamsRetryMs */
+	retryMs?: number;
+	random?: () => number;
+}
+
 /**
  * One fresh player list. `open` is the two factions players are placed on (the match's factions
  * minus the closed one). Players already being moved count toward their target, so a burst at a
- * match start splits evenly; a move not seen landed after TWO_TEAMS_RETRY_MS is asked for again.
+ * match start splits evenly; a move not seen landed after `retryMs` is asked for again. Placed
+ * players' "last seen" is refreshed for everyone on at once, so a steady server writes its state
+ * about once per SEEN_REFRESH_MS rather than whenever some player's note comes due.
  */
 export function twoTeamsStep(
 	cfg: TwoTeamsConfig,
@@ -62,7 +75,7 @@ export function twoTeamsStep(
 	players: { steamId: string; name: string; faction: string | null }[],
 	open: string[],
 	now: number,
-	random: () => number = Math.random
+	{ retryMs = twoTeamsRetryMs(120_000), random = Math.random }: TwoTeamsStepOptions = {}
 ): TwoTeamsStep {
 	const moving = { ...(previous?.moving ?? {}) };
 	const told = { ...(previous?.told ?? {}) };
@@ -74,6 +87,7 @@ export function twoTeamsStep(
 		if (p.faction && counts.has(p.faction)) counts.set(p.faction, counts.get(p.faction)! + 1);
 
 	const on = new Set<string>();
+	let refresh = false;
 	for (const p of players) {
 		on.add(p.steamId);
 		if (p.faction && counts.has(p.faction) && moving[p.steamId]) {
@@ -83,10 +97,12 @@ export function twoTeamsStep(
 			if (cfg.message && told[p.steamId] === undefined)
 				whispers.push({ steamId: p.steamId, name: p.name, faction: p.faction });
 			told[p.steamId] = now;
-		} else if (told[p.steamId] !== undefined && now - told[p.steamId] >= SEEN_REFRESH_MS) {
-			told[p.steamId] = now;
-			changed = true;
-		}
+		} else if (told[p.steamId] !== undefined && now - told[p.steamId] >= SEEN_REFRESH_MS)
+			refresh = true;
+	}
+	if (refresh) {
+		for (const id of on) if (told[id] !== undefined) told[id] = now;
+		changed = true;
 	}
 	for (const [id, seen] of Object.entries(told))
 		if (!on.has(id) && now - seen > TWO_TEAMS_FORGET_MS) {
@@ -94,7 +110,7 @@ export function twoTeamsStep(
 			changed = true;
 		}
 	for (const [id, m] of Object.entries(moving))
-		if (now - m.at >= TWO_TEAMS_RETRY_MS) {
+		if (now - m.at >= retryMs) {
 			delete moving[id];
 			changed = true;
 		}
