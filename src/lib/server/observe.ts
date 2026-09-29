@@ -53,6 +53,7 @@ import {
 	newPresence,
 	followPlayer,
 	persistPresence,
+	sideMoved,
 	type Presence,
 	type PresenceDiff
 } from './sessions';
@@ -511,7 +512,10 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 	if (hadFailed || started - m.identity.checkedAt >= IDENTITY_TTL_MS)
 		await refreshIdentity(client, m, started);
 	if (status) await refreshUptime(client, m);
-	if (!m.presence.loaded) await loadPresence(env.db, server.id, m.presence);
+	// The factions on the scoreboard: any other side (the game's holding team between matches) is
+	// no pick of a side.
+	const teams = m.status?.scores.map((f) => f.name);
+	if (!m.presence.loaded) await loadPresence(env.db, server.id, m.presence, teams);
 
 	// Joins are trusted only when the previous look at the player list is recent enough that
 	// nobody could have come and gone between the two. The first look after a start, a tier
@@ -522,9 +526,6 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 		prevPlayersAt > 0 &&
 		!wasOffline &&
 		gapMs <= 2 * Math.max(m.playersIntervalMs, 1000) + 1000;
-	// The factions on the scoreboard: any other side (the game's holding team between matches) is
-	// no pick of a side.
-	const teams = m.status?.scores.map((f) => f.name);
 	const diff: PresenceDiff = players
 		? diffPresence(m.presence, players, started, LEAVE_GRACE_MS, prevPlayersAt, teams)
 		: { joined: [], left: [], stayed: [], factioned: [], renamed: [], returned: [] };
@@ -664,8 +665,12 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 			if (t) t.dirty = true;
 		}
 	}
+	// A side that changed is written at this look, not at the heartbeat (sessions.ts).
 	const presenceDue =
-		diff.joined.length > 0 || diff.left.length > 0 || (heartbeatDue && diff.stayed.length > 0);
+		diff.joined.length > 0 ||
+		diff.left.length > 0 ||
+		(heartbeatDue && diff.stayed.length > 0) ||
+		diff.stayed.some((x) => sideMoved(x.session));
 	if (riskWaitNote.length) ev.updates.push(...riskWaitNote);
 	const needWrite =
 		presenceDue || ev.intents.length > 0 || ev.updates.length > 0 || liveDue || sampleDue;
@@ -779,7 +784,13 @@ async function observationFailed(
 		await withOwnedTransaction(env, async (tx) => {
 			if (m.failures >= OFFLINE_AFTER_FAILURES) {
 				// Close every open session once; a rollback below reloads the map so this retries.
-				if (!m.presence.loaded) await loadPresence(tx, m.server.id, m.presence);
+				if (!m.presence.loaded)
+					await loadPresence(
+						tx,
+						m.server.id,
+						m.presence,
+						m.status?.scores.map((f) => f.name)
+					);
 				if (m.presence.open.size) await closeAllSessions(tx, m.presence);
 				// Everyone's line of the match as it stood, to the match still open; the tallies end
 				// with the sessions (after the commit, so a rollback keeps them for the retry).

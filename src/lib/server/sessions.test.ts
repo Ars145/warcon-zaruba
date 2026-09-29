@@ -31,6 +31,7 @@ const open = (steamId: string): OpenSession => ({
 	joinedAt: 1000,
 	lastSeen: 2000,
 	writtenAt: 2000,
+	writtenTeam: null,
 	firstVisit: false,
 	lastFaction: null,
 	team: null
