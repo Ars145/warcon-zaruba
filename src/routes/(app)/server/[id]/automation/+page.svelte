@@ -3,6 +3,7 @@
 	import { api, errorMessage } from '$lib/api';
 	import { fmtAgo, fmtSpan, fmtTime, mapLabel } from '$lib/format';
 	import { can } from '$lib/capabilities';
+	import { causeKind, causeLabel, knownCauses } from '$lib/causes';
 	import { isSteamId } from '$lib/steam-profiles';
 	import { toast } from '$lib/toast.svelte';
 	import { confirmDialog } from '$lib/confirm.svelte';
@@ -174,6 +175,12 @@
 			blurb: 'Flag players who get kills too fast, or too many headshots, for staff to check.'
 		},
 		{
+			kind: 'kill_distance',
+			group: 'Players',
+			label: 'Kill distance watch',
+			blurb: 'Flag, kick or ban players who kill with a weapon from further than it reaches.'
+		},
+		{
 			kind: 'two_teams',
 			group: 'Players',
 			label: 'Two-team mode',
@@ -195,7 +202,11 @@
 	const GROUPS: Group[] = ['Messages', 'Players', 'Server'];
 	/** The outbox action as the table shows it: a flag sends nothing to the game, so it reads as one. */
 	const actionLabel = (action: string) =>
-		action === 'name_flag' || action === 'kill_rate_flag' ? 'flag' : action;
+		action === 'name_flag' || action === 'kill_rate_flag' || action === 'kill_distance_flag'
+			? 'flag'
+			: action === 'panel_ban'
+				? 'ban'
+				: action;
 	const label = (kind: TriggerKind) => KINDS.find((k) => k.kind === kind)?.label ?? kind;
 	const blurb = (kind: TriggerKind) => KINDS.find((k) => k.kind === kind)?.blurb ?? '';
 	/** Why a kind cannot run on this server yet, or '' when it can. */
@@ -203,6 +214,7 @@
 		switch (kind) {
 			case 'team_kill':
 			case 'kill_rate':
+			case 'kill_distance':
 				return data.feed
 					? ''
 					: 'Needs the kill feed, which is off on this server. Turn it on under Config.';
@@ -224,9 +236,38 @@
 	 */
 	let canSlotHere = $derived(can(data.server.caps, 'slots.manage'));
 	let canSlotOrg = $derived(can(data.server.caps, 'lists.reserve'));
+	/**
+	 * what a Kill distance rule may do: flag or kick (Kick, kill, move), ban on this server's list
+	 * (Bans) or the org's (Org ban list)
+	 */
+	let canModerate = $derived(can(data.server.caps, 'players.moderate'));
+	let canBanHere = $derived(can(data.server.caps, 'bans.manage'));
+	let canBanOrg = $derived(can(data.server.caps, 'lists.ban'));
+	/** Charges that are placed and set off from anywhere: how far away the killer was says nothing. */
+	const PLACED = new Set([
+		'id.item.atmine',
+		'id.item.claymore',
+		'id.item.c4explosive',
+		'id.item.ied.explosive'
+	]);
+	/**
+	 * The weapons a Kill distance rule can watch: the hand-held ones the panel names but placed
+	 * charges, and any the rule already holds.
+	 */
+	const weaponChoices = (chosen: string[]) => {
+		const out = new Map<string, { cause: string; label: string }>();
+		for (const c of knownCauses())
+			if (causeKind(c.cause) === 'weapon' && !PLACED.has(c.cause.toLowerCase()))
+				out.set(c.cause.toLowerCase(), c);
+		for (const c of chosen)
+			if (!out.has(c.toLowerCase())) out.set(c.toLowerCase(), { cause: c, label: causeLabel(c) });
+		return [...out.values()].sort((a, b) => a.label.localeCompare(b.label));
+	};
+	const holds = (list: string[], cause: string) =>
+		list.some((c) => c.toLowerCase() === cause.toLowerCase());
 	/** A kind that lacks what it needs stays in the menu, greyed, with the reason in a few words. */
 	const short = (kind: TriggerKind): string =>
-		kind === 'team_kill' || kind === 'kill_rate'
+		kind === 'team_kill' || kind === 'kill_rate' || kind === 'kill_distance'
 			? 'needs the kill feed'
 			: kind === 'risk_kick'
 				? 'needs a Steam key'
@@ -352,6 +393,12 @@
 		headshotMinKills: number;
 		closedFaction: string;
 		teamNames: Record<string, string>;
+		causes: string[];
+		minDistanceM: number;
+		count: number;
+		distanceAction: 'flag' | 'kick' | 'ban';
+		banDays: number;
+		banScope: 'server' | 'org';
 	}
 	/** WARDOGS' factions, offered for Two-team mode; a name the game adds later can still be typed. */
 	const FACTIONS = ['Lonestar', 'Valkyra', 'Manticore'];
@@ -455,7 +502,9 @@
 					? 'Your name is not allowed on this server: {why}.'
 					: kind === 'ping_kick'
 						? 'Ping too high for too long.'
-						: 'Your account does not meet this server’s requirements.'
+						: kind === 'kill_distance'
+							? 'Impossible kill: {weapon} from {distance} m.'
+							: 'Your account does not meet this server’s requirements.'
 			),
 			leadMinutes: n('leadMinutes', 30),
 			leadMessage: s(
@@ -491,7 +540,22 @@
 			headshotMinKills: n('headshotMinKills', 15),
 			closedFaction: s('closedFaction', 'Lonestar'),
 			teamNames:
-				c.names && typeof c.names === 'object' ? { ...(c.names as Record<string, string>) } : {}
+				c.names && typeof c.names === 'object' ? { ...(c.names as Record<string, string>) } : {},
+			causes: Array.isArray(c.causes)
+				? [...(c.causes as string[])]
+				: ['Id.Item.Defibrillator.Standard'],
+			minDistanceM: n('minDistanceM', 100),
+			count: n('count', 2),
+			// a new rule kicks, or bans for an author who may ban but not kick
+			distanceAction:
+				c.action === 'flag' || c.action === 'kick' || c.action === 'ban'
+					? c.action
+					: canModerate || (!canBanHere && !canBanOrg)
+						? 'kick'
+						: 'ban',
+			banDays: n('banDays', 0),
+			// a new rule bans where its author may: this server's list first
+			banScope: c.banScope === 'org' ? 'org' : t || canBanHere || !canBanOrg ? 'server' : 'org'
 		};
 		dry = null;
 		pendingSel =
@@ -601,6 +665,17 @@
 					maxKills: Number(f.maxKills),
 					headshotPct: Number(f.headshotPct),
 					headshotMinKills: Number(f.headshotMinKills),
+					cooldownMinutes: Number(f.cooldownMinutes)
+				};
+			case 'kill_distance':
+				return {
+					causes: f.causes,
+					minDistanceM: Number(f.minDistanceM),
+					count: Number(f.count),
+					action: f.distanceAction,
+					banDays: Number(f.banDays),
+					banScope: f.banScope,
+					reason: f.reason,
 					cooldownMinutes: Number(f.cooldownMinutes)
 				};
 			case 'two_teams':
@@ -777,6 +852,21 @@
 					.filter(Boolean)
 					.join(' or ')
 					.concat(` in ${c.windowMinutes} min · flag only · again after ${c.cooldownMinutes} min`);
+			case 'kill_distance': {
+				const causes = (c.causes as string[] | undefined) ?? [];
+				const weapons =
+					causes.length > 3
+						? `${causes.length} weapons`
+						: causes.map((x) => causeLabel(x)).join(', ') || 'no weapon';
+				const days = Number(c.banDays);
+				const act =
+					c.action === 'ban'
+						? `ban ${c.banScope === 'org' ? 'on every server' : 'here'} ${days ? `for ${days} day${days === 1 ? '' : 's'}` : 'for good'}`
+						: c.action === 'kick'
+							? 'kick'
+							: `flag · again after ${c.cooldownMinutes} min`;
+				return `${weapons} from ${c.minDistanceM} m · ${c.count === 1 ? '1 kill' : `${c.count} kills in a match`} · ${act}`;
+			}
 			case 'two_teams': {
 				const names = Object.entries((c.names as Record<string, string> | undefined) ?? {}).map(
 					([k, v]) => `${k} as ${v}`
@@ -1759,6 +1849,141 @@
 					<p class="note">
 						Counts kills with hand-held weapons from the kill feed. A flag goes to the audit trail
 						and Discord; nobody is kicked.
+					</p>
+				{:else if f.kind === 'kill_distance'}
+					<fieldset class="space-y-1.5 text-[13px]">
+						<legend class="field-label">Kills with</legend>
+						<div class="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-3">
+							{#each weaponChoices(f.causes) as w (w.cause)}
+								<label class="flex items-center gap-2"
+									><input
+										type="checkbox"
+										checked={holds(f.causes, w.cause)}
+										onchange={(e) =>
+											(f.causes = e.currentTarget.checked
+												? [...f.causes, w.cause]
+												: f.causes.filter((c) => c.toLowerCase() !== w.cause.toLowerCase()))}
+									/>
+									{w.label}</label
+								>
+							{/each}
+						</div>
+					</fieldset>
+					<fieldset class="space-y-1.5 text-[13px]">
+						<legend class="field-label">Catch a player at</legend>
+						<div class="flex flex-wrap items-center gap-2">
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="1"
+								max="100"
+								bind:value={f.count}
+								aria-label="Catch at, kills in a match"
+								required
+							/>
+							such kill{Number(f.count) === 1 ? '' : 's'} in a match, from at least
+							<input
+								class="input w-24 text-right"
+								type="number"
+								min="1"
+								max="20000"
+								bind:value={f.minDistanceM}
+								aria-label="From at least, metres"
+								required
+							/>
+							m
+						</div>
+					</fieldset>
+					<fieldset class="space-y-1.5 text-[13px]">
+						<legend class="field-label">Then</legend>
+						<label class="flex flex-wrap items-center gap-2 {canModerate ? '' : 'text-mist-600'}"
+							><input
+								type="radio"
+								value="flag"
+								bind:group={f.distanceAction}
+								disabled={!canModerate}
+							/>
+							Flag for staff
+							<span class="text-mist-600">(audit trail and Discord)</span></label
+						>
+						<label class="flex items-center gap-2 {canModerate ? '' : 'text-mist-600'}"
+							><input
+								type="radio"
+								value="kick"
+								bind:group={f.distanceAction}
+								disabled={!canModerate}
+							/> Kick</label
+						>
+						<label class="flex items-center gap-2 {canBanHere || canBanOrg ? '' : 'text-mist-600'}"
+							><input
+								type="radio"
+								value="ban"
+								bind:group={f.distanceAction}
+								disabled={!canBanHere && !canBanOrg}
+							/> Ban</label
+						>
+						{#if f.distanceAction === 'ban'}
+							<div class="space-y-1.5 pl-5">
+								<div class="flex flex-wrap gap-x-4 gap-y-1">
+									<label class="flex items-center gap-2 {canBanHere ? '' : 'text-mist-600'}"
+										><input
+											type="radio"
+											bind:group={f.banScope}
+											value="server"
+											disabled={!canBanHere}
+										/> on this server</label
+									>
+									<label class="flex items-center gap-2 {canBanOrg ? '' : 'text-mist-600'}"
+										><input
+											type="radio"
+											bind:group={f.banScope}
+											value="org"
+											disabled={!canBanOrg}
+										/> on every server in the organisation</label
+									>
+								</div>
+								<div class="flex flex-wrap items-center gap-2">
+									for
+									<input
+										class="input w-20 text-right"
+										type="number"
+										min="0"
+										max="3650"
+										bind:value={f.banDays}
+										aria-label="Ban for, days"
+										required
+									/>
+									days <span class="text-mist-600">(0 is for good)</span>
+								</div>
+							</div>
+						{:else if f.distanceAction === 'flag'}
+							<div class="flex flex-wrap items-center gap-2 pl-5">
+								again after
+								<input
+									class="input w-20 text-right"
+									type="number"
+									min="1"
+									max="1440"
+									bind:value={f.cooldownMinutes}
+									aria-label="Flag again after, minutes"
+									required
+								/>
+								minutes
+							</div>
+						{/if}
+					</fieldset>
+					{#if f.distanceAction !== 'flag'}
+						<fieldset class="space-y-2">
+							<legend class="field-label"
+								>{f.distanceAction === 'ban' ? 'Ban reason' : 'Kick reason'}, shown to the player</legend
+							>
+							<input class="input" type="text" bind:value={f.reason} maxlength="200" />
+							{@render placeholders(['weapon', 'distance', 'count', 'name', 'server'])}
+						</fieldset>
+					{/if}
+					<p class="note">
+						The distance is the kill feed's, between killer and victim. A ban goes on the ban list
+						like one added by hand, and is lifted there.
 					</p>
 				{:else if f.kind === 'seed_reward'}
 					<fieldset class="space-y-1.5 text-[13px]">
