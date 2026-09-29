@@ -11,7 +11,7 @@ import { forgetMemory, memoryFor, memoryOf } from '$lib/server/observe';
 import { startDelivery, stopDelivery } from '$lib/server/outbox';
 import { enabledTriggers, invalidateTriggers } from '$lib/server/triggers';
 import { twoTeamsSettingsKey, validateTwoTeams } from '$lib/server/two-teams';
-import { WardogsClient } from '$lib/server/rcon';
+import { GameError, WardogsClient } from '$lib/server/rcon';
 import type { Player } from '$lib/types';
 import { subscribe } from '$lib/server/events';
 import { hasTestDb, testEnv } from './db';
@@ -42,6 +42,10 @@ describe.skipIf(!hasTestDb)('Two-team mode at delivery', () => {
 	let spy: ReturnType<typeof spyOn>;
 	let renewing: ReturnType<typeof setInterval>;
 	const requests: string[] = [];
+	/** when each request reached the stand-in game */
+	const times: number[] = [];
+	/** players whose kill the stand-in game refuses for sending too fast */
+	const refuseKillOf = new Set<string>();
 	/** the server's Two-team rule, closing Lonestar, whose moves these rows are */
 	let ruleId: string;
 
@@ -70,6 +74,17 @@ describe.skipIf(!hasTestDb)('Two-team mode at delivery', () => {
 				({
 					json: async (method: string, path: string) => {
 						requests.push(`${method} ${path}`);
+						times.push(Date.now());
+						const killOf = /^\/v1\/players\/(\d+)\/kill$/.exec(path)?.[1];
+						if (method === 'POST' && killOf && refuseKillOf.has(killOf)) {
+							const err = new GameError(
+								429,
+								'The game server is rate limiting this panel (Request rate exceeded); retry in 2 s.',
+								'rate_limited'
+							);
+							err.retryAfterMs = 2000;
+							throw err;
+						}
 						return { ok: true };
 					}
 				}) as unknown as WardogsClient
@@ -154,6 +169,43 @@ describe.skipIf(!hasTestDb)('Two-team mode at delivery', () => {
 		]);
 		expect(requests.slice(4)).toEqual([`PATCH /v1/players/${Y}`, `POST /v1/players/${Y}/kill`]);
 		await stopDelivery();
+	}, 30_000);
+
+	test('a move whose kill is refused for sending too fast says so, and holds the server', async () => {
+		const m = memoryOf(w.server.id)!;
+		m.players = [on(X, 'Lonestar'), on(Y, 'Lonestar')];
+		m.playersAt = Date.now();
+		refuseKillOf.add(X);
+		const from = requests.length;
+		try {
+			const ids = (
+				await env.db
+					.insert(outbox)
+					.values([move(X), move(Y)])
+					.returning({ id: outbox.id })
+			).map((r) => r.id);
+			startDelivery(env);
+			await until(async () => (await rowsOf(ids)).every((r) => r.doneAt !== null));
+			const rows = await rowsOf(ids);
+			expect(rows.map((r) => [r.state, r.outcome])).toEqual([
+				[
+					'delivered',
+					'Moved to Valkyra. The game refused the kill for sending too fast, so they stay where they are until they next die.'
+				],
+				['delivered', 'Moved to Valkyra and killed, so they respawn on the new side.']
+			]);
+			expect(requests.slice(from)).toEqual([
+				`PATCH /v1/players/${X}`,
+				`POST /v1/players/${X}/kill`,
+				`PATCH /v1/players/${Y}`,
+				`POST /v1/players/${Y}/kill`
+			]);
+			// Y's move waited out the two seconds the game asked for.
+			expect(times[from + 2] - times[from + 1]).toBeGreaterThanOrEqual(1900);
+		} finally {
+			refuseKillOf.clear();
+			await stopDelivery();
+		}
 	}, 30_000);
 
 	test('changing, switching off or deleting the rule drops its queued moves; a new name does not', async () => {

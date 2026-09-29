@@ -388,8 +388,9 @@ async function release(env: Env, row: OutboxRow): Promise<void> {
 
 /**
  * Sends one row and records what happened. 'held': the server is held and this row was not sent;
- * 'refused': the game refused this row for sending too fast (it is failed) and the server is now
- * held. Either way the chain puts the rest back.
+ * 'refused': the game refused this row, or a later step of it, for sending too fast (a refused row
+ * is failed; a move whose kill was refused is delivered) and the server is now held. Either way
+ * the chain puts the rest back.
  */
 async function deliverOne(env: Env, row: OutboxRow): Promise<'held' | 'refused' | void> {
 	if (row.action === 'seed_reward') return deliverSeedReward(env, row);
@@ -430,6 +431,12 @@ async function deliverOne(env: Env, row: OutboxRow): Promise<'held' | 'refused' 
 			settings().outboxLeaseMs
 		);
 		await finish(env, row, 'delivered', messageOf(result) || row.okMessage);
+		// Done, but a later step was refused for sending too fast (changeTeam's kill): hold the rest.
+		const wait = retryAfterOf(result);
+		if (wait) {
+			held.set(row.serverId, Math.max(held.get(row.serverId) ?? 0, Date.now() + wait));
+			return 'refused';
+		}
 	} catch (err) {
 		if (err instanceof Skipped) return finish(env, row, 'skipped', err.message);
 		if (err instanceof Held) {
@@ -543,6 +550,12 @@ async function deliverSeedReward(env: Env, row: OutboxRow): Promise<void> {
 		stats.inFlight--;
 	}
 }
+
+/** The wait an action's answer asks for (changeTeam's refused kill), or 0. */
+const retryAfterOf = (r: unknown): number =>
+	r && typeof r === 'object' && typeof (r as { retryAfterMs?: unknown }).retryAfterMs === 'number'
+		? (r as { retryAfterMs: number }).retryAfterMs
+		: 0;
 
 const messageOf = (r: unknown): string =>
 	r && typeof r === 'object' && typeof (r as { message?: unknown }).message === 'string'
