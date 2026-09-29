@@ -528,7 +528,9 @@ export const ACTIONS: Record<string, ActionDef> = {
 		run: (c, p) => c.json('POST', `/v1/players/${steamId(p.steamId)}/kill`)
 	},
 	// As the official console does it: move the faction, then kill the player so they respawn on the
-	// new side. A failed kill (no living character) is not an error; the move already happened.
+	// new side. A failed kill is not an error; the move already happened. A kill refused for sending
+	// too fast says so, and carries the wait the game asked for (`retryAfterMs`) so a caller can
+	// hold off the server; it is not sent again, since the move is done.
 	changeTeam: {
 		cap: 'players.moderate',
 		mutating: true,
@@ -541,18 +543,23 @@ export const ACTIONS: Record<string, ActionDef> = {
 			const id = steamId(p.steamId);
 			const moved = await c.json('PATCH', `/v1/players/${id}`, { faction });
 			let respawned = true;
+			let retryAfterMs = 0;
 			try {
 				await c.json('POST', `/v1/players/${id}/kill`);
 			} catch (err) {
 				if (!(err instanceof GameError)) throw err;
 				respawned = false;
+				if (err.code === 'rate_limited') retryAfterMs = err.retryAfterMs || 5000;
 			}
 			return {
 				...moved,
 				respawned,
+				...(retryAfterMs ? { retryAfterMs } : {}),
 				message: respawned
 					? `Moved to ${faction} and killed, so they respawn on the new side.`
-					: `Moved to ${faction}. No living character to kill, so they spawn on the new side.`
+					: retryAfterMs
+						? `Moved to ${faction}. The game refused the kill for sending too fast, so they stay where they are until they next die.`
+						: `Moved to ${faction}. No living character to kill, so they spawn on the new side.`
 			};
 		}
 	},

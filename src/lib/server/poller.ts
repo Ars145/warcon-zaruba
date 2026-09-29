@@ -147,7 +147,8 @@ export async function stopPoller(): Promise<void> {
 	globalThis.__warconPoller = undefined;
 	if (globalThis.__warconRenew) clearInterval(globalThis.__warconRenew);
 	globalThis.__warconRenew = undefined;
-	stopDelivery();
+	// A pass caught claiming puts its rows back, which needs the lease: before it is given up.
+	await stopDelivery();
 	stopJsonWebhookPosts();
 	stopStatusMirror();
 	await stopReserveWatch(); // zaruba: couch reserve

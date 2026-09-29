@@ -13,6 +13,8 @@ export const LEASE_MS = 15_000;
 const token = crypto.randomUUID();
 let owner = false;
 let since = 0;
+/** When this process's current period as owner began, by its own clock (see ownedSince). */
+let sinceHere = 0;
 let lastRenewAt = 0;
 
 export class LostOwnership extends Error {
@@ -42,7 +44,10 @@ export async function acquireOrRenew(env: Env, label: string): Promise<boolean> 
 	if (now) {
 		// acquired_at is reset whenever the token changed hands, even if we never saw the loss.
 		const period = rows[0].acquiredAt.getTime();
-		if (!owner || period !== since) console.log(`[warcon] this process owns the worker (${label})`);
+		if (!owner || period !== since) {
+			console.log(`[warcon] this process owns the worker (${label})`);
+			sinceHere = Date.now();
+		}
 		since = period;
 	}
 	if (!now && owner) console.warn('[warcon] lost the worker lease; another process owns it');
@@ -61,6 +66,12 @@ export async function releaseOwnership(env: Env): Promise<void> {
 		.where(eq(workerOwnership.token, token))
 		.catch(() => {});
 }
+
+/**
+ * When this process last became the owner, by its own clock: anything it observed before then (a
+ * player list) belongs to a period in which another process may have acted.
+ */
+export const ownedSince = (): number => sinceHere;
 
 /** Owner, and the last renewal landed within the lease: a stalled renewal is a lost lease. */
 export const isOwner = (): boolean => owner && Date.now() - lastRenewAt < LEASE_MS;

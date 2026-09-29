@@ -11,6 +11,8 @@
 //                (kill-rate.ts, acted on in feed-events.ts)
 //   seed_reward  hand players who stay through a low population a reserved slot, on this server
 //                or across the org
+//   two_teams    close one faction and move its players to the smaller of the other two
+//                (two-teams.ts)
 // The worker evaluates them on every observation and writes the actions they want to the outbox
 // (outbox.ts delivers, and every delivery lands in the audit trail as category "trigger"). A dry
 // run replays the last 24 hours from the samples and sessions tables so a rule can be checked
@@ -19,8 +21,10 @@ import { and, asc, desc, eq, gte, inArray, isNotNull, or, sql } from 'drizzle-or
 import type { Env } from './env';
 import { ApiError, int, newId, str } from './http';
 import { writeAudit } from './audit';
+import { emit } from './events';
 import {
 	kills,
+	outbox,
 	playerSessions,
 	samples,
 	serverLive,
@@ -82,6 +86,18 @@ import {
 	type KillRateConfig,
 	type RateKill
 } from './kill-rate';
+import {
+	emptyTwoTeamsState,
+	teamName,
+	TWO_TEAMS_ASK_WINDOW_MS,
+	TWO_TEAMS_MAX_ASKS,
+	TWO_TEAMS_MAX_MOVES_PER_LOOK,
+	TWO_TEAMS_MOVES_PER_SECOND,
+	twoTeamsSettingsKey,
+	twoTeamsStep,
+	type TwoTeamsConfig,
+	type TwoTeamsState
+} from './two-teams';
 import { fmtUptime, RESTART_AFTER_HOURS, restartWindow } from '$lib/uptime';
 import { DEFAULT_SCORE_CAP, scoreCapOf } from '$lib/match';
 import { settings } from './settings';
@@ -142,7 +158,8 @@ const RULE_NEEDS: Record<Exclude<TriggerKind, 'seed_reward'>, [Capability, strin
 	name_filter: ['players.moderate', 'kicks players'],
 	ping_kick: ['players.moderate', 'kicks players'],
 	team_kill: ['players.moderate', 'kicks players'],
-	kill_rate: ['players.moderate', 'flags players']
+	kill_rate: ['players.moderate', 'flags players'],
+	two_teams: ['players.moderate', 'moves players between teams']
 };
 
 /** What one rule needs of whoever saves it. The Seeding reward reserves slots: here, or on the organisation's list. */
@@ -153,19 +170,28 @@ export function ruleNeeds(kind: TriggerKind, config: unknown): [Capability, stri
 		: ['slots.manage', 'reserves slots on this server'];
 }
 
+/** What else a rule needs when it also messages players: a Two-team mode rule with a whisper. */
+function ruleAlsoNeeds(kind: TriggerKind, config: unknown): [Capability, string] | null {
+	if (kind === 'two_teams' && str((config as Partial<TwoTeamsConfig> | null)?.message))
+		return ['chat.send', 'whispers players'];
+	return null;
+}
+
 export function requireRuleCaps(
 	kind: TriggerKind,
 	config: unknown,
 	server: ServerRow,
 	access: ServerAccess
 ): void {
-	const [cap, does] = ruleNeeds(kind, config);
-	if (access.caps.has(cap)) return;
-	throw new ApiError(
-		403,
-		`A ${TRIGGER_LABELS[kind]} rule ${does}, which needs '${CAPABILITY_INFO[cap].label}' on ${server.name}; your role '${access.roleName}' does not include it.`,
-		'forbidden'
-	);
+	for (const need of [ruleNeeds(kind, config), ruleAlsoNeeds(kind, config)]) {
+		if (!need || access.caps.has(need[0])) continue;
+		const [cap, does] = need;
+		throw new ApiError(
+			403,
+			`A ${TRIGGER_LABELS[kind]} rule ${does}, which needs '${CAPABILITY_INFO[cap].label}' on ${server.name}; your role '${access.roleName}' does not include it.`,
+			'forbidden'
+		);
+	}
 }
 
 export async function createTrigger(
@@ -181,33 +207,39 @@ export async function createTrigger(
 	const config = validateConfig(kind, body.config);
 	requireRuleCaps(kind, config, server, access);
 	const name = str(body.name, 60) || TRIGGER_LABELS[kind];
-	// Seed time is one count per server, taken against one threshold, so one rule holds it.
-	if (kind === 'seed_reward') {
-		const [other] = await env.db
-			.select({ name: triggers.name })
-			.from(triggers)
-			.where(and(eq(triggers.serverId, server.id), eq(triggers.kind, 'seed_reward')))
-			.limit(1);
-		if (other)
-			throw new ApiError(
-				409,
-				`This server already has a ${TRIGGER_LABELS[kind]} rule ("${other.name}"); edit that one instead.`,
-				'duplicate'
-			);
-	}
-	const [row] = await env.db
-		.insert(triggers)
-		.values({
-			id: newId(),
-			serverId: server.id,
-			orgId: server.orgId,
-			kind,
-			name,
-			enabled: !!body.enabled,
-			config,
-			createdBy: user.id
-		})
-		.returning();
+	const row = await env.db.transaction(async (tx) => {
+		// Seed time is one count per server, taken against one threshold, so one rule holds it. Two
+		// Two-team rules closing different factions would move a player back and forth, killing them
+		// at every move. Saves to one server take turns, so two at once cannot both find none.
+		if (kind === 'seed_reward' || kind === 'two_teams') {
+			await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`triggers:${server.id}`}))`);
+			const [other] = await tx
+				.select({ name: triggers.name })
+				.from(triggers)
+				.where(and(eq(triggers.serverId, server.id), eq(triggers.kind, kind)))
+				.limit(1);
+			if (other)
+				throw new ApiError(
+					409,
+					`This server already has a ${TRIGGER_LABELS[kind]} rule ("${other.name}"); edit that one instead.`,
+					'duplicate'
+				);
+		}
+		const [inserted] = await tx
+			.insert(triggers)
+			.values({
+				id: newId(),
+				serverId: server.id,
+				orgId: server.orgId,
+				kind,
+				name,
+				enabled: !!body.enabled,
+				config,
+				createdBy: user.id
+			})
+			.returning();
+		return inserted;
+	});
 	gateway().triggersChanged(server.id);
 	await writeAudit(env, req, {
 		actor: user,
@@ -246,6 +278,8 @@ export async function updateTrigger(
 		.set(set)
 		.where(eq(triggers.id, row.id))
 		.returning();
+	if (row.kind === 'two_teams' && (set.config !== undefined || set.enabled === false))
+		await dropQueued(env, row.id, 'The rule was changed before this was sent.');
 	gateway().triggersChanged(server.id);
 	await writeAudit(env, req, {
 		actor: user,
@@ -269,6 +303,8 @@ export async function deleteTrigger(
 ): Promise<void> {
 	const row = await triggerOf(env, server.id, id);
 	await env.db.delete(triggers).where(eq(triggers.id, row.id));
+	if (row.kind === 'two_teams')
+		await dropQueued(env, row.id, 'The rule was deleted before this was sent.');
 	gateway().triggersChanged(server.id);
 	await writeAudit(env, req, {
 		actor: user,
@@ -280,6 +316,21 @@ export async function deleteTrigger(
 		outcome: 'ok',
 		detail: { triggerId: row.id, kind: row.kind }
 	});
+}
+
+/**
+ * A Two-team mode rule's queued moves and whispers were decided under settings that no longer hold
+ * (a queued move from the old closed faction could now take a player between the two open sides):
+ * they are skipped, kept with the reason. A row already being sent goes out.
+ */
+async function dropQueued(env: Env, triggerId: string, why: string): Promise<void> {
+	const dropped = await env.db
+		.update(outbox)
+		.set({ state: 'skipped', outcome: why, doneAt: new Date() })
+		.where(and(eq(outbox.triggerId, triggerId), eq(outbox.state, 'pending')))
+		.returning({ id: outbox.id, serverId: outbox.serverId });
+	for (const r of dropped)
+		emit({ type: 'outbox', serverId: r.serverId, id: r.id, state: 'skipped' });
 }
 
 // ---- evaluation -----------------------------------------------------------------------------------
@@ -468,6 +519,9 @@ export async function evaluateTriggers(
 					break;
 				case 'name_filter':
 					evalNameFilter(ctx, row, row.config as NameFilterConfig, out);
+					break;
+				case 'two_teams':
+					evalTwoTeams(ctx, row, row.config as TwoTeamsConfig, out);
 					break;
 			}
 		} catch (err) {
@@ -754,6 +808,87 @@ function evalPingKick(ctx: TickContext, row: TriggerRow, cfg: PingKickConfig, ou
 		};
 }
 
+/**
+ * Each Two-team mode rule's moves in flight, players told and asks, in this worker's memory: a
+ * restart forgets them, which costs at most a move asked for again (delivery waits for a newer
+ * player list before sending it) or a whisper sent again. A change to the rule's settings starts
+ * over; a deleted rule's memory stays until the worker restarts (one small entry).
+ */
+const twoTeamsMemory = new Map<string, { config: string; state: TwoTeamsState }>();
+
+function evalTwoTeams(ctx: TickContext, row: TriggerRow, cfg: TwoTeamsConfig, out: Evaluation) {
+	if (!ctx.playersObserved) return;
+	// The match's factions, less the closed one; nothing is placed until both others are known.
+	const open = (ctx.status.scores ?? [])
+		.map((s) => s.name)
+		.filter((f) => f && f !== cfg.closedFaction);
+	const now = ctx.ts.getTime();
+	// The same fingerprint rides on every move and whisper, for delivery to check against.
+	const config = twoTeamsSettingsKey(cfg);
+	let memory = twoTeamsMemory.get(row.id);
+	if (memory?.config !== config)
+		twoTeamsMemory.set(row.id, (memory = { config, state: emptyTwoTeamsState() }));
+	const perLook = Math.min(
+		TWO_TEAMS_MAX_MOVES_PER_LOOK,
+		Math.max(
+			1,
+			Math.floor((TWO_TEAMS_MOVES_PER_SECOND * Math.max(ctx.playersIntervalMs, 1000)) / 1000)
+		)
+	);
+	const step = twoTeamsStep(cfg, memory.state, ctx.players, open, now, perLook);
+	// The memory moves on only once this look's moves and whispers are queued: a look whose write
+	// fails is decided again at the next one, rather than remembered as asked.
+	const kept = memory;
+	(out.afterCommit ??= []).push(() => {
+		kept.state = step.state;
+	});
+	for (const m of step.moves)
+		out.intents.push({
+			trigger: row,
+			action: 'changeTeam',
+			params: { steamId: m.steamId, faction: m.to, from: m.from, rule: config },
+			target: m.steamId,
+			okMessage: `Moved ${m.name} to ${teamName(cfg, m.to)}.`,
+			detail: { name: m.name, from: m.from, to: m.to },
+			steamId: m.steamId,
+			dedupeKey: key(row, m.steamId, now)
+		});
+	for (const w of step.whispers)
+		out.intents.push({
+			trigger: row,
+			action: 'whisper',
+			params: {
+				steamId: w.steamId,
+				rule: config,
+				message: renderTemplate(cfg.message, {
+					...vars(
+						ctx,
+						ctx.players.find((p) => p.steamId === w.steamId)
+					),
+					team: teamName(cfg, w.faction)
+				})
+			},
+			target: w.steamId,
+			okMessage: `Whispered ${w.name}.`,
+			detail: { name: w.name, team: teamName(cfg, w.faction) },
+			steamId: w.steamId,
+			dedupeKey: key(row, w.steamId, 'told', now)
+		});
+	const n = step.moves.length;
+	const moving = n === 1 ? `Moving ${step.moves[0].name}` : n ? `Moving ${n} players` : '';
+	const left = step.stopped.length
+		? `left ${step.stopped.map((p) => p.name).join(', ')} on ${cfg.closedFaction}: asked to move ${TWO_TEAMS_MAX_ASKS} times in ${TWO_TEAMS_ASK_WINDOW_MS / 60_000} min`
+		: '';
+	// A player left alone is said once, on the look that stops them, whatever else it does.
+	const result = [moving, left].filter(Boolean).join('; ');
+	if (result)
+		out.updates.push({
+			id: row.id,
+			...(n ? { lastFiredAt: ctx.ts } : {}),
+			lastResult: result[0].toUpperCase() + result.slice(1)
+		});
+}
+
 function evalRestartNotice(
 	ctx: TickContext,
 	row: TriggerRow,
@@ -802,6 +937,7 @@ const matchHeld = new Map<string, HeldMatchEnd>();
 export function forgetRuleMemory(): void {
 	matchHeld.clear();
 	seedState.clear();
+	twoTeamsMemory.clear();
 }
 
 function evalMatchBroadcast(
@@ -1110,6 +1246,12 @@ export async function dryRun(
 	if (kind === 'faction_change') {
 		result.notes.push(
 			'Faction switches are not kept in the session history, so there is nothing to replay; the rule fires live when a player moves from one faction to another.'
+		);
+		return result;
+	}
+	if (kind === 'two_teams') {
+		result.notes.push(
+			'Faction moves are not kept in the session history, so there is nothing to replay. The live rule moves everyone on the closed faction to the smaller of the other two on each fresh player list, retrying a move that has not landed after 30 seconds.'
 		);
 		return result;
 	}

@@ -174,6 +174,12 @@
 			blurb: 'Flag players who get kills too fast, or too many headshots, for staff to check.'
 		},
 		{
+			kind: 'two_teams',
+			group: 'Players',
+			label: 'Two-team mode',
+			blurb: 'Close one faction and move its players to the smaller of the other two.'
+		},
+		{
 			kind: 'seed_reward',
 			group: 'Players',
 			label: 'Seeding reward',
@@ -344,7 +350,11 @@
 		maxKills: number;
 		headshotPct: number;
 		headshotMinKills: number;
+		closedFaction: string;
+		teamNames: Record<string, string>;
 	}
+	/** WARDOGS' factions, offered for Two-team mode; a name the game adds later can still be typed. */
+	const FACTIONS = ['Lonestar', 'Valkyra', 'Manticore'];
 	/** The alphabets a Latin policy can let in, by the name the rule stores and the one people use. */
 	const SCRIPTS: [string, string][] = [
 		['Cyrillic', 'Cyrillic'],
@@ -414,7 +424,9 @@
 						? 'Scheduled restart: the server restarts when this round ends. Rejoin in a minute or two.'
 						: kind === 'seed_reward'
 							? 'Thanks for seeding {server}, {name}: you have a reserved slot until {until}.'
-							: 'Welcome to {server}, {name}! Read the rules with /rules.'
+							: kind === 'two_teams'
+								? 'This server plays two teams: you have been placed on {team}.'
+								: 'Welcome to {server}, {name}! Read the rules with /rules.'
 			),
 			onlyFirstVisit: b('onlyFirstVisit', false),
 			afterFaction: b('afterFaction', false),
@@ -476,7 +488,10 @@
 			windowMinutes: n('windowMinutes', 5),
 			maxKills: n('maxKills', 25),
 			headshotPct: n('headshotPct', 70),
-			headshotMinKills: n('headshotMinKills', 15)
+			headshotMinKills: n('headshotMinKills', 15),
+			closedFaction: s('closedFaction', 'Lonestar'),
+			teamNames:
+				c.names && typeof c.names === 'object' ? { ...(c.names as Record<string, string>) } : {}
 		};
 		dry = null;
 		pendingSel =
@@ -587,6 +602,16 @@
 					headshotPct: Number(f.headshotPct),
 					headshotMinKills: Number(f.headshotMinKills),
 					cooldownMinutes: Number(f.cooldownMinutes)
+				};
+			case 'two_teams':
+				return {
+					closedFaction: f.closedFaction.trim(),
+					names: Object.fromEntries(
+						Object.entries(f.teamNames).filter(
+							([k, v]) => k !== f.closedFaction.trim() && v?.trim()
+						)
+					),
+					message: f.message
 				};
 			case 'seed_reward':
 				return {
@@ -752,6 +777,18 @@
 					.filter(Boolean)
 					.join(' or ')
 					.concat(` in ${c.windowMinutes} min · flag only · again after ${c.cooldownMinutes} min`);
+			case 'two_teams': {
+				const names = Object.entries((c.names as Record<string, string> | undefined) ?? {}).map(
+					([k, v]) => `${k} as ${v}`
+				);
+				return [
+					`${c.closedFaction} closed, its players moved to the smaller side`,
+					names.length ? names.join(', ') : '',
+					c.message ? 'with a whisper' : ''
+				]
+					.filter(Boolean)
+					.join(' · ');
+			}
 			case 'seed_reward':
 				return `${c.minutes} min with ${c.lowAt} or fewer on${c.untilFull === false ? '' : `, staying until ${typeof c.fullAt === 'number' ? `${c.fullAt}+ on` : 'it fills'}`}, within ${c.windowDays} day${c.windowDays === 1 ? '' : 's'} · slot ${c.scope === 'server' ? 'here' : 'on every server'} for ${c.slotDays} day${c.slotDays === 1 ? '' : 's'}${c.message ? ' · with a whisper' : ''}`;
 		}
@@ -1546,6 +1583,62 @@
 						The timer starts on the first high-ping sample. It resets when ping drops to the limit
 						or below, is unavailable, the player leaves, or the player list cannot be sampled on
 						time.
+					</p>
+				{:else if f.kind === 'two_teams'}
+					<fieldset class="space-y-2">
+						<legend class="field-label">Closed faction</legend>
+						<input
+							class="input w-48"
+							type="text"
+							list="two-teams-factions"
+							bind:value={f.closedFaction}
+							maxlength="100"
+							aria-label="Closed faction"
+							required
+						/>
+						<datalist id="two-teams-factions">
+							{#each FACTIONS as x (x)}<option value={x}></option>{/each}
+						</datalist>
+						<p class="text-[12px] text-mist-600">
+							Everyone on it is moved to whichever of the other two has fewer players, then respawns
+							there.
+						</p>
+					</fieldset>
+					<fieldset class="space-y-2">
+						<legend class="field-label">What players call the two sides (optional)</legend>
+						{#each FACTIONS.filter((x) => x !== f.closedFaction.trim()) as x (x)}
+							<div class="flex flex-wrap items-center gap-2 text-[13px]">
+								<span class="w-24">{x}</span>
+								<input
+									class="input w-40"
+									type="text"
+									maxlength="40"
+									placeholder={x}
+									data-plain
+									value={f.teamNames[x] ?? ''}
+									oninput={(e) => (f.teamNames[x] = e.currentTarget.value)}
+									aria-label="Name for {x}"
+								/>
+							</div>
+						{/each}
+						<p class="text-[12px] text-mist-600">
+							Used for {'{team}'} in the whisper, e.g. Red and Green. Empty keeps the faction name.
+						</p>
+					</fieldset>
+					<fieldset class="space-y-2">
+						<legend class="field-label">Whisper once a player is placed (optional)</legend>
+						<input class="input" type="text" bind:value={f.message} maxlength="200" />
+						{@render placeholders(['team', 'name', 'server', 'map'])}
+						<p class="text-[12px] text-mist-600">
+							Sent once per player; they are told again only after two hours away. Empty sends
+							nothing.
+						</p>
+					</fieldset>
+					<p class="note">
+						Players are placed a few at a time as the player list refreshes. A player asked to move
+						three times in ten minutes is left where they are until the ten minutes pass. It never
+						moves players between the two open sides, so a manual switch sticks. One rule per
+						server.
 					</p>
 				{:else if f.kind === 'team_kill'}
 					<fieldset class="space-y-2">

@@ -141,7 +141,7 @@ export const SETTINGS = {
 	},
 	outboxLeaseMs: {
 		label: 'Delivery lease',
-		help: 'How long a claimed trigger action may take before another pass may pick it up.',
+		help: "The longest a trigger action waits for its server's turn. One claimed by a worker that then stopped counts as sent with no answer after this long.",
 		unit: 'ms',
 		default: 45_000,
 		min: 5000,
