@@ -79,6 +79,9 @@ What is in the box:
   slots, bans, score tick, sponsor image, a live cash-in-play chart for the current match, and the
   full `ServerSettings.ini` config document as a typed form (or the raw file) with validate/apply,
   revision conflict handling and copy/download.
+- **Group whispers**: one message to everyone on a faction, from the Overview's message box, or to
+  the players ticked on the Players tab. The game has no route for it, so Warcon whispers each of
+  them in turn and says who got it.
 - **Demo mode**: a built-in mock game server so you can try everything before pointing it at a real one.
 
 The protocol was reverse-engineered from `rcon.wardogs.com`; see [docs/wardogs-api.md](docs/wardogs-api.md).
@@ -290,7 +293,7 @@ Org owners and the site owner hold every capability on every server in scope.
 | Capability         | Unlocks                                                                                                                                                                   | viewer | operator | admin |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | -------- | ----- |
 | View               | what is happening on the server: status, players, kills, rotation, who is banned and who holds a reserved slot, analytics, leaderboards, player stats. Every role has it. | ✓      | ✓        | ✓     |
-| Chat               | broadcast, whisper                                                                                                                                                        |        | ✓        | ✓     |
+| Chat               | broadcast; whisper one player, several, or everyone on a faction                                                                                                          |        | ✓        | ✓     |
 | Kick, kill, move   | kick, kill, change team                                                                                                                                                   |        | ✓        | ✓     |
 | Match control      | end/restart match, change map, next map, weather                                                                                                                          |        | ✓        | ✓     |
 | Live rotation      | add, remove and reorder rotation entries on the running server                                                                                                            |        | ✓        | ✓     |
@@ -999,6 +1002,7 @@ game's (a 401 or a 5xx from it becomes a 502), and `error` carries the game's `c
 | `alternators`                       | View              | `map`                                                                                   |
 | `broadcast`                         | Chat              | `message`                                                                               |
 | `whisper`                           | Chat              | `steamId`, `message`                                                                    |
+| `whisperMany`                       | Chat              | `message`, and either `faction` or `steamIds` (a list, up to 200)                       |
 | `kick`                              | Kick, kill, move  | `steamId`, `reason` (optional)                                                          |
 | `kill`                              | Kick, kill, move  | `steamId`                                                                               |
 | `changeTeam`                        | Kick, kill, move  | `steamId`, `faction`                                                                    |
@@ -1021,7 +1025,16 @@ game's (a 401 or a 5xx from it becomes a 502), and `error` carries the game's `c
 | `raw`                               | Raw RCON          | `method`, `path` (a `/v1` route), `body`                                                |
 
 `message` and `reason` are cut at 200 characters; rotation indexes count from 0. A SteamID goes as
-a string: as a JSON number it loses its last digits, so it is refused. The reads answer:
+a string: as a JSON number it loses its last digits, so it is refused.
+
+`whisperMany` reads who is on and whispers each of them in turn, so a faction means whoever is on
+it at that moment. It answers the SteamIDs in three lists: `sent`, `absent` (not on the server, or
+gone before their turn) and `unsent`. A refusal from the game ends the run, as do ten seconds, and
+`stopped` says which, with `retryAfterMs` when the game asked the panel to slow down. Each whisper
+is sent once, so sending to `unsent` again reaches the rest. With no one to whisper it answers 404
+`no_recipients`, and past 300 players a minute on one server 429 `rate_limited`.
+
+The reads answer:
 
 - `status`: the `status` object of the live view, read fresh; `players`: `{"players": […]}` as in
   the live view.
@@ -1397,7 +1410,7 @@ GET  /api/steam/profiles?ids=a,b      GET /api/health
 
 Actions, by the capability each needs: `capabilities status health serverId players maps lightings
 experiences alternators catalog rotation bans reserved sponsor` (View) ·
-`broadcast whisper` (Chat) · `kick kill changeTeam` (Kick, kill, move) · `endMatch restartMatch
+`broadcast whisper whisperMany` (Chat) · `kick kill changeTeam` (Kick, kill, move) · `endMatch restartMatch
 changeMap setWeather setNextMap` (Match control) · `rotationAdd rotationRemove rotationMove
 rotationReorder` (Live rotation) · `ban unban` (Bans) · `reservedAdd reservedRemove` (Reserved
 slots) · `rotationSave rotationSettings` (Save rotation) · `config settings configValidate configApply` (Config &
