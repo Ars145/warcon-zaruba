@@ -84,7 +84,17 @@ import {
 	type KillRateConfig,
 	type RateKill
 } from './kill-rate';
-import { teamName, twoTeamsStep, type TwoTeamsConfig, type TwoTeamsState } from './two-teams';
+import {
+	emptyTwoTeamsState,
+	teamName,
+	TWO_TEAMS_ASK_WINDOW_MS,
+	TWO_TEAMS_MAX_ASKS,
+	TWO_TEAMS_MAX_MOVES_PER_LOOK,
+	TWO_TEAMS_MOVES_PER_SECOND,
+	twoTeamsStep,
+	type TwoTeamsConfig,
+	type TwoTeamsState
+} from './two-teams';
 import { fmtUptime, RESTART_AFTER_HOURS, restartWindow } from '$lib/uptime';
 import { DEFAULT_SCORE_CAP, scoreCapOf } from '$lib/match';
 import { settings } from './settings';
@@ -240,10 +250,7 @@ export async function updateTrigger(
 	if (body.name !== undefined) set.name = str(body.name, 60) || row.name;
 	if (body.enabled !== undefined) set.enabled = !!body.enabled;
 	if (body.config !== undefined) set.config = validateConfig(row.kind, body.config);
-	if (
-		(row.kind === 'ping_kick' || row.kind === 'two_teams') &&
-		(body.config !== undefined || body.enabled !== undefined)
-	)
+	if (row.kind === 'ping_kick' && (body.config !== undefined || body.enabled !== undefined))
 		set.state = null;
 	requireRuleCaps(row.kind, set.config ?? row.config, server, access);
 	if (!Object.keys(set).length) throw new ApiError(400, 'Nothing to update.');
@@ -764,6 +771,14 @@ function evalPingKick(ctx: TickContext, row: TriggerRow, cfg: PingKickConfig, ou
 		};
 }
 
+/**
+ * Each Two-team mode rule's moves in flight, players told and asks, in this worker's memory: a
+ * restart forgets them, which costs at most a move asked for again (delivery waits for a newer
+ * player list before sending it) or a whisper sent again. A change to the rule's settings starts
+ * over; a deleted rule's memory stays until the worker restarts (one small entry).
+ */
+const twoTeamsMemory = new Map<string, { config: string; state: TwoTeamsState }>();
+
 function evalTwoTeams(ctx: TickContext, row: TriggerRow, cfg: TwoTeamsConfig, out: Evaluation) {
 	if (!ctx.playersObserved) return;
 	// The match's factions, less the closed one; nothing is placed until both others are known.
@@ -771,9 +786,24 @@ function evalTwoTeams(ctx: TickContext, row: TriggerRow, cfg: TwoTeamsConfig, ou
 		.map((s) => s.name)
 		.filter((f) => f && f !== cfg.closedFaction);
 	const now = ctx.ts.getTime();
-	const step = twoTeamsStep(cfg, row.state as TwoTeamsState | null, ctx.players, open, now);
-	// The state is written with any intents, and kept in the cached row for the next poll.
-	row.state = step.state;
+	const config = JSON.stringify(cfg);
+	let memory = twoTeamsMemory.get(row.id);
+	if (memory?.config !== config)
+		twoTeamsMemory.set(row.id, (memory = { config, state: emptyTwoTeamsState() }));
+	const perLook = Math.min(
+		TWO_TEAMS_MAX_MOVES_PER_LOOK,
+		Math.max(
+			1,
+			Math.floor((TWO_TEAMS_MOVES_PER_SECOND * Math.max(ctx.playersIntervalMs, 1000)) / 1000)
+		)
+	);
+	const step = twoTeamsStep(cfg, memory.state, ctx.players, open, now, perLook);
+	// The memory moves on only once this look's moves and whispers are queued: a look whose write
+	// fails is decided again at the next one, rather than remembered as asked.
+	const kept = memory;
+	(out.afterCommit ??= []).push(() => {
+		kept.state = step.state;
+	});
 	for (const m of step.moves)
 		out.intents.push({
 			trigger: row,
@@ -805,18 +835,19 @@ function evalTwoTeams(ctx: TickContext, row: TriggerRow, cfg: TwoTeamsConfig, ou
 			steamId: w.steamId,
 			dedupeKey: key(row, w.steamId, 'told', now)
 		});
-	if (!step.changed) return;
 	const n = step.moves.length;
-	out.updates.push(
-		n
-			? {
-					id: row.id,
-					state: step.state,
-					lastFiredAt: ctx.ts,
-					lastResult: n === 1 ? `Moving ${step.moves[0].name}` : `Moving ${n} players`
-				}
-			: { id: row.id, state: step.state }
-	);
+	const moving = n === 1 ? `Moving ${step.moves[0].name}` : n ? `Moving ${n} players` : '';
+	const left = step.stopped.length
+		? `left ${step.stopped.map((p) => p.name).join(', ')} on ${cfg.closedFaction}: asked to move ${TWO_TEAMS_MAX_ASKS} times in ${TWO_TEAMS_ASK_WINDOW_MS / 60_000} min`
+		: '';
+	// A player left alone is said once, on the look that stops them, whatever else it does.
+	const result = [moving, left].filter(Boolean).join('; ');
+	if (result)
+		out.updates.push({
+			id: row.id,
+			...(n ? { lastFiredAt: ctx.ts } : {}),
+			lastResult: result[0].toUpperCase() + result.slice(1)
+		});
 }
 
 function evalRestartNotice(
@@ -867,6 +898,7 @@ const matchHeld = new Map<string, HeldMatchEnd>();
 export function forgetRuleMemory(): void {
 	matchHeld.clear();
 	seedState.clear();
+	twoTeamsMemory.clear();
 }
 
 function evalMatchBroadcast(

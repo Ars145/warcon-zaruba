@@ -1,16 +1,32 @@
 // The Two-team mode rule's pure part: one faction is closed, and everyone on it is moved to
 // whichever of the other two has fewer players, so a three-faction server plays as two big teams.
-// The game has no two-team setting of its own; its overpopulation lock (see the rule's note) sends
-// joiners to the closed, empty faction, and this rule places them from there. No database, no game
-// server; triggers.ts runs the step on each fresh player list and writes the moves to the outbox.
+// The game has no two-team setting of its own; its overpopulation lock sends joiners to the closed,
+// empty faction, and this rule places them from there. No database, no game server: triggers.ts
+// runs the step on each fresh player list, keeps its state in the worker's memory and writes the
+// moves to the outbox.
 import { ApiError, str } from './http';
 
 /** How long a move is waited on before it is asked for again (the player is still on the closed faction). */
 export const TWO_TEAMS_RETRY_MS = 30_000;
 /** A placed player is told once; the note is forgotten after this long away, so a return next day is told again. */
 export const TWO_TEAMS_FORGET_MS = 2 * 3600_000;
-/** How stale a placed player's "last seen" may get before the state is written again. */
-const SEEN_REFRESH_MS = 5 * 60_000;
+/**
+ * Moves asked for per second of the player-list cadence. Each move is two game requests (move,
+ * then kill), so a full server's sort at a match start goes out over half a minute instead of at
+ * once, under the listener's limit on requests from one address.
+ */
+export const TWO_TEAMS_MOVES_PER_SECOND = 3;
+/**
+ * The most moves one look asks for, whatever its cadence: the first look with players back after a
+ * map load comes at the idle cadence (30 s), which would otherwise let most of a server go at once.
+ */
+export const TWO_TEAMS_MAX_MOVES_PER_LOOK = 6;
+/**
+ * A player asked to move this many times within TWO_TEAMS_ASK_WINDOW_MS is left where they are
+ * until the window passes: something keeps putting them back, and every move kills them.
+ */
+export const TWO_TEAMS_MAX_ASKS = 3;
+export const TWO_TEAMS_ASK_WINDOW_MS = 10 * 60_000;
 
 export interface TwoTeamsConfig {
 	/** the faction nobody plays on; its players are moved off it */
@@ -34,12 +50,24 @@ export function validateTwoTeams(c: Record<string, unknown>): TwoTeamsConfig {
 	return { closedFaction, names, message: str(c.message, 200) };
 }
 
+/** What the rule remembers between player lists (the worker's memory, per rule). */
 export interface TwoTeamsState {
 	/** moves asked for and not yet seen landed: SteamID -> target faction and when */
-	moving: Record<string, { to: string; at: number }>;
-	/** moved players already told where they went: SteamID -> last seen on the server */
-	told: Record<string, number>;
+	moving: Map<string, { to: string; at: number }>;
+	/** placed players already told where they went, when there is a whisper: SteamID -> last seen */
+	told: Map<string, number>;
+	/** when each player was asked to move within TWO_TEAMS_ASK_WINDOW_MS, oldest first */
+	asked: Map<string, number[]>;
+	/** players left on the closed faction for being asked too often (said once, in `stopped`) */
+	capped: Set<string>;
 }
+
+export const emptyTwoTeamsState = (): TwoTeamsState => ({
+	moving: new Map(),
+	told: new Map(),
+	asked: new Map(),
+	capped: new Set()
+});
 
 export interface TwoTeamsStep {
 	state: TwoTeamsState;
@@ -47,28 +75,34 @@ export interface TwoTeamsStep {
 	moves: { steamId: string; name: string; from: string; to: string }[];
 	/** moved players now on their side and not told yet */
 	whispers: { steamId: string; name: string; faction: string }[];
-	/** false when the state is unchanged, so nothing needs writing */
-	changed: boolean;
+	/** players the rule has just stopped moving for being asked too often */
+	stopped: { steamId: string; name: string }[];
 }
 
 /**
  * One fresh player list. `open` is the two factions players are placed on (the match's factions
- * minus the closed one). Players already being moved count toward their target, so a burst at a
- * match start splits evenly; a move not seen landed after TWO_TEAMS_RETRY_MS is asked for again.
+ * minus the closed one); at most `maxMoves` moves are asked for. Players already being moved count
+ * toward their target, so a burst at a match start splits evenly; a move not seen landed after
+ * TWO_TEAMS_RETRY_MS is asked for again.
  */
 export function twoTeamsStep(
 	cfg: TwoTeamsConfig,
-	previous: TwoTeamsState | null,
+	previous: TwoTeamsState,
 	players: { steamId: string; name: string; faction: string | null }[],
 	open: string[],
 	now: number,
+	maxMoves: number,
 	random: () => number = Math.random
 ): TwoTeamsStep {
-	const moving = { ...(previous?.moving ?? {}) };
-	const told = { ...(previous?.told ?? {}) };
-	let changed = false;
+	const state: TwoTeamsState = {
+		moving: new Map(previous.moving),
+		told: new Map(previous.told),
+		asked: new Map(previous.asked),
+		capped: new Set(previous.capped)
+	};
 	const moves: TwoTeamsStep['moves'] = [];
 	const whispers: TwoTeamsStep['whispers'] = [];
+	const stopped: TwoTeamsStep['stopped'] = [];
 	const counts = new Map(open.map((f) => [f, 0]));
 	for (const p of players)
 		if (p.faction && counts.has(p.faction)) counts.set(p.faction, counts.get(p.faction)! + 1);
@@ -76,47 +110,54 @@ export function twoTeamsStep(
 	const on = new Set<string>();
 	for (const p of players) {
 		on.add(p.steamId);
-		if (p.faction && counts.has(p.faction) && moving[p.steamId]) {
-			// Landed (or placed by hand meanwhile): the move is done; tell them once.
-			delete moving[p.steamId];
-			changed = true;
-			if (cfg.message && told[p.steamId] === undefined)
-				whispers.push({ steamId: p.steamId, name: p.name, faction: p.faction });
-			told[p.steamId] = now;
-		} else if (told[p.steamId] !== undefined && now - told[p.steamId] >= SEEN_REFRESH_MS) {
-			told[p.steamId] = now;
-			changed = true;
-		}
+		// Landed (or placed by hand meanwhile): the move is done; with a whisper, tell them once.
+		const landed = !!p.faction && counts.has(p.faction) && state.moving.has(p.steamId);
+		if (landed) state.moving.delete(p.steamId);
+		if (!cfg.message) continue;
+		if (landed && !state.told.has(p.steamId))
+			whispers.push({ steamId: p.steamId, name: p.name, faction: p.faction! });
+		if (landed || state.told.has(p.steamId)) state.told.set(p.steamId, now);
 	}
-	for (const [id, seen] of Object.entries(told))
-		if (!on.has(id) && now - seen > TWO_TEAMS_FORGET_MS) {
-			delete told[id];
-			changed = true;
-		}
-	for (const [id, m] of Object.entries(moving))
-		if (now - m.at >= TWO_TEAMS_RETRY_MS) {
-			delete moving[id];
-			changed = true;
-		}
+	for (const [id, seen] of state.told)
+		if (!on.has(id) && now - seen > TWO_TEAMS_FORGET_MS) state.told.delete(id);
+	for (const [id, m] of state.moving) if (now - m.at >= TWO_TEAMS_RETRY_MS) state.moving.delete(id);
+	for (const [id, times] of state.asked) {
+		const recent = times.filter((t) => now - t < TWO_TEAMS_ASK_WINDOW_MS);
+		if (recent.length) state.asked.set(id, recent);
+		else state.asked.delete(id);
+	}
+	for (const id of state.capped)
+		if ((state.asked.get(id)?.length ?? 0) < TWO_TEAMS_MAX_ASKS) state.capped.delete(id);
 
-	if (open.length < 2) return { state: { moving, told }, moves, whispers, changed };
+	if (open.length < 2) return { state, moves, whispers, stopped };
 	// Moves still in flight count toward their side before anyone new is placed.
-	for (const p of players)
-		if (p.faction === cfg.closedFaction && moving[p.steamId] && counts.has(moving[p.steamId].to))
-			counts.set(moving[p.steamId].to, counts.get(moving[p.steamId].to)! + 1);
 	for (const p of players) {
-		if (p.faction !== cfg.closedFaction || moving[p.steamId]) continue;
+		const m = state.moving.get(p.steamId);
+		if (p.faction === cfg.closedFaction && m && counts.has(m.to))
+			counts.set(m.to, counts.get(m.to)! + 1);
+	}
+	for (const p of players) {
+		if (p.faction !== cfg.closedFaction || state.moving.has(p.steamId)) continue;
+		const times = state.asked.get(p.steamId) ?? [];
+		if (times.length >= TWO_TEAMS_MAX_ASKS) {
+			if (!state.capped.has(p.steamId)) {
+				state.capped.add(p.steamId);
+				stopped.push({ steamId: p.steamId, name: p.name });
+			}
+			continue;
+		}
+		if (moves.length >= maxMoves) continue;
 		const low = Math.min(...counts.values());
 		const ties = open.filter((f) => counts.get(f) === low);
 		const to = ties[Math.min(ties.length - 1, Math.floor(random() * ties.length))];
 		counts.set(to, low + 1);
-		moving[p.steamId] = { to, at: now };
+		state.moving.set(p.steamId, { to, at: now });
+		state.asked.set(p.steamId, [...times, now]);
 		moves.push({ steamId: p.steamId, name: p.name, from: cfg.closedFaction, to });
-		changed = true;
 	}
-	return { state: { moving, told }, moves, whispers, changed };
+	return { state, moves, whispers, stopped };
 }
 
 /** What players are told a faction is called. */
 export const teamName = (cfg: TwoTeamsConfig, faction: string): string =>
-	cfg.names[faction] || faction;
+	(Object.hasOwn(cfg.names, faction) && cfg.names[faction]) || faction;
