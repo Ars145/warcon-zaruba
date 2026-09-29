@@ -1635,12 +1635,10 @@
 						</p>
 					</fieldset>
 					<p class="note">
-						Turn on the game's own overpopulation lock too (<code
-							>bLockOverpopulatedTeamsConfig=true</code
-						>, a low <code>OverpopulatedTeamThresholdConfig</code> such as 2): with the closed faction
-						empty, the other two lock quickly and joiners land on it for this rule to place. If a new
-						match puts players back on the closed faction, the rule sorts them again as they appear. It
-						never moves players between the two open sides, so a manual switch sticks.
+						Players are placed a few at a time as the player list refreshes. A player asked to move
+						three times in ten minutes is left where they are until the ten minutes pass. It never
+						moves players between the two open sides, so a manual switch sticks. One rule per
+						server.
 					</p>
 				{:else if f.kind === 'team_kill'}
 					<fieldset class="space-y-2">
