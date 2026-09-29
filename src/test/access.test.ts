@@ -518,6 +518,7 @@ describe.skipIf(!hasTestDb)('access', () => {
 				['name_filter', { characters: 'ascii', action: 'alert' }, 'players.moderate'],
 				['team_kill', { kickAt: 3 }, 'players.moderate'],
 				['kill_rate', { maxKills: 20 }, 'players.moderate'],
+				['two_teams', { closedFaction: 'Lonestar' }, 'players.moderate'],
 				['seed_reward', { minutes: 60, scope: 'server' }, 'slots.manage'],
 				['seed_reward', { minutes: 60, scope: 'org' }, 'lists.reserve']
 			];
@@ -654,6 +655,117 @@ describe.skipIf(!hasTestDb)('access', () => {
 				body: { enabled: false }
 			});
 			expect(moved.status).toBe(404);
+		});
+
+		test('a Two-team mode rule: who may save, dry-run and switch it on, and one per server', async () => {
+			const w = await seedWorld(env);
+			const body = { kind: 'two_teams', config: { closedFaction: 'Lonestar' } };
+			const made = await api(w, 'owner', 'POST api/servers/[id]/triggers', {
+				params: { id: w.server.id },
+				body
+			});
+			expect(made.status).toBe(201);
+			const triggerId = (made.body as { trigger: { id: string } }).trigger.id;
+			// Automation without Kick, kill, move: the rule is not theirs to make, replay or enable.
+			await env.db
+				.update(orgRoles)
+				.set({ capabilities: ['server.view', 'automation.manage'] })
+				.where(eq(orgRoles.id, w.roles.viewer));
+			const expected: Record<PrincipalName, number> = {
+				anon: 401,
+				stranger: 404,
+				outsider: 404,
+				member: 404,
+				viewer: 403,
+				operator: 403,
+				admin: 200,
+				elsewhere: 404,
+				orgBans: 403,
+				orgSlots: 403,
+				owner: 200,
+				site: 200,
+				keyView: 403,
+				keyAll: 200,
+				keyElsewhere: 404,
+				keyBans: 403
+			};
+			for (const [who, status] of Object.entries(expected) as [PrincipalName, number][]) {
+				const got = [
+					await api(w, who, 'POST api/servers/[id]/triggers/dry-run', {
+						params: { id: w.server.id },
+						body
+					}),
+					await api(w, who, 'PATCH api/servers/[id]/triggers/[triggerId]', {
+						params: { id: w.server.id, triggerId },
+						body: { enabled: true }
+					}),
+					await api(w, who, 'POST api/servers/[id]/triggers', { params: { id: w.server.id }, body })
+				].map((r) => r.status);
+				// past the checks, a second rule for the same server is refused as a duplicate
+				expect([who, ...got]).toEqual([who, status, status, status === 200 ? 409 : status]);
+			}
+			// The rule's id under another server's path is not found, even for its org's owner.
+			const moved = await api(w, 'owner', 'PATCH api/servers/[id]/triggers/[triggerId]', {
+				params: { id: w.otherServer.id, triggerId },
+				body: { enabled: false }
+			});
+			expect(moved.status).toBe(404);
+		});
+
+		test('two Two-team mode rules saved at once for one server: one of them is refused', async () => {
+			const w = await seedWorld(env);
+			const save = (closedFaction: string) =>
+				api(w, 'owner', 'POST api/servers/[id]/triggers', {
+					params: { id: w.server.id },
+					body: { kind: 'two_teams', config: { closedFaction } }
+				});
+			const got = await Promise.all([save('Lonestar'), save('Valkyra')]);
+			expect(got.map((r) => r.status).sort()).toEqual([201, 409]);
+		});
+
+		test('a Two-team mode rule that whispers needs Chat as well', async () => {
+			const w = await seedWorld(env);
+			const params = { id: w.server.id };
+			const moves = { closedFaction: 'Lonestar' };
+			const whispers = { closedFaction: 'Lonestar', message: 'You are on {team}.' };
+			await env.db
+				.update(orgRoles)
+				.set({ capabilities: ['server.view', 'automation.manage', 'players.moderate'] })
+				.where(eq(orgRoles.id, w.roles.viewer));
+			const dryRun = (config: Record<string, unknown>) =>
+				api(w, 'viewer', 'POST api/servers/[id]/triggers/dry-run', {
+					params,
+					body: { kind: 'two_teams', config }
+				});
+			expect((await dryRun(whispers)).status).toBe(403);
+			expect(
+				(
+					await api(w, 'viewer', 'POST api/servers/[id]/triggers', {
+						params,
+						body: { kind: 'two_teams', config: whispers }
+					})
+				).status
+			).toBe(403);
+			const made = await api(w, 'viewer', 'POST api/servers/[id]/triggers', {
+				params,
+				body: { kind: 'two_teams', config: moves }
+			});
+			expect(made.status).toBe(201);
+			const triggerId = (made.body as { trigger: { id: string } }).trigger.id;
+			const addWhisper = () =>
+				api(w, 'viewer', 'PATCH api/servers/[id]/triggers/[triggerId]', {
+					params: { ...params, triggerId },
+					body: { config: whispers }
+				});
+			expect((await addWhisper()).status).toBe(403);
+			await env.db
+				.update(orgRoles)
+				.set({
+					capabilities: ['server.view', 'automation.manage', 'players.moderate', 'chat.send']
+				})
+				.where(eq(orgRoles.id, w.roles.viewer));
+			expect((await dryRun(whispers)).status).toBe(200);
+			expect((await addWhisper()).status).toBe(200);
 		});
 
 		const rolePath = 'api/orgs/[id]/roles/[roleId]';

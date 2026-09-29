@@ -170,19 +170,28 @@ export function ruleNeeds(kind: TriggerKind, config: unknown): [Capability, stri
 		: ['slots.manage', 'reserves slots on this server'];
 }
 
+/** What else a rule needs when it also messages players: a Two-team mode rule with a whisper. */
+function ruleAlsoNeeds(kind: TriggerKind, config: unknown): [Capability, string] | null {
+	if (kind === 'two_teams' && str((config as Partial<TwoTeamsConfig> | null)?.message))
+		return ['chat.send', 'whispers players'];
+	return null;
+}
+
 export function requireRuleCaps(
 	kind: TriggerKind,
 	config: unknown,
 	server: ServerRow,
 	access: ServerAccess
 ): void {
-	const [cap, does] = ruleNeeds(kind, config);
-	if (access.caps.has(cap)) return;
-	throw new ApiError(
-		403,
-		`A ${TRIGGER_LABELS[kind]} rule ${does}, which needs '${CAPABILITY_INFO[cap].label}' on ${server.name}; your role '${access.roleName}' does not include it.`,
-		'forbidden'
-	);
+	for (const need of [ruleNeeds(kind, config), ruleAlsoNeeds(kind, config)]) {
+		if (!need || access.caps.has(need[0])) continue;
+		const [cap, does] = need;
+		throw new ApiError(
+			403,
+			`A ${TRIGGER_LABELS[kind]} rule ${does}, which needs '${CAPABILITY_INFO[cap].label}' on ${server.name}; your role '${access.roleName}' does not include it.`,
+			'forbidden'
+		);
+	}
 }
 
 export async function createTrigger(
@@ -198,33 +207,39 @@ export async function createTrigger(
 	const config = validateConfig(kind, body.config);
 	requireRuleCaps(kind, config, server, access);
 	const name = str(body.name, 60) || TRIGGER_LABELS[kind];
-	// Seed time is one count per server, taken against one threshold, so one rule holds it.
-	if (kind === 'seed_reward') {
-		const [other] = await env.db
-			.select({ name: triggers.name })
-			.from(triggers)
-			.where(and(eq(triggers.serverId, server.id), eq(triggers.kind, 'seed_reward')))
-			.limit(1);
-		if (other)
-			throw new ApiError(
-				409,
-				`This server already has a ${TRIGGER_LABELS[kind]} rule ("${other.name}"); edit that one instead.`,
-				'duplicate'
-			);
-	}
-	const [row] = await env.db
-		.insert(triggers)
-		.values({
-			id: newId(),
-			serverId: server.id,
-			orgId: server.orgId,
-			kind,
-			name,
-			enabled: !!body.enabled,
-			config,
-			createdBy: user.id
-		})
-		.returning();
+	const row = await env.db.transaction(async (tx) => {
+		// Seed time is one count per server, taken against one threshold, so one rule holds it. Two
+		// Two-team rules closing different factions would move a player back and forth, killing them
+		// at every move. Saves to one server take turns, so two at once cannot both find none.
+		if (kind === 'seed_reward' || kind === 'two_teams') {
+			await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`triggers:${server.id}`}))`);
+			const [other] = await tx
+				.select({ name: triggers.name })
+				.from(triggers)
+				.where(and(eq(triggers.serverId, server.id), eq(triggers.kind, kind)))
+				.limit(1);
+			if (other)
+				throw new ApiError(
+					409,
+					`This server already has a ${TRIGGER_LABELS[kind]} rule ("${other.name}"); edit that one instead.`,
+					'duplicate'
+				);
+		}
+		const [inserted] = await tx
+			.insert(triggers)
+			.values({
+				id: newId(),
+				serverId: server.id,
+				orgId: server.orgId,
+				kind,
+				name,
+				enabled: !!body.enabled,
+				config,
+				createdBy: user.id
+			})
+			.returning();
+		return inserted;
+	});
 	gateway().triggersChanged(server.id);
 	await writeAudit(env, req, {
 		actor: user,
