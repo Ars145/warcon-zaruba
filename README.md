@@ -1020,7 +1020,8 @@ game's (a 401 or a 5xx from it becomes a 502), and `error` carries the game's `c
 | `serverLog`                         | Audit trail       | `limit` (1 to 500, default 50)                                                          |
 | `raw`                               | Raw RCON          | `method`, `path` (a `/v1` route), `body`                                                |
 
-`message` and `reason` are cut at 200 characters; rotation indexes count from 0. The reads answer:
+`message` and `reason` are cut at 200 characters; rotation indexes count from 0. A SteamID goes as
+a string: as a JSON number it loses its last digits, so it is refused. The reads answer:
 
 - `status`: the `status` object of the live view, read fresh; `players`: `{"players": […]}` as in
   the live view.

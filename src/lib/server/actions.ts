@@ -5,6 +5,7 @@ import type { Capability } from '../capabilities';
 import { ApiError, int, str } from './http';
 import { gamePath } from './hostpolicy';
 import { classifyGameError, etagOf, GameError, parseJson, WardogsClient } from './rcon';
+import { steamIdRefusal } from './steam';
 import { reservedFromText, reservedIntoText } from '../reserved-doc';
 import { saneScores } from '../format';
 import { hideSecretValues, redactSecrets, restoreSecrets, SECRET_PLACEHOLDER } from '../config-doc';
@@ -29,10 +30,11 @@ const fingerprint = (text: unknown) => {
 	return { length: s.length, sha256: createHash('sha256').update(s).digest('hex') };
 };
 
+// A string only: a JSON number that long arrives rounded to another 17-digit id (steam.ts).
 const steamId = (v: unknown): string => {
-	const id = str(v, 32);
+	const id = typeof v === 'string' ? str(v, 32) : '';
 	if (!/^\d{17}$/.test(id)) {
-		throw new ApiError(400, 'steamId must be a 17-digit SteamID64.');
+		throw new ApiError(400, steamIdRefusal(v));
 	}
 	return id;
 };
