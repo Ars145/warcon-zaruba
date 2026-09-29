@@ -2,13 +2,20 @@
 // event bus (the SSE route fans them to browsers; in the split roles every web process gets them
 // through the relay stream), and the team-kill rules get their turn. Their intents go through
 // the same outbox as every other trigger, so delivery, audit and the Discord mirror are shared.
-// The Kill rate rules see every batch; the rest of the work is for batches with team kills.
+// The Kill rate and Kill distance rules see every batch; the rest of the work is for batches with
+// team kills.
 import { and, eq, gte, inArray, isNull, lte, sql } from 'drizzle-orm';
 import type { Env } from './env';
 import { emit } from './events';
 import { kills, matches } from './db/schema';
 import { killsOfMatch } from './matches';
-import { enabledTriggers, renderTemplate, teamKillStage, type Evaluation } from './triggers';
+import {
+	enabledTriggers,
+	killDistanceAct,
+	renderTemplate,
+	teamKillStage,
+	type Evaluation
+} from './triggers';
 import type { TeamKillConfig } from './trigger-rules';
 import {
 	countsForRate,
@@ -20,6 +27,15 @@ import {
 	type RateTrack,
 	type RateTracks
 } from './kill-rate';
+import {
+	countsForDistance,
+	killDistanceSettingsKey,
+	killDistanceStep,
+	matchKey,
+	type DistanceTrack,
+	type DistanceTracks,
+	type KillDistanceConfig
+} from './kill-distance';
 import { applyTriggerUpdates, enqueueIntents, wakeDelivery } from './outbox';
 import { LostOwnership, withOwnedTransaction } from './leadership';
 import { memoryOf } from './observe';
@@ -43,6 +59,12 @@ export async function onKillsIngested(
 	} catch (err) {
 		if (!(err instanceof LostOwnership))
 			console.warn(`[warcon] kill-rate rules on ${serverId}:`, publicMessage(err));
+	}
+	try {
+		await actOnKillDistance(env, serverId, kills);
+	} catch (err) {
+		if (!(err instanceof LostOwnership))
+			console.warn(`[warcon] kill-distance rules on ${serverId}:`, publicMessage(err));
 	}
 	const teamKills = kills.filter((k) => k.teamKill && k.killer);
 	if (!teamKills.length) return;
@@ -124,6 +146,128 @@ async function actOnKillRate(env: Env, serverId: string, batch: KillView[]): Pro
 		});
 	} catch (err) {
 		for (const f of flagged.reverse()) f.track.flaggedAt = f.before;
+		throw err;
+	}
+	if (queued) wakeDelivery();
+}
+
+/**
+ * Each Kill distance rule's counts in this process's memory, by server and rule: the match they
+ * are for, the settings they were made under, and each player's count. A new match, or an edit of
+ * the rule, starts them over; a restart or a handover forgets them, so a player acted on just
+ * before can be acted on once more. Kept only for servers with the rule on.
+ */
+interface DistanceMemory {
+	settings: string;
+	match: string;
+	tracks: DistanceTracks;
+}
+const distanceMemory = new Map<string, Map<string, DistanceMemory>>();
+
+/** Forgets the Kill distance counts of one server (removed from the worker), or of every server. */
+export function forgetKillDistance(serverId?: string): void {
+	if (serverId) distanceMemory.delete(serverId);
+	else distanceMemory.clear();
+}
+
+/**
+ * The match a batch was stamped with when it came in: every kill of it carries the open match of
+ * that moment (feed.ts), so any one says which; null when none was open.
+ */
+async function stampedMatch(env: Env, serverId: string, batch: KillView[]): Promise<number | null> {
+	const at = new Date(batch[0].ts);
+	const [stamp] = await env.db
+		.select({ row: kills.matchRow })
+		.from(kills)
+		.where(
+			and(
+				eq(kills.serverId, serverId),
+				eq(kills.eventId, batch[0].eventId),
+				gte(kills.ts, new Date(at.getTime() - 60_000))
+			)
+		)
+		.limit(1);
+	return stamp?.row ?? null;
+}
+
+async function actOnKillDistance(env: Env, serverId: string, batch: KillView[]): Promise<void> {
+	const rows = (await enabledTriggers(env, serverId)).filter((r) => r.kind === 'kill_distance');
+	let mine = distanceMemory.get(serverId);
+	if (!rows.length) {
+		if (mine) distanceMemory.delete(serverId);
+		return;
+	}
+	const live = new Set(rows.map((r) => r.id));
+	if (mine) for (const id of mine.keys()) if (!live.has(id)) mine.delete(id);
+	// The kills each rule counts, in the order the game played them. Most batches have none, and
+	// then nothing is read.
+	const inOrder = [...batch].sort((a, b) => a.eventTime - b.eventTime);
+	const counted = rows
+		.map((row) => {
+			const cfg = row.config as KillDistanceConfig;
+			const hits = inOrder.filter((k) =>
+				countsForDistance(cfg, {
+					killer: k.killer?.steamId,
+					suicide: k.suicide,
+					cause: k.cause,
+					distanceM: k.distanceM
+				})
+			);
+			return { row, cfg, hits };
+		})
+		.filter((r) => r.hits.length);
+	if (!counted.length) return;
+	const now = Date.now();
+	const match = matchKey(await stampedMatch(env, serverId, batch), Date.parse(batch[0].ts));
+	if (!mine) distanceMemory.set(serverId, (mine = new Map()));
+	const m = memoryOf(serverId);
+	const serverName = m?.status?.serverName || m?.server.name || '';
+	const out: Evaluation = { intents: [], updates: [] };
+	// Acting starts the player's hold; if the action cannot be queued, neither does the hold.
+	const acted: { track: DistanceTrack; before: number | null }[] = [];
+	for (const { row, cfg, hits } of counted) {
+		const settings = killDistanceSettingsKey(cfg);
+		let entry = mine.get(row.id);
+		if (!entry || entry.match !== match || entry.settings !== settings) {
+			entry = { settings, match, tracks: new Map() };
+			mine.set(row.id, entry);
+		}
+		for (const k of hits) {
+			const steamId = k.killer!.steamId;
+			const before = entry.tracks.get(steamId)?.actedAt ?? null;
+			const count = killDistanceStep(cfg, entry.tracks, steamId, now);
+			if (count === null) continue;
+			acted.push({ track: entry.tracks.get(steamId)!, before });
+			const name = k.killer!.name || steamId;
+			const act = killDistanceAct(
+				cfg,
+				{ steamId, name, cause: k.cause, distanceM: k.distanceM! },
+				count,
+				serverName
+			);
+			out.intents.push({
+				trigger: row,
+				action: act.action,
+				// the settings it was decided under: delivery sends it only while the rule still holds them
+				params: { ...act.params, rule: settings },
+				target: steamId,
+				okMessage: act.okMessage,
+				detail: { ...act.detail, eventId: k.eventId },
+				steamId: act.steamId,
+				dedupeKey: [row.id, steamId, k.eventId].join(':')
+			});
+			out.updates.push({ id: row.id, lastFiredAt: new Date(), lastResult: act.pending });
+		}
+	}
+	if (!out.intents.length) return;
+	let queued = 0;
+	try {
+		await withOwnedTransaction(env, async (tx) => {
+			queued = await enqueueIntents(tx, serverId, out.intents);
+			await applyTriggerUpdates(tx, out.updates);
+		});
+	} catch (err) {
+		for (const a of acted.reverse()) a.track.actedAt = a.before;
 		throw err;
 	}
 	if (queued) wakeDelivery();

@@ -18,18 +18,29 @@ import { LaneFull, LaneTimeout, PRIORITY, withServer } from './dispatcher';
 import { emit } from './events';
 import { isOwner, LostOwnership, ownedSince, withOwnedTransaction } from './leadership';
 import { settings } from './settings';
-import { recordDelivery, type Intent, type TriggerUpdate } from './triggers';
-import { twoTeamsSettingsKey, type TwoTeamsConfig } from './two-teams';
-import { memoryOf } from './observe';
+import { recordDelivery, SETTINGS_KEYS, type Intent, type TriggerUpdate } from './triggers';
+import { allMemory, memoryOf } from './observe';
 import { grantEntry, listOf, serverListOf } from './lists';
 import { getOrg, getServer } from './access';
 import { gateway } from './gateway';
 import { deliveries } from './metrics';
 import { NAME_FLAG } from './name-filter';
 import { KILL_RATE_FLAG } from './kill-rate';
+import { KILL_DISTANCE_FLAG } from './kill-distance';
+import { writeAudit } from './audit';
+import { PANEL_BAN, type PanelBanParams } from './rule-ban';
 import { queueEvent } from './json-webhook-queue';
 import { seedRewardGranted } from './json-webhook-events';
 import type { OutboxView } from '$lib/types';
+
+/** Actions delivered without a game request: they need no roster, only the server's row. */
+const PANEL_ACTIONS = new Set([
+	'seed_reward',
+	PANEL_BAN,
+	NAME_FLAG,
+	KILL_RATE_FLAG,
+	KILL_DISTANCE_FLAG
+]);
 
 /** The most rows one claim takes, oldest first. */
 const CLAIM_LIMIT = 50;
@@ -331,14 +342,27 @@ function noteMoveSent(row: OutboxRow): void {
 }
 
 /**
- * A Two-team row goes only while its rule is on with the settings it was decided under: an edit, a
- * switch-off or a delete can land while a look that read the old rule is still running, and that
- * look's moves and whispers reach the outbox after the edit dropped the ones before them. Read from
- * the table, not the worker's cache of rules, which can hold the old rule for a moment. Null when
- * the table could not be read: the row waits, and the error goes to the log, never to the row.
+ * True while the rule is on, with the settings the row was decided under for kinds that keep them
+ * (SETTINGS_KEYS): an edit, a switch-off or a delete can land while a look or a kill batch that
+ * read the old rule is still running, and its rows reach the outbox after the edit dropped the ones
+ * before them.
+ */
+function holdsFor(
+	row: OutboxRow,
+	rule: { enabled: boolean; config: unknown } | undefined
+): boolean {
+	if (!rule?.enabled) return false;
+	const key = SETTINGS_KEYS[row.triggerKind];
+	return !key || (row.params as { rule?: string } | null)?.rule === key(rule.config);
+}
+
+/**
+ * Whether the row's rule still holds its settings (true for kinds that do not ask). Read from the
+ * table, not the worker's cache of rules, which can hold the old rule for a moment. Null when the
+ * table could not be read: the row waits, and the error goes to the log, never to the row.
  */
 async function stillHolds(env: Env, row: OutboxRow): Promise<boolean | null> {
-	if (row.triggerKind !== 'two_teams') return true;
+	if (!SETTINGS_KEYS[row.triggerKind]) return true;
 	if (!row.triggerId) return false;
 	let rule: { enabled: boolean; config: unknown } | undefined;
 	try {
@@ -348,12 +372,14 @@ async function stillHolds(env: Env, row: OutboxRow): Promise<boolean | null> {
 			.where(eq(triggers.id, row.triggerId))
 			.limit(1);
 	} catch (err) {
-		console.error('[warcon] two-team rule check', forLog(err));
+		console.error('[warcon] rule check', forLog(err));
 		return null;
 	}
-	const decided = (row.params as { rule?: string } | null)?.rule;
-	return !!rule?.enabled && decided === twoTeamsSettingsKey(rule.config as TwoTeamsConfig);
+	return holdsFor(row, rule);
 }
+
+/** What a row decided under settings its rule no longer holds says. */
+const CHANGED = 'The rule was changed before this was sent.';
 
 /** How long a row whose player is off the list waits before it is looked at again. */
 const WAIT_MS = 5000;
@@ -394,10 +420,19 @@ async function release(env: Env, row: OutboxRow): Promise<void> {
  */
 async function deliverOne(env: Env, row: OutboxRow): Promise<'held' | 'refused' | void> {
 	if (row.action === 'seed_reward') return deliverSeedReward(env, row);
-	// An alert-only Name filter match or a Kill rate flag: the audit row (and its Discord card) is
-	// the whole delivery.
-	if (row.action === NAME_FLAG || row.action === KILL_RATE_FLAG)
+	if (row.action === PANEL_BAN) return deliverPanelBan(env, row);
+	// An alert-only Name filter match or a Kill rate or Kill distance flag: the audit row (and its
+	// Discord card) is the whole delivery.
+	if (
+		row.action === NAME_FLAG ||
+		row.action === KILL_RATE_FLAG ||
+		row.action === KILL_DISTANCE_FLAG
+	) {
+		const holds = await stillHolds(env, row);
+		if (holds === null) return release(env, row);
+		if (!holds) return finish(env, row, 'skipped', CHANGED);
 		return finish(env, row, 'delivered', row.okMessage);
+	}
 	const early = skipReason(row, memoryOf(row.serverId));
 	if (early) return finish(env, row, 'skipped', early);
 	// A hold is for the whole server: looked at before a player's own wait, so it is noticed.
@@ -422,7 +457,7 @@ async function deliverOne(env: Env, row: OutboxRow): Promise<'held' | 'refused' 
 				if (mustWait(row, m) || moveUnconfirmed(row, m)) throw new Waiting();
 				const holds = await stillHolds(env, row);
 				if (holds === null) throw new Waiting();
-				if (!holds) throw new Skipped('The rule was changed before this was sent.');
+				if (!holds) throw new Skipped(CHANGED);
 				if (!isOwner()) throw new LostOwnership();
 				const client = await WardogsClient.forServer(env, m!.server);
 				noteMoveSent(row);
@@ -551,6 +586,102 @@ async function deliverSeedReward(env: Env, row: OutboxRow): Promise<void> {
 	}
 }
 
+/**
+ * A rule's ban is a panel action, not a game request: the player goes on the server's own ban list,
+ * or the organisation's, with the rule's reason, for its number of days or for good. It is written
+ * only while this process owns the worker and the rule still holds the settings it was decided
+ * under, both judged in the transaction that writes it. The panel's ban enforcement then removes
+ * the player: the servers the ban reaches take their lists again at once (this one, or every
+ * server of the organisation this worker watches), so a player on any of them is kicked at its
+ * next look with the organisation's ban message. It stands whether or not the player is still on,
+ * and does not go stale. A player already on that list for as long or longer is left as the list
+ * has them; a shorter ban there is made to last as long as this one.
+ */
+async function deliverPanelBan(env: Env, row: OutboxRow): Promise<void> {
+	const p = row.params as PanelBanParams;
+	stats.inFlight++;
+	try {
+		if (!isOwner()) throw new LostOwnership();
+		const m = memoryOf(row.serverId);
+		const server = m?.server ?? (await getServer(env, row.serverId));
+		const org = m?.org ?? (server ? await getOrg(env, server.orgId) : null);
+		if (!server || !org) return await finish(env, row, 'skipped', 'Server no longer exists.');
+		const here = p.scope !== 'org';
+		const list = here ? await serverListOf(env, server, 'ban') : await listOf(env, org.id, 'ban');
+		const written = await withOwnedTransaction(env, async (tx) => {
+			// Read under a share lock: an edit or a delete of the rule waits for this ban, or lands
+			// first and stops it.
+			const [rule] = row.triggerId
+				? await tx
+						.select({ enabled: triggers.enabled, config: triggers.config })
+						.from(triggers)
+						.where(eq(triggers.id, row.triggerId))
+						.for('share')
+				: [];
+			if (!holdsFor(row, rule)) return null;
+			return grantEntry(
+				env,
+				list,
+				{
+					steamId: p.steamId,
+					reason: p.reason,
+					expiresAt: p.days ? new Date(Date.now() + p.days * 86400_000) : null,
+					addedByName: `trigger: ${row.triggerName}`
+				},
+				{ tx, lengthen: true }
+			);
+		});
+		if (!written) return await finish(env, row, 'skipped', CHANGED);
+		if (!written.added && !written.lengthened)
+			return await finish(
+				env,
+				row,
+				'skipped',
+				`${p.steamId} is already on ${here ? `${server.name}'s ban list` : `the ban list of ${org.name}`}.`
+			);
+		// Who added the entry and its reason stay; the length is now the rule's, and the list's own
+		// record says so, as an edit by hand would.
+		if (written.lengthened)
+			await writeAudit(env, null, {
+				actorName: `trigger: ${row.triggerName}`,
+				...(here ? { server: { id: server.id, name: server.name } } : {}),
+				orgId: org.id,
+				category: here ? 'server' : 'org',
+				action: 'list.update',
+				target: p.steamId,
+				outcome: 'ok',
+				message: `Ban lengthened ${here ? `on ${server.name}` : `across ${org.name}`} ${p.days ? `for ${p.days} day${p.days === 1 ? '' : 's'}` : '(permanent)'} by a rule`,
+				detail: {
+					kind: 'ban',
+					listId: list.id,
+					entryId: written.id,
+					triggerId: row.triggerId,
+					days: p.days
+				}
+			}).catch((err) => console.error('[warcon] ban lengthen audit', forLog(err)));
+		const reach = here ? [m] : [...allMemory()].filter((s) => s.server.orgId === server.orgId);
+		for (const s of reach) {
+			if (!s) continue;
+			s.syncAt = 0;
+			gateway().observeSoon(s.server.id, { lists: true });
+		}
+		await finish(
+			env,
+			row,
+			'delivered',
+			written.lengthened
+				? `${row.okMessage} (the ban already there now lasts as long)`
+				: row.okMessage
+		);
+	} catch (err) {
+		if (err instanceof LostOwnership) return; // the lease sweep marks it unknown
+		console.error('[warcon] rule ban', forLog(err));
+		await finish(env, row, 'failed', 'The ban could not be written.');
+	} finally {
+		stats.inFlight--;
+	}
+}
+
 /** The wait an action's answer asks for (changeTeam's refused kill), or 0. */
 const retryAfterOf = (r: unknown): number =>
 	r && typeof r === 'object' && typeof (r as { retryAfterMs?: unknown }).retryAfterMs === 'number'
@@ -607,10 +738,11 @@ async function finish(env: Env, row: OutboxRow, state: Outcome, outcome: string)
 		if (err instanceof LostOwnership) throw err;
 		console.error('[warcon] outbox update', err);
 	}
-	// A grant can be delivered before the roster is in memory: audit it from the server row then.
+	// A panel action (a grant, a ban, a flag) can be delivered before the roster is in memory:
+	// audit it from the server row then.
 	const server =
 		memoryOf(row.serverId)?.server ??
-		(row.action === 'seed_reward' ? await getServer(env, row.serverId) : null);
+		(PANEL_ACTIONS.has(row.action) ? await getServer(env, row.serverId) : null);
 	if (server && state !== 'skipped')
 		await recordDelivery(
 			env,
