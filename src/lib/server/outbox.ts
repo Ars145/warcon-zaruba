@@ -1,9 +1,10 @@
 // Trigger delivery. Intents are written to the outbox inside the observation's transaction;
-// this loop claims them (FOR UPDATE SKIP LOCKED, with a lease), sends each through the server's
-// lane behind any human command, and records exactly what happened: delivered, failed (the game
-// said no), skipped (the player had already left, or the intent went stale), or unknown (sent,
-// no answer). Unknown is never retried on its own: a second whisper is harmless, a second kick
-// is not, and the audit row says what is known.
+// this loop claims them (FOR UPDATE SKIP LOCKED, with a lease), a few of each server's at a time,
+// sends each server's rows in a chain of their own through that server's lane behind any human
+// command, and records exactly what happened: delivered, failed (the game said no), skipped (the
+// player had already left, or the intent went stale), or unknown (sent, no answer). Unknown is
+// never retried on its own: a second whisper is harmless, a second kick is not, and the audit row
+// says what is known.
 import { and, desc, eq, sql } from 'drizzle-orm';
 import type { Env } from './env';
 import type { DbOrTx } from './db';
@@ -27,7 +28,10 @@ import { queueEvent } from './json-webhook-queue';
 import { seedRewardGranted } from './json-webhook-events';
 import type { OutboxView } from '$lib/types';
 
+/** The most rows one claim takes, oldest first. */
 const CLAIM_LIMIT = 50;
+/** The most rows one claim takes of one server, so a burst on one server never fills a claim. */
+const PER_SERVER = 5;
 const PASS_MS = 1000;
 
 /** Writes intents; a dedupe key seen before is dropped silently. Returns how many were new. */
@@ -74,23 +78,47 @@ export async function applyTriggerUpdates(db: DbOrTx, updates: TriggerUpdate[]):
 // ---- the loop -----------------------------------------------------------------------------------
 
 declare global {
-	// Survives Vite HMR re-evaluation in dev so an old delivery loop never keeps running.
+	// All three survive Vite HMR re-evaluation in dev so an old delivery loop never keeps running:
+	// the timer; the generation of the loop that may claim (a replaced module's chains still wake
+	// their own pass when they end); and the loop's state, which the new module must share.
 	var __warconDelivery: ReturnType<typeof setInterval> | undefined;
+	var __warconDeliveryGen: number | undefined;
+	var __warconDeliveryChains:
+		{ claiming: boolean; busy: Set<string>; mine: Set<number> } | undefined;
 }
-let running = false;
 let wanted = false;
+/** Settles when this module's claim in progress, if any, has finished (see stopDelivery). */
+let claimDone: Promise<void> = Promise.resolve();
 let envRef: Env | null = null;
+let generation = 0;
 const stats = { delivered: 0, failed: 0, skipped: 0, unknown: 0, lastPassAt: 0, inFlight: 0 };
+globalThis.__warconDeliveryChains ??= { claiming: false, busy: new Set(), mine: new Set() };
+/** One claim at a time, whichever module's loop makes it. */
+const loop = globalThis.__warconDeliveryChains;
+/** Servers whose chain is still running here: a claim passes over them until it ends. */
+const busy = loop.busy;
+/** Rows claimed here and not yet done: the lease sweep leaves them to their chain. */
+const mine = loop.mine;
 
 export function startDelivery(env: Env): void {
 	envRef = env;
+	generation = globalThis.__warconDeliveryGen = (globalThis.__warconDeliveryGen ?? 0) + 1;
 	if (globalThis.__warconDelivery) clearInterval(globalThis.__warconDelivery);
 	globalThis.__warconDelivery = setInterval(() => void pass(), PASS_MS);
 }
 
-export function stopDelivery(): void {
+/**
+ * No pass starts after this. The promise settles once a pass that was claiming has put its rows
+ * back, so a caller about to give the lease up awaits it first (the put-back needs the lease). A
+ * chain already running goes on while the lease lasts; rows it has not reached when the lease ends
+ * stay claimed, and the next worker counts them unknown.
+ */
+export function stopDelivery(): Promise<void> {
+	envRef = null;
+	globalThis.__warconDeliveryGen = (globalThis.__warconDeliveryGen ?? 0) + 1;
 	if (globalThis.__warconDelivery) clearInterval(globalThis.__warconDelivery);
 	globalThis.__warconDelivery = undefined;
+	return claimDone;
 }
 
 /** Runs a pass now (after intents were written) instead of waiting for the next tick. */
@@ -99,49 +127,99 @@ export function wakeDelivery(): void {
 	void pass();
 }
 
-export const deliveryStats = () => ({ ...stats });
+/** `chains` and `claimed` show a server whose chain never ends (its rows would sit pending). */
+export const deliveryStats = () => ({ ...stats, chains: busy.size, claimed: mine.size });
+
+/** A list as one JSON parameter: one statement text whatever its length (see pass). */
+const jsonList = (values: Iterable<string | number>) => JSON.stringify([...values]);
 
 async function pass(): Promise<void> {
 	const env = envRef;
-	if (!env || running || !isOwner()) return;
-	running = true;
+	const mineGen = generation;
+	if (!env || loop.claiming || !isOwner() || mineGen !== globalThis.__warconDeliveryGen) return;
+	loop.claiming = true;
+	let claimFinished!: () => void;
+	claimDone = new Promise<void>((resolve) => (claimFinished = resolve));
 	wanted = false;
 	try {
 		stats.lastPassAt = Date.now();
 		const lease = settings().outboxLeaseMs;
 		const claimed = await withOwnedTransaction(env, async (tx) => {
 			// A send whose lease lapsed may have reached the game: it is unknown, never sent again.
+			// A row still waiting in a chain here has not lapsed, however long its chain has taken.
 			await tx.execute(sql`
 			UPDATE outbox SET state = 'unknown', outcome = 'The worker stopped while sending; the game may have acted.', done_at = now(), lease_until = NULL
-			 WHERE state = 'sending' AND lease_until < now()`);
-			// Claiming moves the row to "sending" durably before anything is sent.
+			 WHERE state = 'sending' AND lease_until < now()
+			   AND id NOT IN (SELECT v::bigint FROM jsonb_array_elements_text(${jsonList(mine)}::text::jsonb) AS v
+			                   WHERE v IS NOT NULL)`);
+			// Claiming moves the row to "sending" durably before anything is sent: the oldest due
+			// rows, at most PER_SERVER of any one server, none of a server whose chain is running.
 			return (await tx.execute(sql`
 			UPDATE outbox SET state = 'sending', lease_until = now() + (${lease} || ' milliseconds')::interval, attempts = attempts + 1
 			 WHERE id IN (SELECT id FROM outbox
-			               WHERE state = 'pending' AND not_before <= now()
-			               ORDER BY id LIMIT ${CLAIM_LIMIT} FOR UPDATE SKIP LOCKED)
+			               WHERE state = 'pending'
+			                 AND id IN (SELECT id FROM (SELECT id, row_number() OVER (PARTITION BY server_id ORDER BY id) AS n
+			                                              FROM outbox
+			                                             WHERE state = 'pending' AND not_before <= now()
+			                                               AND server_id NOT IN (SELECT v FROM jsonb_array_elements_text(${jsonList(busy)}::text::jsonb) AS v
+			                                                                      WHERE v IS NOT NULL)) due
+			                             WHERE n <= ${PER_SERVER} ORDER BY id LIMIT ${CLAIM_LIMIT})
+			               FOR UPDATE SKIP LOCKED)
 			 RETURNING id, server_id AS "serverId", trigger_id AS "triggerId", trigger_name AS "triggerName",
 			           trigger_kind AS "triggerKind", action, params, target, detail, steam_id AS "steamId",
 			           ok_message AS "okMessage", dedupe_key AS "dedupeKey", state, attempts, not_before AS "notBefore",
 			           lease_until AS "leaseUntil", outcome, created_at AS "createdAt", done_at AS "doneAt"`)) as unknown as OutboxRow[];
 		});
-		if (!claimed.length) return;
-		// One chain per server (its lane serialises them anyway), servers in parallel.
+		// Stopped, or replaced by a new module, while this pass was claiming: nobody is left to
+		// deliver these, so they go back unsent rather than wait for the sweep to call them unknown.
+		if (mineGen !== globalThis.__warconDeliveryGen) return await putBack(env, claimed);
+		// One chain per server, oldest first (its lane serialises them anyway), and the pass does not
+		// wait for them: a server whose game is slow, or whose rule queued a hundred moves at once,
+		// holds up its own rows and nobody else's. A server is claimed again once its chain ends.
 		const byServer = new Map<string, OutboxRow[]>();
-		for (const r of claimed)
+		// RETURNING keeps no order: oldest first is put back here.
+		for (const r of claimed.sort((a, b) => a.id - b.id))
 			(byServer.get(r.serverId) ?? byServer.set(r.serverId, []).get(r.serverId)!).push(r);
-		await Promise.all(
-			[...byServer.values()].map(async (rows) => {
-				for (const r of rows)
-					await deliverOne(env, r).catch((err) => console.error('[warcon] delivery', err));
-			})
-		);
+		for (const [serverId, rows] of byServer) {
+			busy.add(serverId);
+			for (const r of rows) mine.add(r.id);
+			void deliverChain(env, rows).finally(() => {
+				busy.delete(serverId);
+				for (const r of rows) mine.delete(r.id);
+				wakeDelivery();
+			});
+		}
 	} catch (err) {
 		if (!(err instanceof LostOwnership)) console.error('[warcon] delivery pass', err);
 	} finally {
-		running = false;
+		loop.claiming = false;
+		claimFinished();
 		if (wanted) void pass();
 	}
+}
+
+/** One server's claimed rows, one at a time in the order they were queued. */
+async function deliverChain(env: Env, rows: OutboxRow[]): Promise<void> {
+	for (const r of rows)
+		await deliverOne(env, r).catch((err) => console.error('[warcon] delivery', err));
+}
+
+/** Claimed rows that were not sent, back to pending as they are, oldest still first. */
+async function putBack(env: Env, rows: OutboxRow[], why?: string): Promise<void> {
+	if (!rows.length) return;
+	try {
+		await withOwnedTransaction(env, (tx) =>
+			tx.execute(sql`
+			UPDATE outbox SET state = 'pending', lease_until = NULL${why ? sql`, outcome = ${why}` : sql``}
+			 WHERE state = 'sending'
+			   AND id IN (SELECT v::bigint FROM jsonb_array_elements_text(${jsonList(rows.map((r) => r.id))}::text::jsonb) AS v)`)
+		);
+	} catch (err) {
+		if (err instanceof LostOwnership) return; // the lease sweep marks them unknown
+		console.error('[warcon] outbox update', err);
+		return;
+	}
+	for (const r of rows) emit({ type: 'outbox', serverId: r.serverId, id: r.id, state: 'pending' });
 }
 
 type Outcome = 'delivered' | 'failed' | 'skipped' | 'unknown';
