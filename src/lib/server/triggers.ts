@@ -21,8 +21,10 @@ import { and, asc, desc, eq, gte, inArray, isNotNull, or, sql } from 'drizzle-or
 import type { Env } from './env';
 import { ApiError, int, newId, str } from './http';
 import { writeAudit } from './audit';
+import { emit } from './events';
 import {
 	kills,
+	outbox,
 	playerSessions,
 	samples,
 	serverLive,
@@ -91,6 +93,7 @@ import {
 	TWO_TEAMS_MAX_ASKS,
 	TWO_TEAMS_MAX_MOVES_PER_LOOK,
 	TWO_TEAMS_MOVES_PER_SECOND,
+	twoTeamsSettingsKey,
 	twoTeamsStep,
 	type TwoTeamsConfig,
 	type TwoTeamsState
@@ -260,6 +263,8 @@ export async function updateTrigger(
 		.set(set)
 		.where(eq(triggers.id, row.id))
 		.returning();
+	if (row.kind === 'two_teams' && (set.config !== undefined || set.enabled === false))
+		await dropQueued(env, row.id, 'The rule was changed before this was sent.');
 	gateway().triggersChanged(server.id);
 	await writeAudit(env, req, {
 		actor: user,
@@ -283,6 +288,8 @@ export async function deleteTrigger(
 ): Promise<void> {
 	const row = await triggerOf(env, server.id, id);
 	await env.db.delete(triggers).where(eq(triggers.id, row.id));
+	if (row.kind === 'two_teams')
+		await dropQueued(env, row.id, 'The rule was deleted before this was sent.');
 	gateway().triggersChanged(server.id);
 	await writeAudit(env, req, {
 		actor: user,
@@ -294,6 +301,21 @@ export async function deleteTrigger(
 		outcome: 'ok',
 		detail: { triggerId: row.id, kind: row.kind }
 	});
+}
+
+/**
+ * A Two-team mode rule's queued moves and whispers were decided under settings that no longer hold
+ * (a queued move from the old closed faction could now take a player between the two open sides):
+ * they are skipped, kept with the reason. A row already being sent goes out.
+ */
+async function dropQueued(env: Env, triggerId: string, why: string): Promise<void> {
+	const dropped = await env.db
+		.update(outbox)
+		.set({ state: 'skipped', outcome: why, doneAt: new Date() })
+		.where(and(eq(outbox.triggerId, triggerId), eq(outbox.state, 'pending')))
+		.returning({ id: outbox.id, serverId: outbox.serverId });
+	for (const r of dropped)
+		emit({ type: 'outbox', serverId: r.serverId, id: r.id, state: 'skipped' });
 }
 
 // ---- evaluation -----------------------------------------------------------------------------------
@@ -786,7 +808,8 @@ function evalTwoTeams(ctx: TickContext, row: TriggerRow, cfg: TwoTeamsConfig, ou
 		.map((s) => s.name)
 		.filter((f) => f && f !== cfg.closedFaction);
 	const now = ctx.ts.getTime();
-	const config = JSON.stringify(cfg);
+	// The same fingerprint rides on every move and whisper, for delivery to check against.
+	const config = twoTeamsSettingsKey(cfg);
 	let memory = twoTeamsMemory.get(row.id);
 	if (memory?.config !== config)
 		twoTeamsMemory.set(row.id, (memory = { config, state: emptyTwoTeamsState() }));
@@ -808,7 +831,7 @@ function evalTwoTeams(ctx: TickContext, row: TriggerRow, cfg: TwoTeamsConfig, ou
 		out.intents.push({
 			trigger: row,
 			action: 'changeTeam',
-			params: { steamId: m.steamId, faction: m.to, from: m.from },
+			params: { steamId: m.steamId, faction: m.to, from: m.from, rule: config },
 			target: m.steamId,
 			okMessage: `Moved ${m.name} to ${teamName(cfg, m.to)}.`,
 			detail: { name: m.name, from: m.from, to: m.to },
@@ -821,6 +844,7 @@ function evalTwoTeams(ctx: TickContext, row: TriggerRow, cfg: TwoTeamsConfig, ou
 			action: 'whisper',
 			params: {
 				steamId: w.steamId,
+				rule: config,
 				message: renderTemplate(cfg.message, {
 					...vars(
 						ctx,

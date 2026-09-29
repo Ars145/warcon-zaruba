@@ -6,6 +6,7 @@ import {
 	TWO_TEAMS_MAX_ASKS,
 	TWO_TEAMS_RETRY_MS,
 	teamName,
+	twoTeamsSettingsKey,
 	twoTeamsStep,
 	validateTwoTeams,
 	type TwoTeamsConfig,
@@ -147,4 +148,18 @@ test('teamName falls back to the faction, never to an inherited property', () =>
 	expect(teamName(cfg, 'Valkyra')).toBe('Red');
 	expect(teamName({ ...cfg, names: {} }, 'Valkyra')).toBe('Valkyra');
 	expect(teamName(cfg, 'constructor')).toBe('constructor');
+});
+
+test("a rule's settings fingerprint does not depend on key order, and changes with any setting", () => {
+	const key = twoTeamsSettingsKey(cfg);
+	expect(
+		twoTeamsSettingsKey({
+			message: cfg.message,
+			names: { ...cfg.names },
+			closedFaction: 'Lonestar'
+		})
+	).toBe(key);
+	expect(twoTeamsSettingsKey({ ...cfg, names: { Manticore: 'Green', Valkyra: 'Red' } })).toBe(key);
+	expect(twoTeamsSettingsKey({ ...cfg, closedFaction: 'Valkyra' })).not.toBe(key);
+	expect(twoTeamsSettingsKey({ ...cfg, message: '' })).not.toBe(key);
 });

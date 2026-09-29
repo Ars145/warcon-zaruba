@@ -16,9 +16,10 @@ import { GameError, WardogsClient } from './rcon';
 import { ApiError, forLog } from './http';
 import { LaneFull, LaneTimeout, PRIORITY, withServer } from './dispatcher';
 import { emit } from './events';
-import { isOwner, LostOwnership, withOwnedTransaction } from './leadership';
+import { isOwner, LostOwnership, ownedSince, withOwnedTransaction } from './leadership';
 import { settings } from './settings';
 import { recordDelivery, type Intent, type TriggerUpdate } from './triggers';
+import { twoTeamsSettingsKey, type TwoTeamsConfig } from './two-teams';
 import { memoryOf } from './observe';
 import { grantEntry, listOf, serverListOf } from './lists';
 import { getOrg, getServer } from './access';
@@ -266,7 +267,8 @@ function skipReason(row: OutboxRow, m: ReturnType<typeof memoryOf>): string | nu
 		return 'Player already left.';
 	if (row.action === 'empty_reset' && (m.players.length > 0 || (m.status?.playerCount ?? 0) > 0))
 		return 'Players arrived before the reset.';
-	// A Two-team move asked for again while the first was queued: moving (and killing) twice is not harmless.
+	// A Two-team move for a player already off the closed faction: the move before it landed, or
+	// they changed side themselves. Moving (and killing) someone twice is not harmless.
 	if (row.triggerKind === 'two_teams' && row.action === 'changeTeam') {
 		const from = (row.params as { from?: string } | null)?.from;
 		const p = m.players.find((q) => q.steamId === row.steamId);
@@ -287,6 +289,70 @@ function mustWait(row: OutboxRow, m: ReturnType<typeof memoryOf>): boolean {
 		!m.players.some((p) => p.steamId === row.steamId) &&
 		m.presence.open.has(row.steamId)
 	);
+}
+
+/**
+ * When a Two-team move was last sent for a player, by server and SteamID. The check above can only
+ * tell a move landed from a player list taken after it, so a second move for the same player waits
+ * for one (a retry claimed right behind the first would otherwise read the same list and go too).
+ */
+const movesSent = new Map<string, number>();
+const moveOf = (row: OutboxRow) =>
+	row.triggerKind === 'two_teams' && row.action === 'changeTeam' && row.steamId
+		? `${row.serverId}:${row.steamId}`
+		: null;
+
+/** True while a Two-team move for this row's player went out after the last player list. */
+function moveUnconfirmed(row: OutboxRow, m: ReturnType<typeof memoryOf>): boolean {
+	const key = moveOf(row);
+	if (!key) return false;
+	// No player list since this process became the owner: the move may have been queued, or sent, by
+	// the process before it, and nothing seen here says where the player is now.
+	if ((m?.playersAt ?? 0) < ownedSince()) return true;
+	const sentAt = movesSent.get(key);
+	if (sentAt === undefined) return false;
+	if (sentAt >= (m?.playersAt ?? 0)) return true;
+	movesSent.delete(key!);
+	return false;
+}
+
+let movesSweptAt = 0;
+
+function noteMoveSent(row: OutboxRow): void {
+	const key = moveOf(row);
+	if (!key) return;
+	const now = Date.now();
+	// Once a minute, what is too old to matter goes: the map holds the last few minutes' moves.
+	if (now - movesSweptAt > 60_000) {
+		movesSweptAt = now;
+		for (const [k, at] of movesSent) if (now - at > 5 * 60_000) movesSent.delete(k);
+	}
+	movesSent.set(key, now);
+}
+
+/**
+ * A Two-team row goes only while its rule is on with the settings it was decided under: an edit, a
+ * switch-off or a delete can land while a look that read the old rule is still running, and that
+ * look's moves and whispers reach the outbox after the edit dropped the ones before them. Read from
+ * the table, not the worker's cache of rules, which can hold the old rule for a moment. Null when
+ * the table could not be read: the row waits, and the error goes to the log, never to the row.
+ */
+async function stillHolds(env: Env, row: OutboxRow): Promise<boolean | null> {
+	if (row.triggerKind !== 'two_teams') return true;
+	if (!row.triggerId) return false;
+	let rule: { enabled: boolean; config: unknown } | undefined;
+	try {
+		[rule] = await env.db
+			.select({ enabled: triggers.enabled, config: triggers.config })
+			.from(triggers)
+			.where(eq(triggers.id, row.triggerId))
+			.limit(1);
+	} catch (err) {
+		console.error('[warcon] two-team rule check', forLog(err));
+		return null;
+	}
+	const decided = (row.params as { rule?: string } | null)?.rule;
+	return !!rule?.enabled && decided === twoTeamsSettingsKey(rule.config as TwoTeamsConfig);
 }
 
 /** How long a row whose player is off the list waits before it is looked at again. */
@@ -339,7 +405,8 @@ async function deliverOne(env: Env, row: OutboxRow): Promise<'held' | 'refused' 
 		held.set(row.serverId, until);
 		return 'held';
 	}
-	if (mustWait(row, memoryOf(row.serverId))) return release(env, row);
+	if (mustWait(row, memoryOf(row.serverId)) || moveUnconfirmed(row, memoryOf(row.serverId)))
+		return release(env, row);
 	stats.inFlight++;
 	try {
 		const result = await withServer(
@@ -351,9 +418,13 @@ async function deliverOne(env: Env, row: OutboxRow): Promise<'held' | 'refused' 
 				const late = skipReason(row, m);
 				if (late) throw new Skipped(late);
 				if (holdOf(row.serverId, m) > Date.now()) throw new Held();
-				if (mustWait(row, m)) throw new Waiting();
+				if (mustWait(row, m) || moveUnconfirmed(row, m)) throw new Waiting();
+				const holds = await stillHolds(env, row);
+				if (holds === null) throw new Waiting();
+				if (!holds) throw new Skipped('The rule was changed before this was sent.');
 				if (!isOwner()) throw new LostOwnership();
 				const client = await WardogsClient.forServer(env, m!.server);
+				noteMoveSent(row);
 				return execute(client, row);
 			},
 			settings().outboxLeaseMs
