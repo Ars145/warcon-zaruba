@@ -57,6 +57,7 @@ describe.skipIf(!hasTestDb)('delivery while the player list is empty', () => {
 			joinedAt: Date.now() - 60_000,
 			lastSeen: Date.now() - 5000,
 			writtenAt: Date.now() - 5000,
+			writtenTeam: null,
 			firstVisit: false,
 			lastFaction: null,
 			team: null
