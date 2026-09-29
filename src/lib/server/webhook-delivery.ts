@@ -445,11 +445,19 @@ export async function recordResult(env: Env, id: string, result: PostResult): Pr
 	}
 }
 
+/**
+ * Rules whose actions come by the hundred as a matter of course: a Two-team mode sort at every match
+ * start. The audit trail keeps each one; Discord hears only of those that fail, so a sort neither
+ * floods a staff channel nor pushes another rule's card out of the webhook's queue.
+ */
+const QUIET_WHEN_OK = new Set(['trigger.two_teams']);
+
 /** Fans one audit row out to the org's webhooks that want its event class. Never throws. */
 export async function notifyWebhooks(env: Env, row: AuditRow): Promise<void> {
 	try {
 		const event = classify(row);
 		if (!event) return;
+		if (row.outcome === 'ok' && QUIET_WHEN_OK.has(row.action)) return;
 		const orgId = row.orgId ?? (row.serverId ? await orgOfServer(env, row.serverId) : null);
 		if (!orgId) return;
 		const hooks = await enabledWebhooks(env, orgId);
