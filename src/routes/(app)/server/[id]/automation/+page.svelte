@@ -466,12 +466,9 @@
 			endMessage: s('endMessage', 'Match over: {faction} wins on {previous} · {scores}'),
 			startMessage: s('startMessage', 'New match on {map}. Good luck!'),
 			warnAt: n('warnAt', 2),
-			warnMessage: s(
-				'warnMessage',
-				'Careful, {name}: that was a team kill ({count} this session).'
-			),
+			warnMessage: s('warnMessage', 'Careful, {name}: that was a team kill ({count} this match).'),
 			kickAt: n('kickAt', 4),
-			kickReason: s('kickReason', 'Team killing ({count} this session).'),
+			kickReason: s('kickReason', 'Team killing ({count} this match).'),
 			lowAt: n('lowAt', 20),
 			untilFull: b('untilFull', true),
 			fullAt: typeof c.fullAt === 'number' ? c.fullAt : null,
@@ -771,7 +768,7 @@
 				]
 					.filter(Boolean)
 					.join(' · ')
-					.concat(' · per session');
+					.concat(' · per match');
 			case 'kill_rate':
 				return [
 					c.maxKills ? `${c.maxKills} kills` : '',
@@ -1694,8 +1691,7 @@
 						/>
 					</fieldset>
 					<p class="note">
-						Team kills come from the game's kill feed and are counted per player within their
-						current session.
+						Team kills come from the game's kill feed and are counted per player within each match.
 					</p>
 				{:else if f.kind === 'kill_rate'}
 					<fieldset class="space-y-1.5 text-[13px]">

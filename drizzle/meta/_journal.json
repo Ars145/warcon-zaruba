@@ -246,6 +246,13 @@
       "when": 1790347290706,
       "tag": "0034_json_webhooks",
       "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1790637099022,
+      "tag": "0035_team_kill_match_texts",
+      "breakpoints": true
     }
   ]
 }

@@ -1262,8 +1262,9 @@ export async function dryRun(
 	}
 	if (kind === 'team_kill') {
 		const c = cfg as TeamKillConfig;
-		// Each team kill in the window, with the killer's running count since their session began
-		// (the session open at the time, else the hour before).
+		// Each team kill in the window, with the killer's running count in the match it arrived in:
+		// the rows carrying that match from two minutes before it opened (killsOfMatch), else, for
+		// a kill that came in with no match open, the other such kills of the hour before.
 		const rows = await env.db.execute<{
 			ts: Date;
 			killerName: string;
@@ -1276,9 +1277,10 @@ export async function dryRun(
 			       (SELECT COUNT(*) FROM kills k2
 			         WHERE k2.server_id = k.server_id AND k2.killer_steam_id = k.killer_steam_id
 			           AND k2.team_kill AND k2.ts <= k.ts
-			           AND k2.ts >= COALESCE((SELECT MAX(s.joined_at) FROM player_sessions s
-			                                    WHERE s.server_id = k.server_id AND s.steam_id = k.killer_steam_id
-			                                      AND s.joined_at <= k.ts), k.ts - interval '1 hour')) AS n
+			           AND k2.match_row IS NOT DISTINCT FROM k.match_row
+			           AND k2.ts >= COALESCE((SELECT m.started_at - interval '2 minutes' FROM matches m
+			                                    WHERE m.id = k.match_row AND m.server_id = k.server_id),
+			                                 k.ts - interval '1 hour')) AS n
 			  FROM kills k
 			 WHERE k.server_id = ${server.id} AND k.team_kill AND k.killer_steam_id IS NOT NULL
 			   AND k.ts >= ${from}
@@ -1308,7 +1310,7 @@ export async function dryRun(
 				'This server has no kill feed set up (Config tab), so the rule cannot see any team kills.'
 			);
 		result.notes.push(
-			`${rows.length} team kill${rows.length === 1 ? '' : 's'} in the window${rows.length === REPLAY_ROWS_MAX ? ` (the first ${REPLAY_ROWS_MAX} only)` : ''}, counted per killer within their session.`
+			`${rows.length} team kill${rows.length === 1 ? '' : 's'} in the window${rows.length === REPLAY_ROWS_MAX ? ` (the first ${REPLAY_ROWS_MAX} only)` : ''}, counted per killer within each match.`
 		);
 		return result;
 	}

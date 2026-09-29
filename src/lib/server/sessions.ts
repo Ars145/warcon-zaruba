@@ -1,7 +1,9 @@
 // Player presence per server, kept in the worker's memory and written to player_sessions in
 // batches: a row on join, left_at on leave (with the exact last time the player was seen), and a
 // heartbeat every sessionHeartbeatMs that refreshes last_seen and the stats of everyone still on.
-// A 2-second observation cadence must not mean a database write per player per observation.
+// A 2-second observation cadence must not mean a database write per player per observation. The
+// one exception is a player's side, written the look it changes: the web decides whether a kill
+// was a team kill from it as the kill arrives, and cannot see this memory.
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { DbOrTx } from './db';
 import { playerSessions } from './db/schema';
@@ -30,6 +32,8 @@ export interface OpenSession {
 	lastSeen: number;
 	/** what the database currently holds for last_seen */
 	writtenAt: number;
+	/** what the database currently holds for faction */
+	writtenTeam: string | null;
 	/** this is the player's first session on this server (false when unknown: sessions reloaded
 	 *  after a restart, or opened quietly when joins were not trusted) */
 	firstVisit: boolean;
@@ -37,9 +41,10 @@ export interface OpenSession {
 	 *  side, or putting them on its holding team ("White"), between matches, so a re-pick of the
 	 *  same side is not a new pick and the holding team is never one */
 	lastFaction: string | null;
-	/** the last side seen this session that was a team on the scoreboard. This is what the row
-	 *  keeps as the session's faction: the side seen last may be none, or the game's holding team
-	 *  ("White"), when the player leaves between matches */
+	/** the last side seen this session that was a team on the scoreboard, null until they are on
+	 *  one. This is what the row keeps as the session's faction: the side seen last may be none,
+	 *  or the game's holding team ("White"), when the player leaves between matches, and a player
+	 *  on no team is on nobody's side when a kill is judged */
 	team: string | null;
 }
 
@@ -55,18 +60,25 @@ export interface Presence {
 
 export const newPresence = (): Presence => ({ loaded: false, open: new Map(), heartbeatAt: 0 });
 
-/** Loads the sessions the database still has open for this server (once per process per server). */
+/**
+ * Loads the sessions the database still has open for this server (once per process per server).
+ * A stored side the scoreboard does not list (the holding side, which rows held before only teams
+ * were kept) loads as none, so the next look writes it that way.
+ */
 export async function loadPresence(
 	db: DbOrTx,
 	serverId: string,
-	presence: Presence
+	presence: Presence,
+	/** the factions on the scoreboard, when known */
+	teams?: readonly string[]
 ): Promise<void> {
 	const rows = await db
 		.select()
 		.from(playerSessions)
 		.where(and(eq(playerSessions.serverId, serverId), isNull(playerSessions.leftAt)));
 	presence.open.clear();
-	for (const r of rows)
+	for (const r of rows) {
+		const team = isTeam(r.faction, teams) ? r.faction : null;
 		presence.open.set(r.steamId, {
 			id: r.id,
 			steamId: r.steamId,
@@ -81,10 +93,12 @@ export async function loadPresence(
 			joinedAt: r.joinedAt.getTime(),
 			lastSeen: r.lastSeen.getTime(),
 			writtenAt: r.lastSeen.getTime(),
+			writtenTeam: r.faction,
 			firstVisit: false,
-			lastFaction: r.faction,
-			team: r.faction
+			lastFaction: team,
+			team
 		});
+	}
 	presence.loaded = true;
 }
 
@@ -198,10 +212,14 @@ export function followPlayer(
 	s.lastSeen = now;
 }
 
+/** Whether a session's side (followPlayer) is not the one its row holds. */
+export const sideMoved = (s: OpenSession): boolean => s.team !== s.writtenTeam;
+
 /**
  * Applies a diff to the database and to the in-memory presence: inserts joins, closes leaves,
- * and (when the heartbeat is due) refreshes everyone else. `firstVisit` (from firstVisits, read
- * before the transaction) is remembered on the new sessions for rules that fire later on.
+ * and (when the heartbeat is due) refreshes everyone else, or else writes the sides that changed.
+ * `firstVisit` (from firstVisits, read before the transaction) is remembered on the new sessions
+ * for rules that fire later on.
  */
 export async function persistPresence(
 	db: DbOrTx,
@@ -226,7 +244,7 @@ export async function persistPresence(
 						id: s.id,
 						left_at: new Date(s.lastSeen).toISOString(),
 						name: s.name,
-						faction: s.team ?? s.faction,
+						faction: s.team,
 						kills: s.kills,
 						deaths: s.deaths,
 						cash: s.cash,
@@ -238,6 +256,7 @@ export async function persistPresence(
 	}
 
 	if (diff.joined.length) {
+		const teamOf = (p: Player) => (isTeam(p.faction, teams) ? p.faction : null);
 		const rows = await db
 			.insert(playerSessions)
 			.values(
@@ -245,7 +264,7 @@ export async function persistPresence(
 					serverId,
 					steamId: p.steamId,
 					name: p.name,
-					faction: p.faction,
+					faction: teamOf(p),
 					joinedAt: ts,
 					lastSeen: ts,
 					kills: p.kills,
@@ -270,9 +289,10 @@ export async function persistPresence(
 				joinedAt: now,
 				lastSeen: now,
 				writtenAt: now,
+				writtenTeam: teamOf(p),
 				firstVisit: firstVisit.has(p.steamId),
-				lastFaction: isTeam(p.faction, teams) ? p.faction : null,
-				team: isTeam(p.faction, teams) ? p.faction : null
+				lastFaction: teamOf(p),
+				team: teamOf(p)
 			});
 	}
 
@@ -287,7 +307,7 @@ export async function persistPresence(
 						id: s.id,
 						last_seen: new Date(s.lastSeen).toISOString(),
 						name: s.name,
-						faction: s.team ?? s.faction,
+						faction: s.team,
 						kills: s.kills,
 						deaths: s.deaths,
 						cash: s.cash,
@@ -295,8 +315,22 @@ export async function persistPresence(
 					}))
 				)}) AS v(id bigint, last_seen timestamptz, name text, faction text, kills int, deaths int, cash int, seed_seconds int)
 			 WHERE s.id = v.id AND s.left_at IS NULL`);
-		for (const { session: s } of diff.stayed) s.writtenAt = now;
+		for (const { session: s } of diff.stayed) {
+			s.writtenAt = now;
+			s.writtenTeam = s.team;
+		}
 		presence.heartbeatAt = now;
+	} else {
+		const moved = diff.stayed.map((x) => x.session).filter(sideMoved);
+		if (moved.length) {
+			// Only the side: the heartbeat brings the rest, and faction is in no index.
+			await db.execute(sql`
+				UPDATE player_sessions AS s SET faction = v.faction
+				  FROM jsonb_to_recordset(${json(moved.map((s) => ({ id: s.id, faction: s.team })))})
+				       AS v(id bigint, faction text)
+				 WHERE s.id = v.id AND s.left_at IS NULL`);
+			for (const s of moved) s.writtenTeam = s.team;
+		}
 	}
 }
 

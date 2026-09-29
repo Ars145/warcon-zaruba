@@ -135,8 +135,8 @@ export interface RestartNoticeConfig {
 	minPlayers: number;
 }
 /**
- * Acts on team kills the kill feed reports, counted per killer within their current session:
- * a whisper from `warnAt` team kills on (0 = never), a kick at `kickAt` (0 = never).
+ * Acts on team kills the kill feed reports, counted per killer within each match: a whisper
+ * from `warnAt` team kills on (0 = never), a kick at `kickAt` (0 = never).
  */
 export interface TeamKillConfig {
 	warnAt: number;
@@ -323,9 +323,9 @@ export function validateConfig(kind: TriggerKind, raw: unknown): TriggerConfig {
 				warnAt,
 				warnMessage:
 					str(c.warnMessage, MAX_MESSAGE) ||
-					'Careful, {name}: that was a team kill ({count} this session).',
+					'Careful, {name}: that was a team kill ({count} this match).',
 				kickAt,
-				kickReason: str(c.kickReason, MAX_MESSAGE) || 'Team killing ({count} this session).'
+				kickReason: str(c.kickReason, MAX_MESSAGE) || 'Team killing ({count} this match).'
 			};
 		}
 		case 'seed_reward': {
@@ -514,7 +514,7 @@ export function broadcastWanted(
 	return cfg.maxPlayers === null || cfg.maxPlayers === undefined || playerCount <= cfg.maxPlayers;
 }
 
-/** What a team-kill rule does once the killer's count this session has reached `count`. */
+/** What a team-kill rule does once the killer's count this match has reached `count`. */
 export function teamKillStage(
 	cfg: Pick<TeamKillConfig, 'warnAt' | 'kickAt'>,
 	count: number

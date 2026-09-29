@@ -3,10 +3,11 @@
 // through the relay stream), and the team-kill rules get their turn. Their intents go through
 // the same outbox as every other trigger, so delivery, audit and the Discord mirror are shared.
 // The Kill rate rules see every batch; the rest of the work is for batches with team kills.
-import { and, eq, gte, isNull, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNull, lte, sql } from 'drizzle-orm';
 import type { Env } from './env';
 import { emit } from './events';
-import { kills, playerSessions } from './db/schema';
+import { kills, matches } from './db/schema';
+import { killsOfMatch } from './matches';
 import { enabledTriggers, renderTemplate, teamKillStage, type Evaluation } from './triggers';
 import type { TeamKillConfig } from './trigger-rules';
 import {
@@ -128,34 +129,53 @@ async function actOnKillRate(env: Env, serverId: string, batch: KillView[]): Pro
 	if (queued) wakeDelivery();
 }
 
-/** How many team kills this player has in their current session on the server, including these. */
-async function teamKillsThisSession(env: Env, serverId: string, steamId: string): Promise<number> {
-	const [open] = await env.db
-		.select({ joinedAt: playerSessions.joinedAt })
-		.from(playerSessions)
+/**
+ * How many team kills each of these players has in the match the batch arrived in, up to and
+ * including the batch: the rows that carry that match, as its match page counts them. Leaving
+ * and joining again does not start the count over, and a batch acted on late does not count the
+ * ones that came after it. A batch that came in while no match was open (a server's first
+ * seconds, or just after its stats were purged) counts with the other such kills of the hour
+ * before.
+ */
+async function teamKillsThisMatch(
+	env: Env,
+	serverId: string,
+	batch: KillView[],
+	steamIds: string[]
+): Promise<Map<string, number>> {
+	// Every kill of a batch was stamped with the match open at receipt (feed.ts); any one says which.
+	const at = new Date(batch[0].ts);
+	const [stamp] = await env.db
+		.select({ row: kills.matchRow, startedAt: matches.startedAt, endedAt: matches.endedAt })
+		.from(kills)
+		.leftJoin(matches, and(eq(matches.id, kills.matchRow), eq(matches.serverId, kills.serverId)))
 		.where(
 			and(
-				eq(playerSessions.serverId, serverId),
-				eq(playerSessions.steamId, steamId),
-				isNull(playerSessions.leftAt)
+				eq(kills.serverId, serverId),
+				eq(kills.eventId, batch[0].eventId),
+				gte(kills.ts, new Date(at.getTime() - 60_000))
 			)
 		)
-		.orderBy(sql`${playerSessions.id} DESC`)
 		.limit(1);
-	// No open session known (the worker just restarted, or the join was not trusted): the last hour.
-	const since = open?.joinedAt ?? new Date(Date.now() - 3600_000);
-	const [row] = await env.db
-		.select({ n: sql<number>`COUNT(*)` })
+	const match =
+		stamp?.row != null && stamp.startedAt
+			? killsOfMatch(stamp.row, stamp.startedAt, stamp.endedAt)
+			: null;
+	const rows = await env.db
+		.select({ steamId: kills.killerSteamId, n: sql<number>`COUNT(*)` })
 		.from(kills)
 		.where(
 			and(
 				eq(kills.serverId, serverId),
-				eq(kills.killerSteamId, steamId),
+				inArray(kills.killerSteamId, steamIds),
 				eq(kills.teamKill, true),
-				gte(kills.ts, since)
+				stamp?.row != null ? eq(kills.matchRow, stamp.row) : isNull(kills.matchRow),
+				gte(kills.ts, match?.from ?? new Date(at.getTime() - 3600_000)),
+				lte(kills.ts, at)
 			)
-		);
-	return Number(row?.n ?? 0);
+		)
+		.groupBy(kills.killerSteamId);
+	return new Map(rows.map((r) => [r.steamId!, Number(r.n)]));
 }
 
 async function actOnTeamKills(env: Env, serverId: string, teamKills: KillView[]): Promise<void> {
@@ -167,8 +187,9 @@ async function actOnTeamKills(env: Env, serverId: string, teamKills: KillView[])
 	// One count per killer for the batch; the last of their kills in it is the one acted on.
 	const byKiller = new Map<string, KillView>();
 	for (const k of teamKills) byKiller.set(k.killer!.steamId, k);
+	const counts = await teamKillsThisMatch(env, serverId, teamKills, [...byKiller.keys()]);
 	for (const [steamId, k] of byKiller) {
-		const count = await teamKillsThisSession(env, serverId, steamId);
+		const count = counts.get(steamId) ?? 0;
 		const v = {
 			name: k.killer!.name,
 			victim: k.victim.name,
