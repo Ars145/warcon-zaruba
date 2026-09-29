@@ -199,10 +199,21 @@ export const parseMatchId = (raw: string | null | undefined): number | null =>
 	raw && /^\d{1,18}$/.test(raw) ? Number(raw) : null;
 
 /**
- * The window of one of the server's matches for a kills read (feed.ts), or null when there is no
- * such match here: the rows carry the match's id, and its window on (server_id, ts) is what the
- * index serves. A kill received up to two minutes before the row was opened may still be its.
+ * A match's kills for a read: the rows carry the match's id, and its window on (server_id, ts) is
+ * what the index serves. A kill received up to two minutes before the row was opened may still be
+ * its.
  */
+export const killsOfMatch = (
+	matchRow: number,
+	startedAt: Date,
+	endedAt: Date | null
+): KillsOfMatch => ({
+	matchRow,
+	from: new Date(startedAt.getTime() - 120_000),
+	to: endedAt ? new Date(endedAt.getTime() + 120_000) : null
+});
+
+/** One of the server's matches for a kills read (feed.ts), or null when there is no such match here. */
 export async function matchWindow(
 	env: Env,
 	serverId: string,
@@ -214,9 +225,5 @@ export async function matchWindow(
 		.where(and(eq(matches.id, matchId), eq(matches.serverId, serverId)))
 		.limit(1);
 	if (!m) return null;
-	return {
-		matchRow: matchId,
-		from: new Date(m.startedAt.getTime() - 120_000),
-		to: m.endedAt ? new Date(m.endedAt.getTime() + 120_000) : null
-	};
+	return killsOfMatch(matchId, m.startedAt, m.endedAt);
 }

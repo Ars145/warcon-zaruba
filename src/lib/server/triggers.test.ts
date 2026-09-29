@@ -699,9 +699,9 @@ describe('team_kill', () => {
 		expect(() => validateConfig('team_kill', { warnAt: 3, kickAt: 2 })).toThrow(/below/);
 		expect(validateConfig('team_kill', { warnAt: 2, kickAt: 4 })).toEqual({
 			warnAt: 2,
-			warnMessage: 'Careful, {name}: that was a team kill ({count} this session).',
+			warnMessage: 'Careful, {name}: that was a team kill ({count} this match).',
 			kickAt: 4,
-			kickReason: 'Team killing ({count} this session).'
+			kickReason: 'Team killing ({count} this match).'
 		});
 		expect(validateConfig('team_kill', { kickAt: 3, kickReason: 'Out.' })).toMatchObject({
 			warnAt: 0,
