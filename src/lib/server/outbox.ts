@@ -4,7 +4,9 @@
 // command, and records exactly what happened: delivered, failed (the game said no), skipped (the
 // player had already left, or the intent went stale), or unknown (sent, no answer). Unknown is
 // never retried on its own: a second whisper is harmless, a second kick is not, and the audit row
-// says what is known.
+// says what is known. A server that refuses the panel for sending too fast gets no more trigger
+// actions until the time it gave has passed (observations and people's commands are not held;
+// the hold is this worker's, and a worker that takes over starts without it).
 import { and, desc, eq, sql } from 'drizzle-orm';
 import type { Env } from './env';
 import type { DbOrTx } from './db';
@@ -84,7 +86,8 @@ declare global {
 	var __warconDelivery: ReturnType<typeof setInterval> | undefined;
 	var __warconDeliveryGen: number | undefined;
 	var __warconDeliveryChains:
-		{ claiming: boolean; busy: Set<string>; mine: Set<number> } | undefined;
+		| { claiming: boolean; busy: Set<string>; mine: Set<number>; held?: Map<string, number> }
+		| undefined;
 }
 let wanted = false;
 /** Settles when this module's claim in progress, if any, has finished (see stopDelivery). */
@@ -99,6 +102,8 @@ const loop = globalThis.__warconDeliveryChains;
 const busy = loop.busy;
 /** Rows claimed here and not yet done: the lease sweep leaves them to their chain. */
 const mine = loop.mine;
+/** Servers that refused the panel for sending too fast, and until when: not claimed until then. */
+const held = (loop.held ??= new Map());
 
 export function startDelivery(env: Env): void {
 	envRef = env;
@@ -128,10 +133,21 @@ export function wakeDelivery(): void {
 }
 
 /** `chains` and `claimed` show a server whose chain never ends (its rows would sit pending). */
-export const deliveryStats = () => ({ ...stats, chains: busy.size, claimed: mine.size });
+export const deliveryStats = () => ({
+	...stats,
+	chains: busy.size,
+	claimed: mine.size,
+	held: held.size
+});
 
 /** A list as one JSON parameter: one statement text whatever its length (see pass). */
 const jsonList = (values: Iterable<string | number>) => JSON.stringify([...values]);
+
+/** The servers a claim passes over now: a chain of theirs is running, or they are held. */
+function passedOver(now: number): string[] {
+	for (const [id, until] of held) if (until <= now) held.delete(id);
+	return [...busy, ...held.keys()];
+}
 
 async function pass(): Promise<void> {
 	const env = envRef;
@@ -153,7 +169,8 @@ async function pass(): Promise<void> {
 			   AND id NOT IN (SELECT v::bigint FROM jsonb_array_elements_text(${jsonList(mine)}::text::jsonb) AS v
 			                   WHERE v IS NOT NULL)`);
 			// Claiming moves the row to "sending" durably before anything is sent: the oldest due
-			// rows, at most PER_SERVER of any one server, none of a server whose chain is running.
+			// rows, at most PER_SERVER of any one server, none of a server whose chain is running or that
+			// is held.
 			return (await tx.execute(sql`
 			UPDATE outbox SET state = 'sending', lease_until = now() + (${lease} || ' milliseconds')::interval, attempts = attempts + 1
 			 WHERE id IN (SELECT id FROM outbox
@@ -161,7 +178,7 @@ async function pass(): Promise<void> {
 			                 AND id IN (SELECT id FROM (SELECT id, row_number() OVER (PARTITION BY server_id ORDER BY id) AS n
 			                                              FROM outbox
 			                                             WHERE state = 'pending' AND not_before <= now()
-			                                               AND server_id NOT IN (SELECT v FROM jsonb_array_elements_text(${jsonList(busy)}::text::jsonb) AS v
+			                                               AND server_id NOT IN (SELECT v FROM jsonb_array_elements_text(${jsonList(passedOver(Date.now()))}::text::jsonb) AS v
 			                                                                      WHERE v IS NOT NULL)) due
 			                             WHERE n <= ${PER_SERVER} ORDER BY id LIMIT ${CLAIM_LIMIT})
 			               FOR UPDATE SKIP LOCKED)
@@ -198,11 +215,22 @@ async function pass(): Promise<void> {
 	}
 }
 
-/** One server's claimed rows, one at a time in the order they were queued. */
+/**
+ * One server's claimed rows, one at a time in the order they were queued. Once the server is held,
+ * the rows not yet sent go back as they are, to be claimed in the same order when the hold ends.
+ */
 async function deliverChain(env: Env, rows: OutboxRow[]): Promise<void> {
-	for (const r of rows)
-		await deliverOne(env, r).catch((err) => console.error('[warcon] delivery', err));
+	for (let i = 0; i < rows.length; i++) {
+		const after = await deliverOne(env, rows[i]).catch((err) => {
+			console.error('[warcon] delivery', err);
+		});
+		if (after === 'held') return putBack(env, rows.slice(i), WAITING);
+		if (after === 'refused') return putBack(env, rows.slice(i + 1), WAITING);
+	}
 }
+
+/** What a held server's rows say while they wait. */
+const WAITING = 'Waiting: the server asked the panel to slow down.';
 
 /** Claimed rows that were not sent, back to pending as they are, oldest still first. */
 async function putBack(env: Env, rows: OutboxRow[], why?: string): Promise<void> {
@@ -260,6 +288,12 @@ const WAIT_MS = 5000;
 
 class Skipped extends Error {}
 class Waiting extends Error {}
+/** The server is held: nothing is sent to it until the hold ends. */
+class Held extends Error {}
+
+/** Until when (ms) the server has asked the panel to wait: its hold here, or its observation's. */
+const holdOf = (serverId: string, m: ReturnType<typeof memoryOf>): number =>
+	Math.max(held.get(serverId) ?? 0, m?.holdUntil ?? 0);
 
 /** Puts a claimed row back to pending, to be claimed again after WAIT_MS. */
 async function release(env: Env, row: OutboxRow): Promise<void> {
@@ -280,7 +314,12 @@ async function release(env: Env, row: OutboxRow): Promise<void> {
 	}
 }
 
-async function deliverOne(env: Env, row: OutboxRow): Promise<void> {
+/**
+ * Sends one row and records what happened. 'held': the server is held and this row was not sent;
+ * 'refused': the game refused this row for sending too fast (it is failed) and the server is now
+ * held. Either way the chain puts the rest back.
+ */
+async function deliverOne(env: Env, row: OutboxRow): Promise<'held' | 'refused' | void> {
 	if (row.action === 'seed_reward') return deliverSeedReward(env, row);
 	// An alert-only Name filter match or a Kill rate flag: the audit row (and its Discord card) is
 	// the whole delivery.
@@ -288,6 +327,12 @@ async function deliverOne(env: Env, row: OutboxRow): Promise<void> {
 		return finish(env, row, 'delivered', row.okMessage);
 	const early = skipReason(row, memoryOf(row.serverId));
 	if (early) return finish(env, row, 'skipped', early);
+	// A hold is for the whole server: looked at before a player's own wait, so it is noticed.
+	const until = holdOf(row.serverId, memoryOf(row.serverId));
+	if (until > Date.now()) {
+		held.set(row.serverId, until);
+		return 'held';
+	}
 	if (mustWait(row, memoryOf(row.serverId))) return release(env, row);
 	stats.inFlight++;
 	try {
@@ -299,6 +344,7 @@ async function deliverOne(env: Env, row: OutboxRow): Promise<void> {
 				const m = memoryOf(row.serverId);
 				const late = skipReason(row, m);
 				if (late) throw new Skipped(late);
+				if (holdOf(row.serverId, m) > Date.now()) throw new Held();
 				if (mustWait(row, m)) throw new Waiting();
 				if (!isOwner()) throw new LostOwnership();
 				const client = await WardogsClient.forServer(env, m!.server);
@@ -309,10 +355,22 @@ async function deliverOne(env: Env, row: OutboxRow): Promise<void> {
 		await finish(env, row, 'delivered', messageOf(result) || row.okMessage);
 	} catch (err) {
 		if (err instanceof Skipped) return finish(env, row, 'skipped', err.message);
+		if (err instanceof Held) {
+			held.set(row.serverId, holdOf(row.serverId, memoryOf(row.serverId)));
+			return 'held';
+		}
 		if (err instanceof Waiting) return release(env, row);
 		if (err instanceof LostOwnership) return; // the lease sweep marks it unknown
 		if (err instanceof LaneFull || err instanceof LaneTimeout)
 			return finish(env, row, 'skipped', err.message);
+		// Refused for sending too fast: this row fails as any refusal does, and the server's other
+		// rows wait for as long as the game asked instead of running into the same answer.
+		if (err instanceof GameError && err.code === 'rate_limited') {
+			const until = Date.now() + (err.retryAfterMs || WAIT_MS);
+			held.set(row.serverId, Math.max(held.get(row.serverId) ?? 0, until));
+			await finish(env, row, 'failed', err.message);
+			return 'refused';
+		}
 		if (err instanceof GameError && err.code === 'unreachable')
 			await finish(env, row, 'unknown', `No answer from the server (${err.message})`);
 		else if (err instanceof GameError || err instanceof ApiError)
@@ -421,8 +479,10 @@ async function execute(client: WardogsClient, row: OutboxRow): Promise<unknown> 
 		let rotationOn = false;
 		try {
 			rotationOn = !!((await ACTIONS.rotation.run(client, {})) as { enabled: boolean }).enabled;
-		} catch {
-			/* treat as no rotation */
+		} catch (err) {
+			// A refusal for sending too fast is not "no rotation": the reset fails and the server is
+			// held, before anything is sent. Anything else reads as no rotation.
+			if (err instanceof GameError && err.code === 'rate_limited') throw err;
 		}
 		if (rotationOn) {
 			try {

@@ -1,6 +1,7 @@
 // One server's deliveries never hold up another's: each server's rows go out in a chain of their
 // own, a claim takes only a few of any one server's rows, and the loop never waits for a slow chain
-// before claiming for the rest. The game is a stand-in whose answer time is set per server.
+// before claiming for the rest. A server that refuses the panel for sending too fast gets no more
+// trigger actions until the time it gave. The game is a stand-in whose answers are set per server.
 import {
 	afterAll,
 	afterEach,
@@ -11,13 +12,13 @@ import {
 	spyOn,
 	test
 } from 'bun:test';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, sql } from 'drizzle-orm';
 import type { Env } from '$lib/server/env';
-import { organizations, outbox, servers } from '$lib/server/db/schema';
+import { auditLog, organizations, outbox, servers } from '$lib/server/db/schema';
 import { acquireOrRenew, releaseOwnership } from '$lib/server/leadership';
-import { forgetMemory, memoryFor } from '$lib/server/observe';
+import { forgetMemory, memoryFor, memoryOf } from '$lib/server/observe';
 import { deliveryStats, startDelivery, stopDelivery } from '$lib/server/outbox';
-import { WardogsClient } from '$lib/server/rcon';
+import { GameError, WardogsClient } from '$lib/server/rcon';
 import { resetSetting, saveSettings } from '$lib/server/settings';
 import { hasTestDb, testEnv } from './db';
 import { seedWorld, type World } from './world';
@@ -29,8 +30,10 @@ describe.skipIf(!hasTestDb)('delivery across servers', () => {
 	let renewing: ReturnType<typeof setInterval>;
 	/** how long the stand-in game takes to answer, by server */
 	const answerMs = new Map<string, number>();
+	/** how many more requests the stand-in game refuses for sending too fast, by server */
+	const refuse = new Map<string, number>();
 	/** every request the stand-in game got, in the order they started */
-	const sent: { serverId: string; message: string; at: number }[] = [];
+	const sent: { serverId: string; request: string; message: string; at: number }[] = [];
 	const open = new Map<string, number>();
 	/** requests that started while another to the same server was still open */
 	let overlaps = 0;
@@ -49,11 +52,28 @@ describe.skipIf(!hasTestDb)('delivery across servers', () => {
 		spy = spyOn(WardogsClient, 'forServer').mockImplementation(
 			async (_env, server) =>
 				({
-					json: async (_method: string, _path: string, body?: { message?: string }) => {
+					json: async (method: string, path: string, body?: { message?: string }) => {
 						const n = (open.get(server.id) ?? 0) + 1;
 						if (n > 1) overlaps++;
 						open.set(server.id, n);
-						sent.push({ serverId: server.id, message: body?.message ?? '', at: Date.now() });
+						sent.push({
+							serverId: server.id,
+							request: `${method} ${path}`,
+							message: body?.message ?? '',
+							at: Date.now()
+						});
+						const refusals = refuse.get(server.id) ?? 0;
+						if (refusals) {
+							refuse.set(server.id, refusals - 1);
+							open.set(server.id, (open.get(server.id) ?? 1) - 1);
+							const err = new GameError(
+								429,
+								'The game server is rate limiting this panel (Request rate exceeded); retry in 2 s.',
+								'rate_limited'
+							);
+							err.retryAfterMs = 2000;
+							throw err;
+						}
 						await Bun.sleep(answerMs.get(server.id) ?? 0);
 						open.set(server.id, (open.get(server.id) ?? 1) - 1);
 						return { ok: true };
@@ -237,6 +257,167 @@ describe.skipIf(!hasTestDb)('delivery across servers', () => {
 		} finally {
 			letGo();
 			await holder.catch(() => {});
+		}
+	}, 30_000);
+
+	test("a refusal for sending too fast fails its row, and that server's other rows wait out the time it gave", async () => {
+		answerMs.set(w.server.id, 0);
+		answerMs.set(w.otherServer.id, 0);
+		refuse.set(w.server.id, 1);
+		const since = new Date();
+		const from = sent.length;
+		const heldRows = await queue(
+			w.server.id,
+			Array.from({ length: 12 }, (_, i) => `held ${i}`)
+		);
+		const [free] = await queue(w.otherServer.id, ['not held']);
+		startDelivery(env);
+		await until(async () => sent.slice(from).some((s) => s.message === 'held 0'));
+		const refusedAt = sent.slice(from).find((s) => s.message === 'held 0')!.at;
+		// While the hold lasts, the rows claimed with the refused one wait as they are and the
+		// server's later rows are not claimed at all.
+		await Bun.sleep(1000);
+		const during = await rowsOf(heldRows);
+		expect(during.slice(1, 5).map((r) => [r.state, r.outcome])).toEqual(
+			Array(4).fill(['pending', 'Waiting: the server asked the panel to slow down.'])
+		);
+		expect(during.slice(5).map((r) => [r.state, r.attempts])).toEqual(
+			Array(7).fill(['pending', 0])
+		);
+		await until(settled([...heldRows, free]));
+		const rows = await rowsOf(heldRows);
+		expect([rows[0].state, rows[0].outcome]).toEqual([
+			'failed',
+			'The game server is rate limiting this panel (Request rate exceeded); retry in 2 s.'
+		]);
+		expect(rows.slice(1).every((r) => r.state === 'delivered')).toBe(true);
+		expect((await rowsOf([free]))[0].state).toBe('delivered');
+		const log = sent.slice(from);
+		const later = log.filter((s) => s.serverId === w.server.id).slice(1);
+		expect(later.map((s) => s.message)).toEqual(
+			Array.from({ length: 11 }, (_, i) => `held ${i + 1}`)
+		);
+		expect(later[0].at - refusedAt).toBeGreaterThanOrEqual(1900);
+		expect(log.find((s) => s.message === 'not held')!.at - refusedAt).toBeLessThan(1500);
+		// The refusal is audited as a failure, as it always was; the rest as delivered.
+		const trail = () =>
+			env.db
+				.select({ outcome: auditLog.outcome })
+				.from(auditLog)
+				.where(
+					and(
+						inArray(auditLog.serverId, [w.server.id, w.otherServer.id]),
+						eq(auditLog.action, 'trigger.broadcast'),
+						gte(auditLog.ts, since)
+					)
+				);
+		await until(async () => (await trail()).length >= 13);
+		const outcomes = (await trail()).map((a) => a.outcome);
+		expect([outcomes.filter((o) => o === 'error').length, outcomes.length]).toEqual([1, 13]);
+	}, 30_000);
+
+	test('a server its observation holds is sent nothing until the hold ends', async () => {
+		answerMs.set(w.server.id, 0);
+		const from = sent.length;
+		const heldAt = Date.now();
+		memoryOf(w.server.id)!.holdUntil = heldAt + 2500;
+		const rows = await queue(w.server.id, ['after the hold 1', 'after the hold 2']);
+		startDelivery(env);
+		await until(settled(rows));
+		expect((await rowsOf(rows)).map((r) => r.state)).toEqual(['delivered', 'delivered']);
+		const log = sent.slice(from);
+		expect(log.map((s) => s.message)).toEqual(['after the hold 1', 'after the hold 2']);
+		expect(log[0].at - heldAt).toBeGreaterThanOrEqual(2400);
+	}, 30_000);
+
+	test('a map reset whose rotation read is refused fails without sending anything more', async () => {
+		answerMs.set(w.server.id, 0);
+		refuse.set(w.server.id, 1);
+		const from = sent.length;
+		const [reset] = await env.db
+			.insert(outbox)
+			.values({
+				serverId: w.server.id,
+				triggerName: 'Empty reset',
+				triggerKind: 'empty_reset',
+				action: 'empty_reset',
+				params: { map: 'Bakurani' },
+				target: 'Bakurani',
+				okMessage: 'Reset.',
+				dedupeKey: `fairness-${seq++}`
+			})
+			.returning({ id: outbox.id });
+		startDelivery(env);
+		await until(settled([reset.id]));
+		await Bun.sleep(300);
+		const [row] = await rowsOf([reset.id]);
+		expect([row.state, row.outcome]).toEqual([
+			'failed',
+			'The game server is rate limiting this panel (Request rate exceeded); retry in 2 s.'
+		]);
+		expect(sent.slice(from).map((s) => s.request)).toEqual(['GET /v1/rotation']);
+		expect(deliveryStats().held).toBeGreaterThan(0);
+	}, 30_000);
+
+	test('a hold is noticed ahead of a player who is between maps, so the backlog is not churned', async () => {
+		const AWAY = '76561198000000811';
+		const m = memoryOf(w.server.id)!;
+		const heldAt = Date.now();
+		m.players = [];
+		m.playersAt = heldAt;
+		m.presence.loaded = true;
+		m.presence.open.set(AWAY, {
+			id: 1,
+			steamId: AWAY,
+			name: 'Away',
+			faction: null,
+			kills: 0,
+			deaths: 0,
+			cash: 0,
+			game: null,
+			seedMs: 0,
+			pendingSeedMs: 0,
+			joinedAt: heldAt - 60_000,
+			lastSeen: heldAt - 5000,
+			writtenAt: heldAt - 5000,
+			writtenTeam: null,
+			firstVisit: false,
+			lastFaction: null,
+			team: null
+		});
+		m.holdUntil = heldAt + 3000;
+		try {
+			const ids = (
+				await env.db
+					.insert(outbox)
+					.values(
+						Array.from({ length: 12 }, (_, i) => ({
+							serverId: w.server.id,
+							triggerName: 'Welcome',
+							triggerKind: 'welcome',
+							action: 'whisper',
+							params: { steamId: AWAY, message: `welcome ${i}` },
+							target: AWAY,
+							steamId: AWAY,
+							okMessage: 'Whispered.',
+							dedupeKey: `fairness-${seq++}`
+						}))
+					)
+					.returning({ id: outbox.id })
+			).map((r) => r.id);
+			startDelivery(env);
+			await until(async () => (await rowsOf(ids)).some((r) => r.attempts > 0));
+			await Bun.sleep(700);
+			const during = await rowsOf(ids);
+			// The first claim notices the hold and goes back whole; nothing else is claimed.
+			expect(during.slice(0, 5).map((r) => [r.state, r.outcome])).toEqual(
+				Array(5).fill(['pending', 'Waiting: the server asked the panel to slow down.'])
+			);
+			expect(during.slice(5).map((r) => r.attempts)).toEqual(Array(7).fill(0));
+		} finally {
+			m.presence.open.delete(AWAY);
+			m.playersAt = 0;
+			m.holdUntil = 0;
 		}
 	}, 30_000);
 });
