@@ -32,6 +32,8 @@ import { callApi, callLoad, stubGateway, type CallInput, type Outcome } from './
 import { seedWorld, suspend, type World } from './world';
 
 const ROUTES = join(import.meta.dir, '..', 'routes');
+/** The kill feed's tag for the defibrillator, a Kill distance rule's usual weapon. */
+const DEFIB = 'Id.Item.Defibrillator.Standard';
 
 describe.skipIf(!hasTestDb)('access', () => {
 	let env: Env;
@@ -518,6 +520,10 @@ describe.skipIf(!hasTestDb)('access', () => {
 				['name_filter', { characters: 'ascii', action: 'alert' }, 'players.moderate'],
 				['team_kill', { kickAt: 3 }, 'players.moderate'],
 				['kill_rate', { maxKills: 20 }, 'players.moderate'],
+				['kill_distance', { causes: [DEFIB], action: 'flag' }, 'players.moderate'],
+				['kill_distance', { causes: [DEFIB], action: 'kick' }, 'players.moderate'],
+				['kill_distance', { causes: [DEFIB], action: 'ban' }, 'bans.manage'],
+				['kill_distance', { causes: [DEFIB], action: 'ban', banScope: 'org' }, 'lists.ban'],
 				['two_teams', { closedFaction: 'Lonestar' }, 'players.moderate'],
 				['seed_reward', { minutes: 60, scope: 'server' }, 'slots.manage'],
 				['seed_reward', { minutes: 60, scope: 'org' }, 'lists.reserve']
@@ -545,6 +551,41 @@ describe.skipIf(!hasTestDb)('access', () => {
 				body: orgSlot
 			});
 			expect(refused.status).toBe(403);
+			// a ban on the organisation's list is not this server's Bans, nor the other way round, and
+			// Kick players reaches neither
+			const ban = (banScope: string) => ({
+				kind: 'kill_distance',
+				config: { causes: [DEFIB], action: 'ban', banScope }
+			});
+			for (const [caps, banScope] of [
+				[['bans.manage', 'players.moderate'], 'org'],
+				[['lists.ban', 'players.moderate'], 'server'],
+				[['players.moderate'], 'server']
+			] as const) {
+				await holds([...caps]);
+				for (const route of [
+					'POST api/servers/[id]/triggers',
+					'POST api/servers/[id]/triggers/dry-run'
+				]) {
+					const got = await api(w, 'viewer', route, { params, body: ban(banScope) });
+					expect([caps, banScope, route, got.status]).toEqual([caps, banScope, route, 403]);
+				}
+			}
+			// a flag or kick rule cannot be turned into a ban by an edit its author could not save
+			await holds(['players.moderate']);
+			const made = await api(w, 'viewer', 'POST api/servers/[id]/triggers', {
+				params,
+				body: { kind: 'kill_distance', config: { causes: [DEFIB], action: 'kick' } }
+			});
+			expect(made.status).toBe(201);
+			const edit = await api(w, 'viewer', 'PATCH api/servers/[id]/triggers/[triggerId]', {
+				params: {
+					id: w.server.id,
+					triggerId: (made.body as { trigger: { id: string } }).trigger.id
+				},
+				body: { config: { causes: [DEFIB], action: 'ban' } }
+			});
+			expect(edit.status).toBe(403);
 		});
 
 		test('a Name filter rule: who may save, dry-run and switch it on', async () => {
@@ -655,6 +696,86 @@ describe.skipIf(!hasTestDb)('access', () => {
 				body: { enabled: false }
 			});
 			expect(moved.status).toBe(404);
+		});
+
+		test('a Kill distance rule that bans: who may save, dry-run and switch it on, for each list', async () => {
+			const w = await seedWorld(env);
+			// Automation and Kick players, but neither ban list: a ban rule is not theirs.
+			await env.db
+				.update(orgRoles)
+				.set({ capabilities: ['server.view', 'automation.manage', 'players.moderate'] })
+				.where(eq(orgRoles.id, w.roles.viewer));
+			const expected: Record<PrincipalName, number> = {
+				anon: 401,
+				stranger: 404,
+				outsider: 404,
+				member: 404,
+				viewer: 403,
+				operator: 403,
+				admin: 200,
+				elsewhere: 404,
+				orgBans: 403,
+				orgSlots: 403,
+				owner: 200,
+				site: 200,
+				keyView: 403,
+				keyAll: 200,
+				keyElsewhere: 404,
+				keyBans: 403
+			};
+			for (const banScope of ['server', 'org']) {
+				const body = {
+					kind: 'kill_distance',
+					config: { causes: [DEFIB], action: 'ban', banScope }
+				};
+				const made = await api(w, 'owner', 'POST api/servers/[id]/triggers', {
+					params: { id: w.server.id },
+					body
+				});
+				expect(made.status).toBe(201);
+				const triggerId = (made.body as { trigger: { id: string } }).trigger.id;
+				for (const [who, status] of Object.entries(expected) as [PrincipalName, number][]) {
+					const got = [
+						await api(w, who, 'POST api/servers/[id]/triggers/dry-run', {
+							params: { id: w.server.id },
+							body
+						}),
+						await api(w, who, 'PATCH api/servers/[id]/triggers/[triggerId]', {
+							params: { id: w.server.id, triggerId },
+							body: { enabled: true }
+						}),
+						await api(w, who, 'POST api/servers/[id]/triggers', {
+							params: { id: w.server.id },
+							body
+						})
+					].map((r) => r.status);
+					expect([banScope, who, ...got]).toEqual([
+						banScope,
+						who,
+						status,
+						status,
+						status === 200 ? 201 : status
+					]);
+				}
+				// The rule's id under another server's path is not found, even for its org's owner.
+				const moved = await api(w, 'owner', 'PATCH api/servers/[id]/triggers/[triggerId]', {
+					params: { id: w.otherServer.id, triggerId },
+					body: { enabled: false }
+				});
+				expect(moved.status).toBe(404);
+			}
+			// A key limited to one server holds every capability there, but never the organisation's
+			// lists: it may make a rule that bans on its server, not one that bans on every server.
+			for (const [banScope, status] of [
+				['server', 201],
+				['org', 403]
+			] as const) {
+				const got = await api(w, 'keyElsewhere', 'POST api/servers/[id]/triggers', {
+					params: { id: w.otherServer.id },
+					body: { kind: 'kill_distance', config: { causes: [DEFIB], action: 'ban', banScope } }
+				});
+				expect([banScope, got.status]).toEqual([banScope, status]);
+			}
 		});
 
 		test('a Two-team mode rule: who may save, dry-run and switch it on, and one per server', async () => {

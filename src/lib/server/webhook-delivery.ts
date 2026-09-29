@@ -147,6 +147,7 @@ const ACTION_TITLES: Record<string, string> = {
 	'trigger.name_filter': 'Trigger · name filter',
 	'trigger.kill_rate': 'Trigger · kill rate watch',
 	'trigger.two_teams': 'Trigger · two-team mode',
+	'trigger.kill_distance': 'Trigger · kill distance watch',
 	'player.note': 'Player note',
 	'player.watch': 'Watchlist',
 	'list.add': 'Org list · added',
@@ -194,9 +195,10 @@ export function buildEmbed(appName: string, row: AuditRow): Embed {
 	};
 }
 
-/** A Kill rate flag is a prompt to go and look: its post opens the player's page. */
+/** A Kill rate or Kill distance post is a prompt to go and look: it opens the player's page. */
+const DOSSIER_LINKED = new Set(['trigger.kill_rate', 'trigger.kill_distance']);
 function withDossierLink(env: Env, row: AuditRow, embed: Embed): Embed {
-	if (row.action !== 'trigger.kill_rate' || !row.serverId || !row.target) return embed;
+	if (!DOSSIER_LINKED.has(row.action) || !row.serverId || !row.target) return embed;
 	const url = dossierUrl(env.ORIGIN, row.serverId, row.target);
 	return url ? { ...embed, url } : embed;
 }
