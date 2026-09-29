@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { scoreCapOf } from '$lib/match';
-	import { rconGet, rconPost, errorMessage } from '$lib/api';
+	import { ApiError, rconGet, rconPost, errorMessage } from '$lib/api';
 	import { poll } from '$lib/poll';
 	import { watchLive, type KillsNotice } from '$lib/live';
 	import { causeLabel } from '$lib/causes';
@@ -42,6 +42,12 @@
 	let now = $state(Date.now());
 	let showPicker = $state(false);
 	let broadcast = $state('');
+	/** who the message goes to: '' is everyone (a broadcast), else a faction (a whisper to each on it) */
+	let to = $state('');
+	let sending = $state(false);
+	/** a faction whisper the game stopped early: who it did not reach, for Send again with the same text */
+	let rest = $state<{ to: string; message: string; steamIds: string[] } | null>(null);
+	let resend = $derived(rest && rest.to === to && rest.message === broadcast.trim() ? rest : null);
 	let picker = $state<MapPicker>();
 	let seeded = false;
 
@@ -220,10 +226,40 @@
 		)
 	);
 
+	/** the factions of this match, and a chosen one that has since gone, so it is never swapped for everyone */
+	let factions = $derived.by(() => {
+		const names = (status?.scores ?? []).map((f) => f.name);
+		return to && !names.includes(to) ? [...names, to] : names;
+	});
+
 	async function sendBroadcast() {
 		const message = broadcast.trim();
-		if (!message) return;
-		if (await act('broadcast', { message })) broadcast = '';
+		if (!message || sending) return;
+		const again = resend;
+		sending = true;
+		try {
+			if (!to) {
+				if (await act('broadcast', { message })) broadcast = '';
+				return;
+			}
+			const result = await rconPost<{ message: string; unsent: string[]; stopped?: string }>(
+				id,
+				'whisperMany',
+				again ? { steamIds: again.steamIds, message } : { faction: to, message }
+			);
+			toast(result.message, result.stopped ? 'err' : 'ok');
+			rest = result.stopped ? { to, message, steamIds: result.unsent } : null;
+			if (!rest) broadcast = '';
+		} catch (err) {
+			toast(errorMessage(err), 'err');
+			// Everyone it had not reached has left since: nobody is waiting for it any more.
+			if (again && err instanceof ApiError && err.code === 'no_recipients') {
+				rest = null;
+				broadcast = '';
+			}
+		} finally {
+			sending = false;
+		}
 	}
 </script>
 
@@ -382,17 +418,31 @@
 				void sendBroadcast();
 			}}
 		>
-			<span class="field-label">Announcement to all players</span>
+			<label class="field-label" for="broadcast-to">Message to</label>
 			<div class="join w-full">
+				<select
+					id="broadcast-to"
+					class="input w-auto flex-none! pr-[30px]"
+					bind:value={to}
+					disabled={!chat}
+				>
+					<option value="">Everyone</option>
+					{#each factions as f (f)}<option value={f}>{f}</option>{/each}
+				</select>
 				<input
 					class="input"
 					type="text"
 					maxlength="200"
-					placeholder="Message shown to everyone on the server…"
+					aria-label="Message"
+					placeholder={to
+						? `Whispered to everyone on ${to}…`
+						: 'Message shown to everyone on the server…'}
 					bind:value={broadcast}
 					disabled={!chat}
 				/>
-				<button class="btn btn-primary" type="submit" disabled={!chat}>Send</button>
+				<button class="btn btn-primary" type="submit" disabled={!chat || sending}
+					>{resend ? `Send to the rest · ${resend.steamIds.length}` : 'Send'}</button
+				>
 			</div>
 		</form>
 		{#if banner}

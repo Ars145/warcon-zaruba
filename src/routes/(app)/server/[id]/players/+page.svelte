@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { SvelteSet } from 'svelte/reactivity';
 	import { api, qs, rconPost, errorMessage } from '$lib/api';
 	import { watchLive } from '$lib/live';
 	import { fmtNum, steamNameBeside } from '$lib/format';
@@ -44,6 +45,9 @@
 	let text = $state('');
 	let team = $state('');
 	let busy = $state(false);
+	/** SteamIDs ticked for a group whisper, and whether its dialog is open */
+	const picked = new SvelteSet<string>();
+	let grouping = $state(false);
 	/** watchlist, first-visit and risk marks by SteamID; refreshed when the roster changes */
 	let marks = $state<Record<string, PlayerMark>>({});
 	let marksKey = '';
@@ -79,6 +83,9 @@
 	let destinations = $derived(
 		(status?.scores ?? []).map((f) => f.name).filter((n) => n !== (live ?? dialog?.player)?.faction)
 	);
+	/** the ticked players still on the server, shown or filtered out */
+	let pickedOn = $derived(all.filter((p) => picked.has(p.steamId)));
+	let shownPicked = $derived(rows.length > 0 && rows.every((p) => picked.has(p.steamId)));
 
 	async function act(action: string, params: object) {
 		try {
@@ -139,6 +146,46 @@
 		void refreshListState();
 		return watchLive([id], onLive);
 	});
+
+	function pick(steamId: string) {
+		if (picked.has(steamId)) picked.delete(steamId);
+		else picked.add(steamId);
+	}
+	/** ticks every row the filter shows, or clears them when all are ticked already */
+	function pickShown() {
+		const clear = shownPicked;
+		for (const p of rows) {
+			if (clear) picked.delete(p.steamId);
+			else picked.add(p.steamId);
+		}
+	}
+	function openGroup() {
+		if (busy || !pickedOn.length) return;
+		text = '';
+		grouping = true;
+	}
+	/** Whispers the ticked players; those it did not reach stay ticked, so Send again goes to them alone. */
+	async function sendGroup() {
+		const steamIds = pickedOn.map((p) => p.steamId);
+		const message = text.trim();
+		if (busy || !steamIds.length || !message) return;
+		busy = true;
+		try {
+			const result = await rconPost<{ message: string; unsent: string[]; stopped?: string }>(
+				id,
+				'whisperMany',
+				{ steamIds, message }
+			);
+			toast(result.message, result.stopped ? 'err' : 'ok');
+			picked.clear();
+			for (const s of result.unsent) picked.add(s);
+			if (!result.stopped) grouping = false;
+		} catch (err) {
+			toast(errorMessage(err), 'err');
+		} finally {
+			busy = false;
+		}
+	}
 
 	function open(kind: Kind, player: Player) {
 		if (busy) return;
@@ -230,12 +277,26 @@
 				/>
 				<button class="btn" onclick={refreshPlayers}>Refresh</button>
 			</div>
+			{#if chat}
+				<button class="btn" disabled={busy || !pickedOn.length} onclick={openGroup}
+					>Whisper selected{pickedOn.length ? ` · ${pickedOn.length}` : ''}</button
+				>
+			{/if}
 			<span class="ml-auto text-[12.5px] text-mist-600">{rows.length} / {all.length} players</span>
 		</div>
 		<div class="table-wrap">
 			<table>
 				<thead>
 					<tr>
+						{#if chat}<th class="w-0"
+								><input
+									type="checkbox"
+									aria-label="Select every player shown"
+									checked={shownPicked}
+									disabled={!rows.length}
+									onchange={pickShown}
+								/></th
+							>{/if}
 						<SortHeader {sort} key="player">Player</SortHeader>
 						<SortHeader {sort} key="flags">Flags</SortHeader>
 						<SortHeader {sort} key="reserved">Reserved</SortHeader>
@@ -252,7 +313,15 @@
 						{@const m = marks[p.steamId]}
 						{@const r = listState?.reserved[p.steamId]}
 						{@const steam = steamNameBeside(p.name, m?.steamName)}
-						<tr>
+						<tr class={picked.has(p.steamId) ? 'selected' : ''}>
+							{#if chat}<td class="w-0"
+									><input
+										type="checkbox"
+										aria-label="Select {p.name}"
+										checked={picked.has(p.steamId)}
+										onchange={() => pick(p.steamId)}
+									/></td
+								>{/if}
 							<td
 								><a
 									href="{base}/{p.steamId}"
@@ -350,7 +419,9 @@
 						</tr>
 					{:else}
 						<tr
-							><td colspan={anyAction ? 9 : 8} class="py-6 text-center text-mist-600"
+							><td
+								colspan={8 + (anyAction ? 1 : 0) + (chat ? 1 : 0)}
+								class="py-6 text-center text-mist-600"
 								>{all.length ? 'No matches.' : 'No players connected.'}</td
 							></tr
 						>
@@ -431,6 +502,44 @@
 						!live ||
 						(kind === 'whisper' && !text.trim()) ||
 						(kind === 'move' && !destinations.includes(team))}>{SUBMIT[kind]}</button
+				>
+			</div>
+		</form>
+	</Modal>
+{/if}
+
+{#if grouping}
+	<Modal
+		title="Whisper to {pickedOn.length} player{pickedOn.length === 1 ? '' : 's'}"
+		onclose={() => (grouping = false)}
+	>
+		<form
+			class="space-y-3"
+			onsubmit={(e) => {
+				e.preventDefault();
+				void sendGroup();
+			}}
+		>
+			<p class="max-h-24 overflow-y-auto text-[12.5px] text-mist-400">
+				{pickedOn.map((p) => p.name).join(', ') || 'No one ticked is on the server.'}
+			</p>
+			<label class="sr-only" for="group-text">Message</label>
+			<input
+				id="group-text"
+				class="input"
+				type="text"
+				placeholder="Private message…"
+				maxlength="200"
+				bind:value={text}
+			/>
+			<div class="flex justify-end gap-2">
+				<button type="button" class="btn btn-ghost" data-close onclick={() => (grouping = false)}
+					>Cancel</button
+				>
+				<button
+					type="submit"
+					class="btn btn-primary"
+					disabled={busy || !pickedOn.length || !text.trim()}>Send</button
 				>
 			</div>
 		</form>

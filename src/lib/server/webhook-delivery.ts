@@ -123,6 +123,7 @@ const ACTION_TITLES: Record<string, string> = {
 	'rcon.unban': 'Unban',
 	'rcon.kill': 'Kill',
 	'rcon.whisper': 'Whisper',
+	'rcon.whisperMany': 'Group whisper',
 	'rcon.broadcast': 'Broadcast',
 	'rcon.changeTeam': 'Change team',
 	'rcon.changeMap': 'Change map',

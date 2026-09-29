@@ -27,6 +27,7 @@ const ACTION_CAPS: Record<string, Capability> = {
 
 	broadcast: 'chat.send',
 	whisper: 'chat.send',
+	whisperMany: 'chat.send',
 	kick: 'players.moderate',
 	kill: 'players.moderate',
 	changeTeam: 'players.moderate',

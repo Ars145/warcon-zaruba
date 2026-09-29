@@ -5,6 +5,8 @@ import type { Capability } from '../capabilities';
 import { ApiError, int, str } from './http';
 import { gamePath } from './hostpolicy';
 import { classifyGameError, etagOf, GameError, parseJson, WardogsClient } from './rcon';
+import { giveRate, takeRate } from './ratelimit';
+import { steamIdRefusal } from './steam';
 import { reservedFromText, reservedIntoText } from '../reserved-doc';
 import { saneScores } from '../format';
 import { hideSecretValues, redactSecrets, restoreSecrets, SECRET_PLACEHOLDER } from '../config-doc';
@@ -29,10 +31,11 @@ const fingerprint = (text: unknown) => {
 	return { length: s.length, sha256: createHash('sha256').update(s).digest('hex') };
 };
 
+// A string only: a JSON number that long arrives rounded to another 17-digit id (steam.ts).
 const steamId = (v: unknown): string => {
-	const id = str(v, 32);
+	const id = typeof v === 'string' ? str(v, 32) : '';
 	if (!/^\d{17}$/.test(id)) {
-		throw new ApiError(400, 'steamId must be a 17-digit SteamID64.');
+		throw new ApiError(400, steamIdRefusal(v));
 	}
 	return id;
 };
@@ -296,6 +299,117 @@ function rotationSettingsOf(p: any): { rotationEnabled?: boolean; rotationMode?:
 	return body;
 }
 
+/** The most players one group whisper may name. */
+export const GROUP_MAX = 200;
+/**
+ * Players a server may be group-whispered in a minute. Each is a request to the game, whose
+ * listener takes 600 a minute from one address; the worker's own looks use up to 90 of those
+ * while someone watches the server, which leaves room for them, the official console and trigger
+ * actions.
+ */
+export const GROUP_BUDGET = 300;
+/** A group whisper starts no whisper after this long, so it never holds the server's lane for long. */
+export const GROUP_MS = 10_000;
+
+/**
+ * A faction, or players named by SteamID, whispered one at a time: the game has no message route
+ * for more than one player. Who is on is read first, in the same turn of the server's lane, so a
+ * faction means whoever is on it now. A player gone by their turn is passed over; any other
+ * refusal ends the run, as does GROUP_MS, and the answer says who got it and who did not. Each
+ * whisper is sent once.
+ */
+async function whisperMany(c: WardogsClient, p: any) {
+	const message = str(p.message, 200);
+	if (!message) throw new ApiError(400, 'message is required.');
+	const faction = typeof p.faction === 'string' ? str(p.faction, 100) : '';
+	const listed = p.steamIds !== undefined;
+	if (Boolean(faction) === listed) throw new ApiError(400, 'Give either faction or steamIds.');
+	let asked: string[] = [];
+	if (listed) {
+		if (!Array.isArray(p.steamIds) || !p.steamIds.length)
+			throw new ApiError(400, 'steamIds must be a list of SteamID64s.');
+		if (p.steamIds.length > GROUP_MAX)
+			throw new ApiError(400, `At most ${GROUP_MAX} players at once.`);
+		asked = [...new Set(p.steamIds.map(steamId))] as string[];
+	}
+	const started = Date.now();
+	const { players } = (await ACTIONS.players.run(c, {})) as {
+		players: { steamId: string; faction: string | null }[];
+	};
+	const on = new Set(players.map((x) => x.steamId));
+	const recipients = listed
+		? asked.filter((id) => on.has(id))
+		: players
+				.filter((x) => x.faction === faction && /^\d{17}$/.test(x.steamId))
+				.map((x) => x.steamId);
+	const absent = asked.filter((id) => !on.has(id));
+	if (!recipients.length)
+		throw new ApiError(
+			404,
+			faction ? `No one is on ${faction}.` : 'None of these players is on the server.',
+			'no_recipients'
+		);
+	const budget = `whisper:${c.serverId}`;
+	const wait = takeRate(budget, recipients.length, GROUP_BUDGET, 60_000);
+	if (wait)
+		throw new ApiError(
+			429,
+			`This server has had ${GROUP_BUDGET} players whispered in groups in the last minute; try again in ${wait} s.`,
+			'rate_limited'
+		);
+
+	const sent: string[] = [];
+	let refused: GameError | null = null;
+	let i = 0;
+	try {
+		for (; i < recipients.length; i++) {
+			if (i > 0 && Date.now() - started >= GROUP_MS) break;
+			try {
+				await c.json('POST', `/v1/players/${recipients[i]}/message`, { message });
+				sent.push(recipients[i]);
+			} catch (err) {
+				if (!(err instanceof GameError)) throw err;
+				if (err.code === 'player_not_found') {
+					absent.push(recipients[i]);
+					continue;
+				}
+				refused = err;
+				break;
+			}
+		}
+	} finally {
+		// Whispers never tried go back to the budget; a refused one was a request all the same.
+		giveRate(budget, recipients.length - i - (refused ? 1 : 0));
+	}
+	// Not tried, the one refused included: the run ended before them.
+	const unsent = recipients.slice(i);
+	if (!sent.length) {
+		if (refused) throw refused;
+		if (!unsent.length)
+			throw new ApiError(404, 'None of these players is on the server any more.', 'no_recipients');
+	}
+	const stopped = refused
+		? refused.message
+		: unsent.length
+			? `Stopped after ${GROUP_MS / 1000} s.`
+			: '';
+	const to = faction ? ` on ${faction}` : '';
+	const short = [
+		absent.length ? `${absent.length} not on the server` : '',
+		unsent.length ? `${unsent.length} not sent` : ''
+	].filter(Boolean);
+	return {
+		message: short.length
+			? `Whispered ${sent.length} of ${sent.length + absent.length + unsent.length} players${to}; ${short.join('; ')}.${stopped ? ` ${stopped}` : ''}`
+			: `Whispered ${sent.length} player${sent.length === 1 ? '' : 's'}${to}.`,
+		sent,
+		absent,
+		unsent,
+		...(stopped ? { stopped } : {}),
+		...(refused?.retryAfterMs ? { retryAfterMs: refused.retryAfterMs } : {})
+	};
+}
+
 export const ACTIONS: Record<string, ActionDef> = {
 	// ---- reads (viewer) ----
 	capabilities: {
@@ -511,6 +625,22 @@ export const ACTIONS: Record<string, ActionDef> = {
 			}
 			return c.json('POST', `/v1/players/${steamId(p.steamId)}/message`, { message });
 		}
+	},
+	// Everyone on a faction, or the players named, each whispered in turn (see whisperMany). The
+	// trail keeps the faction, or the SteamIDs, as the target.
+	whisperMany: {
+		cap: 'chat.send',
+		mutating: true,
+		target: (p) =>
+			typeof p.faction === 'string' && p.faction.trim()
+				? str(p.faction, 100)
+				: Array.isArray(p.steamIds)
+					? p.steamIds
+							.slice(0, GROUP_MAX)
+							.map((v: unknown) => str(v, 32))
+							.join(' ')
+					: '',
+		run: (c, p) => whisperMany(c, p)
 	},
 	kick: {
 		cap: 'players.moderate',

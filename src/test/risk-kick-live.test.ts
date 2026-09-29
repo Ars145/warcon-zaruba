@@ -38,7 +38,7 @@ describe.skipIf(!hasTestDb)('the risk kick rule on a live look', () => {
 		spy = spyOn(WardogsClient, 'forServer').mockImplementation(async (_env, server) => {
 			const client = new WardogsClient(
 				env,
-				{ host: 'demo', port: 1, scheme: 'http' },
+				{ id: server.id, host: 'demo', port: 1, scheme: 'http' },
 				'demo',
 				`risk-kick-${server.id}`
 			);
