@@ -1,4 +1,4 @@
-import { test, expect, mock } from 'bun:test';
+import { test, expect, mock, spyOn } from 'bun:test';
 
 // actions.ts reaches env.ts, which imports SvelteKit's env alias; outside the app that alias does
 // not resolve, so it is stubbed before the registry is loaded.
@@ -653,4 +653,241 @@ test('status keeps only safe faction colours, names and scores from the game', a
 		{ name: 'Valkyra', colorHex: '#D86060', score: 34 },
 		{ name: 'Lonestar', colorHex: '', score: 0 }
 	]);
+});
+
+// ---- group whispers ----------------------------------------------------------------------------
+
+const { GROUP_BUDGET, GROUP_MS } = await import('./actions');
+const { classifyGameError } = await import('./rcon');
+const { resetRates } = await import('./ratelimit');
+
+const sid = (n: number) => `765611980000${String(n).padStart(5, '0')}`;
+const rateLimited = () =>
+	classifyGameError(
+		'POST',
+		'/v1/players/x/message',
+		429,
+		'',
+		{ error: { code: 'rate_limited', message: 'Too many requests from this address.' } },
+		{ 'retry-after': '3' }
+	);
+
+/**
+ * A stand-in game for group whispers: the roster it lists, and per whisper what it answers (an
+ * error to throw, or nothing for delivered). `server` keys the budget, so tests do not share it.
+ */
+function groupGame(
+	server: string,
+	roster: { steamId: string; faction: string | null }[],
+	answer: (steamId: string) => Error | null = () => null
+) {
+	const calls: string[] = [];
+	const bodies: unknown[] = [];
+	const client: any = {
+		serverId: server,
+		json: async (method: string, path: string, body?: unknown) => {
+			calls.push(`${method} ${path}`);
+			if (path === '/v1/players') return { players: roster.map((p) => ({ name: 'x', ...p })) };
+			bodies.push(body);
+			const err = answer(path.split('/')[3]);
+			if (err) throw err;
+			return { message: 'Message sent.' };
+		}
+	};
+	const whispered = () => calls.filter((c) => c.startsWith('POST ')).map((c) => c.split('/')[3]);
+	return { client, calls, bodies, whispered };
+}
+
+const ROSTER = [
+	{ steamId: sid(1), faction: 'Valkyra' },
+	{ steamId: sid(2), faction: 'Lonestar' },
+	{ steamId: sid(3), faction: 'Valkyra' },
+	{ steamId: sid(4), faction: null },
+	{ steamId: sid(5), faction: 'Valkyra' }
+];
+
+test('whisperMany whispers everyone on the faction when it runs, and no one else', async () => {
+	const g = groupGame('g1', ROSTER);
+	const r: any = await ACTIONS.whisperMany.run(g.client, {
+		faction: 'Valkyra',
+		message: ' Push B '
+	});
+	expect(g.calls[0]).toBe('GET /v1/players');
+	expect(g.whispered()).toEqual([sid(1), sid(3), sid(5)]);
+	expect(g.bodies).toEqual([{ message: 'Push B' }, { message: 'Push B' }, { message: 'Push B' }]);
+	expect(r).toEqual({
+		message: 'Whispered 3 players on Valkyra.',
+		sent: [sid(1), sid(3), sid(5)],
+		absent: [],
+		unsent: []
+	});
+});
+
+test('whisperMany whispers each SteamID named once, and says who is not on', async () => {
+	const g = groupGame('g2', ROSTER);
+	const r: any = await ACTIONS.whisperMany.run(g.client, {
+		steamIds: [sid(2), sid(9), sid(4), sid(2)],
+		message: 'Hi'
+	});
+	expect(g.whispered()).toEqual([sid(2), sid(4)]);
+	expect(r.sent).toEqual([sid(2), sid(4)]);
+	expect(r.absent).toEqual([sid(9)]);
+	expect(r.message).toBe('Whispered 2 of 3 players; 1 not on the server.');
+});
+
+test('a player gone by their turn is passed over, and the rest still get it', async () => {
+	const g = groupGame('g3', ROSTER, (id) =>
+		id === sid(3) ? new GameError(404, `Player not found: ${id}`, 'player_not_found') : null
+	);
+	const r: any = await ACTIONS.whisperMany.run(g.client, { faction: 'Valkyra', message: 'Hi' });
+	expect(g.whispered()).toEqual([sid(1), sid(3), sid(5)]);
+	expect(r.sent).toEqual([sid(1), sid(5)]);
+	expect(r.absent).toEqual([sid(3)]);
+	expect(r.unsent).toEqual([]);
+	expect(r.stopped).toBeUndefined();
+});
+
+test('a refusal ends the run: nothing after it is sent, nothing is sent twice, and the answer says so', async () => {
+	const g = groupGame('g4', ROSTER, (id) => (id === sid(3) ? rateLimited() : null));
+	const r: any = await ACTIONS.whisperMany.run(g.client, { faction: 'Valkyra', message: 'Hi' });
+	expect(g.whispered()).toEqual([sid(1), sid(3)]);
+	expect(r.sent).toEqual([sid(1)]);
+	expect(r.unsent).toEqual([sid(3), sid(5)]);
+	expect(r.retryAfterMs).toBe(3000);
+	expect(r.stopped).toContain('rate limiting');
+	expect(r.message).toMatch(
+		/^Whispered 1 of 3 players on Valkyra; 2 not sent\. The game server is rate limiting this panel .*retry in 3 s\.$/
+	);
+});
+
+test("a refusal before anyone got it is the game's own error", async () => {
+	const g = groupGame(
+		'g5',
+		ROSTER,
+		() => new GameError(502, 'Could not reach the game server.', 'unreachable')
+	);
+	await expect(
+		ACTIONS.whisperMany.run(g.client, { faction: 'Valkyra', message: 'Hi' })
+	).rejects.toMatchObject({ status: 502, code: 'unreachable' });
+	expect(g.whispered()).toEqual([sid(1)]);
+});
+
+test('nobody to whisper is a 404 before any whisper goes out', async () => {
+	const nobody = groupGame('g6', ROSTER);
+	await expect(
+		ACTIONS.whisperMany.run(nobody.client, { faction: 'Manticore', message: 'Hi' })
+	).rejects.toMatchObject({ status: 404, code: 'no_recipients' });
+	await expect(
+		ACTIONS.whisperMany.run(nobody.client, { steamIds: [sid(8), sid(9)], message: 'Hi' })
+	).rejects.toMatchObject({ status: 404, code: 'no_recipients' });
+	expect(nobody.whispered()).toEqual([]);
+	const allGone = groupGame(
+		'g7',
+		ROSTER,
+		(id) => new GameError(404, `Player not found: ${id}`, 'player_not_found')
+	);
+	await expect(
+		ACTIONS.whisperMany.run(allGone.client, { steamIds: [sid(1)], message: 'Hi' })
+	).rejects.toMatchObject({ status: 404, code: 'no_recipients' });
+});
+
+test('whisperMany refuses what it cannot send before asking the game anything', async () => {
+	const g = groupGame('g8', ROSTER);
+	const bad = [
+		{ faction: 'Valkyra' },
+		{ faction: 'Valkyra', message: '   ' },
+		{ message: 'Hi' },
+		{ message: 'Hi', faction: 'Valkyra', steamIds: [sid(1)] },
+		{ message: 'Hi', faction: '  ' },
+		{ message: 'Hi', steamIds: [] },
+		{ message: 'Hi', steamIds: sid(1) },
+		{ message: 'Hi', steamIds: [sid(1), '123'] },
+		{ message: 'Hi', steamIds: [sid(1), '../../config'] },
+		{ message: 'Hi', steamIds: [JSON.parse('76561198100000101')] },
+		{ message: 'Hi', steamIds: Array.from({ length: 201 }, (_, i) => sid(i)) }
+	];
+	for (const p of bad)
+		await expect(ACTIONS.whisperMany.run(g.client, p)).rejects.toMatchObject({ status: 400 });
+	expect(g.calls).toEqual([]);
+});
+
+test('a group whisper starts no whisper once its time is up, and says how many it left', async () => {
+	let now = Date.now();
+	const clock = spyOn(Date, 'now').mockImplementation(() => now);
+	try {
+		const many = Array.from({ length: 8 }, (_, i) => ({
+			steamId: sid(100 + i),
+			faction: 'Lonestar'
+		}));
+		const g = groupGame('g9', many);
+		// Every request takes three seconds of the fake clock: the read, then whispers at 3, 6 and 9.
+		const json = g.client.json;
+		g.client.json = async (...a: unknown[]) => {
+			now += 3000;
+			return json(...a);
+		};
+		const r: any = await ACTIONS.whisperMany.run(g.client, { faction: 'Lonestar', message: 'Hi' });
+		expect(g.whispered().length).toBe(3);
+		expect(r.unsent.length).toBe(5);
+		expect(r.stopped).toBe(`Stopped after ${GROUP_MS / 1000} s.`);
+		expect(r.message).toBe(
+			`Whispered 3 of 8 players on Lonestar; 5 not sent. Stopped after ${GROUP_MS / 1000} s.`
+		);
+	} finally {
+		clock.mockRestore();
+	}
+});
+
+test('a server takes GROUP_BUDGET players whispered in groups a minute; other servers are not held', async () => {
+	resetRates();
+	const full = Array.from({ length: GROUP_BUDGET / 2 }, (_, i) => ({
+		steamId: sid(1000 + i),
+		faction: 'Valkyra'
+	}));
+	const g = groupGame('g10', full);
+	await ACTIONS.whisperMany.run(g.client, { faction: 'Valkyra', message: 'Hi' });
+	await ACTIONS.whisperMany.run(g.client, { faction: 'Valkyra', message: 'Hi' });
+	expect(g.whispered().length).toBe(GROUP_BUDGET);
+	await expect(
+		ACTIONS.whisperMany.run(g.client, { steamIds: [sid(1000)], message: 'Hi' })
+	).rejects.toMatchObject({ status: 429, code: 'rate_limited' });
+	expect(g.whispered().length).toBe(GROUP_BUDGET);
+	const other = groupGame('g11', full);
+	await ACTIONS.whisperMany.run(other.client, { faction: 'Valkyra', message: 'Hi' });
+	expect(other.whispered().length).toBe(GROUP_BUDGET / 2);
+	resetRates();
+});
+
+test('whispers a stopped run never tried go back to the budget, so refusals cannot use it up', async () => {
+	resetRates();
+	const full = Array.from({ length: GROUP_BUDGET / 2 }, (_, i) => ({
+		steamId: sid(2000 + i),
+		faction: 'Lonestar'
+	}));
+	// The game takes the first whisper of each run and refuses the second.
+	let n = 0;
+	const g = groupGame('g12', full, () => (n++ % 2 === 1 ? rateLimited() : null));
+	for (let run = 0; run < 5; run++) {
+		const r: any = await ACTIONS.whisperMany.run(g.client, { faction: 'Lonestar', message: 'Hi' });
+		expect(r.sent.length).toBe(1);
+		expect(r.unsent.length).toBe(GROUP_BUDGET / 2 - 1);
+	}
+	// A game refusing the very first whisper: its error, and only that request counted.
+	const shut = groupGame('g12', full, () => rateLimited());
+	for (let run = 0; run < 5; run++)
+		await expect(
+			ACTIONS.whisperMany.run(shut.client, { faction: 'Lonestar', message: 'Hi' })
+		).rejects.toMatchObject({ status: 429, code: 'rate_limited' });
+	// 5 x 2 + 5 x 1 requests counted: a whole faction still fits.
+	const open = groupGame('g12', full);
+	const r: any = await ACTIONS.whisperMany.run(open.client, { faction: 'Lonestar', message: 'Hi' });
+	expect(r.sent.length).toBe(GROUP_BUDGET / 2);
+	resetRates();
+});
+
+test('the trail keeps the faction, or the SteamIDs, as the target', () => {
+	const target = ACTIONS.whisperMany.target!;
+	expect(target({ faction: 'Valkyra', message: 'Hi' })).toBe('Valkyra');
+	expect(target({ steamIds: [sid(1), sid(2)], message: 'Hi' })).toBe(`${sid(1)} ${sid(2)}`);
+	expect(target({ message: 'Hi' })).toBe('');
 });
