@@ -408,14 +408,16 @@ async function discordCall(
 	}
 }
 
-/** Posts a new message; the result carries its id. Never throws. */
+/**
+ * Posts a new message; the result carries its id. It names no one, so Discord shows the name and
+ * picture its owner gave the webhook there: a name sent here would take their place. Never throws.
+ */
 export function postDiscord(
 	env: Env,
 	hook: Pick<WebhookRow, 'urlEnc'>,
 	payload: DiscordPayload
 ): Promise<PostResult> {
 	return discordCall(env, hook, 'POST', '?wait=true', {
-		username: env.APP_NAME || 'Warcon',
 		allowed_mentions: { parse: [] },
 		...payload
 	});
