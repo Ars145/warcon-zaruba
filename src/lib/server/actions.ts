@@ -9,6 +9,7 @@ import { giveRate, takeRate } from './ratelimit';
 import { steamIdRefusal } from './steam';
 import { reservedFromText, reservedIntoText } from '../reserved-doc';
 import { saneScores } from '../format';
+import { MAX_CHAT } from '../chat';
 import { hideSecretValues, redactSecrets, restoreSecrets, SECRET_PLACEHOLDER } from '../config-doc';
 
 export interface ActionDef {
@@ -319,7 +320,7 @@ export const GROUP_MS = 10_000;
  * whisper is sent once.
  */
 async function whisperMany(c: WardogsClient, p: any) {
-	const message = str(p.message, 200);
+	const message = str(p.message, MAX_CHAT);
 	if (!message) throw new ApiError(400, 'message is required.');
 	const faction = typeof p.faction === 'string' ? str(p.faction, 100) : '';
 	const listed = p.steamIds !== undefined;
@@ -605,9 +606,9 @@ export const ACTIONS: Record<string, ActionDef> = {
 	broadcast: {
 		cap: 'chat.send',
 		mutating: true,
-		target: (p) => str(p.message, 200),
+		target: (p) => str(p.message, MAX_CHAT),
 		run: (c, p) => {
-			const message = str(p.message, 200);
+			const message = str(p.message, MAX_CHAT);
 			if (!message) {
 				throw new ApiError(400, 'message is required.');
 			}
@@ -619,7 +620,7 @@ export const ACTIONS: Record<string, ActionDef> = {
 		mutating: true,
 		target: (p) => str(p.steamId, 32),
 		run: (c, p) => {
-			const message = str(p.message, 200);
+			const message = str(p.message, MAX_CHAT);
 			if (!message) {
 				throw new ApiError(400, 'message is required.');
 			}

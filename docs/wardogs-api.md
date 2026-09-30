@@ -2,8 +2,8 @@
 
 Reverse-engineered on 2026-09-08 from the official web console at `http://rcon.wardogs.com`, re-checked
 against the 2026-09-10 and 2026-09-14 redeploys of the site
-(`js/api.js`, `js/mock-server.js`, `js/config-editor.js`, `ServerSettings.ini`) and against live build
-CL-501228 on 2026-09-14. The console is a
+(`js/api.js`, `js/mock-server.js`, `js/config-editor.js`, `ServerSettings.ini`) and against live builds
+CL-501228 on 2026-09-14 and CL-507060 (update 0.1.2) on 2026-09-30. The console is a
 static, plain-HTTP-only site that talks to the game server **directly from the browser**, which is
 why it cannot be served over HTTPS. Warcon moves that traffic server-side: browsers talk HTTPS to
 Warcon, and Warcon's own process talks plain HTTP to the listener.
@@ -45,9 +45,9 @@ Warcon, and Warcon's own process talks plain HTTP to the listener.
 | GET | `/v1/players` | | `{ players:[{name, steamId, faction, kills, deaths, cash, pingMs}], count }` | Confirmed on CL-499480. List responses all carry `count`. |
 | POST | `/v1/players/{steamId}/kick` | `{ reason }` | `{ message }` | |
 | POST | `/v1/players/{steamId}/kill` | | `{ message }` | |
-| POST | `/v1/players/{steamId}/message` | `{ message }` | `{ message }` | Whisper. |
+| POST | `/v1/players/{steamId}/message` | `{ message }` | `{ message }` | Whisper. Capped like a broadcast since update 0.1.2 (the patch notes say both; only the broadcast was tried). |
 | PATCH | `/v1/players/{steamId}` | `{ faction }` | `{ message }` | Faction **name** (e.g. `Valkyra`), resolved via `factionScores[].colorHex`. Optional route. The console follows it with `POST .../kill` so the player respawns on the new side; a failed kill (no living character) is ignored. Warcon does the same. |
-| POST | `/v1/broadcast` | `{ message }` | `{ message }` | ≤200 chars in the console. |
+| POST | `/v1/broadcast` | `{ message }` | `{ ok, pending, message }` | ≤200 chars in the console. **Since update 0.1.2 the game takes at most 256 characters** (CL-507060, 2026-09-30, on an empty server): 256 answered `{ ok:true, pending:false, message:"OK: broadcast delivered to 0 player(s)." }`, 257 was refused, not cut: `400 { error:{ code:"message_too_long", message:"Error: message is 257 characters; the limit is 256." } }`. It counts characters, not bytes: 200 accented characters (388 bytes of UTF-8) were delivered too. Emoji were not tried; JavaScript counts most as two, so Warcon's cut can only come in under the game's. Warcon cuts whispers and broadcasts at 256 (`MAX_CHAT` in `src/lib/chat.ts`), rendered rule texts included; kick and ban reasons stay at 200. `MOCK_LIVE_BUILD` refuses the same way. |
 | GET | `/v1/bans` | | `{ bans:[{steamId, bannedAtUtc, bannedBy, reason}], count }` | Entries from `+DefaultBannedPlayerIds` come back with `bannedBy:"config"`, `reason:null`, `bannedAtUtc:"0001-01-01T00:00:00.000Z"`; Warcon blanks that date. |
 | POST | `/v1/bans` | `{ steamId, reason? }` | `{ message }` | Persists to `+DefaultBannedPlayerIds`. |
 | DELETE | `/v1/bans/{steamId}` | | `{ message }` | Unknown id: `404 { code:"ban_not_found", message:"Error: SteamId … is not currently banned." }`. |
@@ -104,6 +104,24 @@ so the worker's hold can be watched. The
 authoritative list for any server is its own `routes` array; Warcon shows it under Servers, Test,
 "Routes this build serves".
 
+### Update 0.1.2, live build CL-507060 (read 2026-09-30)
+
+Read on a live server through the panel: the same 29 routes and the same `capabilities`
+document as CL-501228 (`limits` still names no chat length), and the same shapes from every read
+route (`/v1/health`, `/v1/status`, `/v1/rotation`, `/v1/bans`, `/v1/reserved-slots`, the five
+catalog routes, `/v1/sponsor`, `/v1/audit`, `GET /v1/config`), although the patch notes say
+responses now default to "Standard" detail instead of "Full" and that config responses no longer
+expose server internals. The one loss seen: a config validate answer no longer carries
+`timingsMs`. Refusals read as before: `404 not_found "No such endpoint."` for a route the build
+lacks, `405 method_not_allowed`, `404 player_not_found "Error: no player matching '<id>'."` from
+message, kick, kill, `PATCH` and `POST /v1/bans` for a player who is not on (so a ban still needs
+the player connected), and `404 ban_not_found` from unbanning an id that is not banned. The
+player list's fields were not seen (the server was empty). The RCON block's `allowedKeys` gained
+`AllowedHosts` (who may reach the listener; format not seen, read at startup) and lost
+`bWriteAuditLogFile`. The daily restart time the update adds is not a key the document takes: no
+section allows one, so hosts set it outside `ServerSettings.ini`, and no route reports it.
+Whispers and broadcasts are capped (see `/v1/broadcast` above).
+
 ## ServerSettings.ini keys the server honours
 
 ```
@@ -114,7 +132,8 @@ authoritative list for any server is its own `routes` array; Warcon shows it und
 [MatchState.Playing.KOTH]                 ScorePeriod (18-30)
 [/Script/WDGame.WDGameStateSession]       bLockOverpopulatedTeamsConfig, OverpopulatedTeamThresholdConfig
 [/Script/WDGame.WDServerMapRotationSettings]  bEnabled, RotationMode, +RotationEntries=(Map="",Experience(s)="",Lighting="",ZoneAlternator="")
-[/Script/WDRCON.WDRCONSettings]           bEnabled, BindAddress, Port, Password, PasswordHash, AllowedOrigins, bWriteAuditLogFile
+[/Script/WDRCON.WDRCONSettings]           bEnabled, BindAddress, Port, Password, PasswordHash, AllowedOrigins, AllowedHosts (CL-507060;
+                                          CL-501228 had bWriteAuditLogFile instead)
 [WDServerFeed]                            Url, Token          (CL-499480: "kill-event feed endpoint and its ingest token")
 ```
 

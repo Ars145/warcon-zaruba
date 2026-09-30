@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { SvelteSet } from 'svelte/reactivity';
 	import { api, qs, rconPost, errorMessage } from '$lib/api';
+	import { MAX_CHAT } from '$lib/chat';
 	import { watchLive } from '$lib/live';
 	import { fmtNum, steamNameBeside } from '$lib/format';
 	import { can } from '$lib/capabilities';
@@ -472,7 +473,7 @@
 					class="input"
 					type="text"
 					placeholder="Private message…"
-					maxlength="200"
+					maxlength={MAX_CHAT}
 					bind:value={text}
 				/>
 			{:else if kind === 'kick'}
@@ -529,7 +530,7 @@
 				class="input"
 				type="text"
 				placeholder="Private message…"
-				maxlength="200"
+				maxlength={MAX_CHAT}
 				bind:value={text}
 			/>
 			<div class="flex justify-end gap-2">

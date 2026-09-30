@@ -678,6 +678,18 @@ let requests = 0;
 const fail = (status: number, message: string, code = 'error'): GameResponse =>
 	ok({ ok: false, error: { code, message } }, status);
 
+// Update 0.1.2 (live build CL-507060, seen 2026-09-30) refuses a whisper or broadcast longer than
+// this, with the answer below; 256 characters are delivered.
+const LIVE_CHAT_LIMIT = 256;
+const chatTooLong = (text: string): GameResponse | null =>
+	liveBuild() && text.length > LIVE_CHAT_LIMIT
+		? fail(
+				400,
+				`Error: message is ${text.length} characters; the limit is ${LIVE_CHAT_LIMIT}.`,
+				'message_too_long'
+			)
+		: null;
+
 function parseBody(body?: string): any {
 	if (!body) {
 		return {};
@@ -810,6 +822,8 @@ export function mockHandle(
 			if (!b.message) {
 				return fail(400, 'message is required.');
 			}
+			const long = chatTooLong(String(b.message));
+			if (long) return long;
 			log(s, 'COMMAND', `msg ${p[1]} ${b.message}`);
 			return ok({ message: `Message sent to ${player.name}.` });
 		}
@@ -857,6 +871,8 @@ export function mockHandle(
 		if (!b.message) {
 			return fail(400, 'message is required.');
 		}
+		const long = chatTooLong(String(b.message));
+		if (long) return long;
 		log(s, 'COMMAND', `broadcast ${b.message}`);
 		return ok({ message: `Announcement sent to ${s.players.length} player(s).` });
 	}
