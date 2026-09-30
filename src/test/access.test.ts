@@ -519,6 +519,7 @@ describe.skipIf(!hasTestDb)('access', () => {
 				['name_filter', { characters: 'ascii' }, 'players.moderate'],
 				['name_filter', { characters: 'ascii', action: 'alert' }, 'players.moderate'],
 				['team_kill', { kickAt: 3 }, 'players.moderate'],
+				['team_kill', { kickAt: 3, notCounted: ['Id.Item.Claymore'] }, 'players.moderate'],
 				['kill_rate', { maxKills: 20 }, 'players.moderate'],
 				['kill_distance', { causes: [DEFIB], action: 'flag' }, 'players.moderate'],
 				['kill_distance', { causes: [DEFIB], action: 'kick' }, 'players.moderate'],

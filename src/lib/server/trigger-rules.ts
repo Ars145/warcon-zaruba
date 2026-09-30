@@ -7,8 +7,10 @@ import { validateNameFilter, type NameFilterConfig } from './name-filter';
 import { validateKillRate, type KillRateConfig } from './kill-rate';
 import { validateKillDistance, type KillDistanceConfig } from './kill-distance';
 import { validateTwoTeams, type TwoTeamsConfig } from './two-teams';
+import { causeTags } from './cause-tags';
 import { RESTART_AFTER_HOURS, restartWindow } from '$lib/uptime';
 import { MAX_CHAT } from '$lib/chat';
+import { TEAM_KILL_NOT_COUNTED } from '$lib/causes';
 import type { SteamProfileRow } from './db/schema';
 import type { TriggerKind } from '$lib/types';
 
@@ -140,13 +142,17 @@ export interface RestartNoticeConfig {
 }
 /**
  * Acts on team kills the kill feed reports, counted per killer within each match: a whisper
- * from `warnAt` team kills on (0 = never), a kick at `kickAt` (0 = never).
+ * from `warnAt` team kills on (0 = never), a kick at `kickAt` (0 = never). Team kills by a cause
+ * in `notCounted` (feed tags, any case) are left out of the count and never acted on; they stay
+ * team kills everywhere else. A rule saved before the list existed has none and leaves out
+ * TEAM_KILL_NOT_COUNTED.
  */
 export interface TeamKillConfig {
 	warnAt: number;
 	warnMessage: string;
 	kickAt: number;
 	kickReason: string;
+	notCounted?: string[];
 }
 /** Where a Seeding reward's slot goes: this server's own list, or the organisation's (every server). */
 export type SeedScope = 'server' | 'org';
@@ -331,7 +337,11 @@ export function validateConfig(kind: TriggerKind, raw: unknown): TriggerConfig {
 					str(c.warnMessage, MAX_CHAT) ||
 					'Careful, {name}: that was a team kill ({count} this match).',
 				kickAt,
-				kickReason: str(c.kickReason, MAX_REASON) || 'Team killing ({count} this match).'
+				kickReason: str(c.kickReason, MAX_REASON) || 'Team killing ({count} this match).',
+				notCounted:
+					c.notCounted === undefined || c.notCounted === null
+						? [...TEAM_KILL_NOT_COUNTED]
+						: causeTags(c.notCounted, 'cause', 'Id.Buildable.BarbedWire')
 			};
 		}
 		case 'seed_reward': {
@@ -520,6 +530,20 @@ export function broadcastWanted(
 ): boolean {
 	if (playerCount < cfg.minPlayers) return false;
 	return cfg.maxPlayers === null || cfg.maxPlayers === undefined || playerCount <= cfg.maxPlayers;
+}
+
+/** The causes a team-kill rule leaves out of its count. */
+export const teamKillNotCounted = (cfg: Pick<TeamKillConfig, 'notCounted'>): readonly string[] =>
+	Array.isArray(cfg.notCounted) ? cfg.notCounted : TEAM_KILL_NOT_COUNTED;
+
+/** Whether a team-kill rule counts a team kill by this cause: one with no cause always counts. */
+export function countsForTeamKill(
+	cfg: Pick<TeamKillConfig, 'notCounted'>,
+	cause: string | null | undefined
+): boolean {
+	if (!cause) return true;
+	const lower = cause.toLowerCase();
+	return !teamKillNotCounted(cfg).some((c) => c.toLowerCase() === lower);
 }
 
 /** What a team-kill rule does once the killer's count this match has reached `count`. */

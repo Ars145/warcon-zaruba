@@ -16,7 +16,7 @@ import {
 	teamKillStage,
 	type Evaluation
 } from './triggers';
-import { MAX_REASON, type TeamKillConfig } from './trigger-rules';
+import { countsForTeamKill, MAX_REASON, type TeamKillConfig } from './trigger-rules';
 import { MAX_CHAT } from '$lib/chat';
 import {
 	countsForRate,
@@ -274,20 +274,26 @@ async function actOnKillDistance(env: Env, serverId: string, batch: KillView[]):
 	if (queued) wakeDelivery();
 }
 
+/** A player's team kills in a match by one cause (null for none), as a rule counts them. */
+interface CauseCount {
+	cause: string | null;
+	n: number;
+}
+
 /**
  * How many team kills each of these players has in the match the batch arrived in, up to and
- * including the batch: the rows that carry that match, as its match page counts them. Leaving
- * and joining again does not start the count over, and a batch acted on late does not count the
- * ones that came after it. A batch that came in while no match was open (a server's first
- * seconds, or just after its stats were purged) counts with the other such kills of the hour
- * before.
+ * including the batch, by cause: the rows that carry that match, as its match page counts them.
+ * Leaving and joining again does not start the count over, and a batch acted on late does not
+ * count the ones that came after it. A batch that came in while no match was open (a server's
+ * first seconds, or just after its stats were purged) counts with the other such kills of the
+ * hour before.
  */
 async function teamKillsThisMatch(
 	env: Env,
 	serverId: string,
 	batch: KillView[],
 	steamIds: string[]
-): Promise<Map<string, number>> {
+): Promise<Map<string, CauseCount[]>> {
 	// Every kill of a batch was stamped with the match open at receipt (feed.ts); any one says which.
 	const at = new Date(batch[0].ts);
 	const [stamp] = await env.db
@@ -307,7 +313,7 @@ async function teamKillsThisMatch(
 			? killsOfMatch(stamp.row, stamp.startedAt, stamp.endedAt)
 			: null;
 	const rows = await env.db
-		.select({ steamId: kills.killerSteamId, n: sql<number>`COUNT(*)` })
+		.select({ steamId: kills.killerSteamId, cause: kills.cause, n: sql<number>`COUNT(*)` })
 		.from(kills)
 		.where(
 			and(
@@ -319,31 +325,48 @@ async function teamKillsThisMatch(
 				lte(kills.ts, at)
 			)
 		)
-		.groupBy(kills.killerSteamId);
-	return new Map(rows.map((r) => [r.steamId!, Number(r.n)]));
+		.groupBy(kills.killerSteamId, kills.cause);
+	const out = new Map<string, CauseCount[]>();
+	for (const r of rows) {
+		const list = out.get(r.steamId!) ?? out.set(r.steamId!, []).get(r.steamId!)!;
+		list.push({ cause: r.cause, n: Number(r.n) });
+	}
+	return out;
 }
 
 async function actOnTeamKills(env: Env, serverId: string, teamKills: KillView[]): Promise<void> {
-	const rows = (await enabledTriggers(env, serverId)).filter((r) => r.kind === 'team_kill');
-	if (!rows.length) return;
+	// Each rule acts on the last team kill of each killer in the batch that it counts; a batch
+	// whose team kills no rule counts reads nothing.
+	const rules = (await enabledTriggers(env, serverId))
+		.filter((r) => r.kind === 'team_kill')
+		.map((row) => {
+			const cfg = row.config as TeamKillConfig;
+			const byKiller = new Map<string, KillView>();
+			for (const k of teamKills)
+				if (countsForTeamKill(cfg, k.cause)) byKiller.set(k.killer!.steamId, k);
+			return { row, cfg, byKiller };
+		})
+		.filter((r) => r.byKiller.size);
+	if (!rules.length) return;
 	const m = memoryOf(serverId);
 	const serverName = m?.status?.serverName || m?.server.name || '';
 	const out: Evaluation = { intents: [], updates: [] };
-	// One count per killer for the batch; the last of their kills in it is the one acted on.
-	const byKiller = new Map<string, KillView>();
-	for (const k of teamKills) byKiller.set(k.killer!.steamId, k);
-	const counts = await teamKillsThisMatch(env, serverId, teamKills, [...byKiller.keys()]);
-	for (const [steamId, k] of byKiller) {
-		const count = counts.get(steamId) ?? 0;
-		const v = {
-			name: k.killer!.name,
-			victim: k.victim.name,
-			count,
-			server: serverName,
-			map: k.map
-		};
-		for (const row of rows) {
-			const cfg = row.config as TeamKillConfig;
+	const counts = await teamKillsThisMatch(env, serverId, teamKills, [
+		...new Set(rules.flatMap((r) => [...r.byKiller.keys()]))
+	]);
+	for (const { row, cfg, byKiller } of rules)
+		for (const [steamId, k] of byKiller) {
+			const count = (counts.get(steamId) ?? []).reduce(
+				(n, c) => (countsForTeamKill(cfg, c.cause) ? n + c.n : n),
+				0
+			);
+			const v = {
+				name: k.killer!.name,
+				victim: k.victim.name,
+				count,
+				server: serverName,
+				map: k.map
+			};
 			const stage = teamKillStage(cfg, count);
 			if (!stage) continue;
 			const kick = stage === 'kick';
@@ -368,7 +391,6 @@ async function actOnTeamKills(env: Env, serverId: string, teamKills: KillView[])
 				lastResult: kick ? `Kicking ${v.name} (${count})` : `Whispering ${v.name} (${count})`
 			});
 		}
-	}
 	if (!out.intents.length) return;
 	let queued = 0;
 	await withOwnedTransaction(env, async (tx) => {

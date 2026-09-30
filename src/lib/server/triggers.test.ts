@@ -14,6 +14,7 @@ import {
 	riskKickVerdict,
 	seedRule,
 	seedReplay,
+	countsForTeamKill,
 	teamKillStage,
 	validateConfig,
 	welcomeTargets,
@@ -702,7 +703,8 @@ describe('team_kill', () => {
 			warnAt: 2,
 			warnMessage: 'Careful, {name}: that was a team kill ({count} this match).',
 			kickAt: 4,
-			kickReason: 'Team killing ({count} this match).'
+			kickReason: 'Team killing ({count} this match).',
+			notCounted: ['Id.Buildable.BarbedWire']
 		});
 		expect(validateConfig('team_kill', { kickAt: 3, kickReason: 'Out.' })).toMatchObject({
 			warnAt: 0,
@@ -717,6 +719,41 @@ describe('team_kill', () => {
 			kickReason: 'k'.repeat(400)
 		}) as { warnMessage: string; kickReason: string };
 		expect([long.warnMessage.length, long.kickReason.length]).toEqual([256, 200]);
+	});
+
+	test('validateConfig: barbed wire is not counted unless the list is sent, each tag once in any case', () => {
+		const notCounted = (v: unknown) =>
+			(validateConfig('team_kill', { kickAt: 3, notCounted: v }) as { notCounted: string[] })
+				.notCounted;
+		expect(notCounted(undefined)).toEqual(['Id.Buildable.BarbedWire']);
+		expect(notCounted(null)).toEqual(['Id.Buildable.BarbedWire']);
+		expect(notCounted([])).toEqual([]);
+		expect(notCounted('')).toEqual([]);
+		expect(
+			notCounted(['id.buildable.barbedwire', 'Id.Buildable.BarbedWire', ' Id.Item.Claymore ', ''])
+		).toEqual(['id.buildable.barbedwire', 'Id.Item.Claymore']);
+		expect(notCounted('Id.Item.ATMine\nId.Item.Claymore')).toEqual([
+			'Id.Item.ATMine',
+			'Id.Item.Claymore'
+		]);
+		expect(() => notCounted(['Barbed <b>wire</b>'])).toThrow('kill feed tag');
+		expect(() => notCounted(Array.from({ length: 41 }, (_, i) => `Id.Item.W${i}`))).toThrow(
+			'at most 40'
+		);
+	});
+
+	test('countsForTeamKill: any cause but those left out, in any case; an older rule leaves out barbed wire', () => {
+		const wire = 'Id.Buildable.BarbedWire';
+		// saved before the list existed
+		expect(countsForTeamKill({}, wire)).toBe(false);
+		expect(countsForTeamKill({}, 'ID.BUILDABLE.BARBEDWIRE')).toBe(false);
+		expect(countsForTeamKill({}, 'Id.Item.AK74M')).toBe(true);
+		expect(countsForTeamKill({}, null)).toBe(true);
+		// a list, even an empty one, is what the rule says
+		expect(countsForTeamKill({ notCounted: [] }, wire)).toBe(true);
+		expect(countsForTeamKill({ notCounted: ['Id.Item.Claymore'] }, wire)).toBe(true);
+		expect(countsForTeamKill({ notCounted: ['Id.Item.Claymore'] }, 'id.item.claymore')).toBe(false);
+		expect(countsForTeamKill({ notCounted: [wire] }, null)).toBe(true);
 	});
 
 	test('teamKillStage: a whisper from warnAt on, a kick from kickAt on', () => {
