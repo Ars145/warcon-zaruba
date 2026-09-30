@@ -184,7 +184,7 @@ async function refreshHook(
 		if (result!.ok) set.lastSentAt = set.statusSentAt = new Date(now);
 		if (posted && messageId) {
 			// This process is the map's only writer (the web only ever clears it), so the whole map
-			// goes back; the claim below still refuses it once the cards were switched off.
+			// goes back; the claim below still refuses it once the webhook changed.
 			map[server.id] = messageId;
 			set.statusMessages = { ...map };
 		}
@@ -193,11 +193,14 @@ async function refreshHook(
 			.set(set)
 			.where(
 				posted
-					? // Only while the cards are still wanted: switched off meanwhile, it must not linger.
+					? // Only while the cards are still wanted, in this channel: switched off, paused,
+						// pointed elsewhere or removed meanwhile, it must not linger. The web makes such a
+						// change under the row's lock, so a claim that meets it waits and then misses.
 						and(
 							eq(webhooks.id, hook.id),
 							eq(webhooks.enabled, true),
-							eq(webhooks.statusEnabled, true)
+							eq(webhooks.statusEnabled, true),
+							eq(webhooks.urlEnc, hook.urlEnc)
 						)
 					: eq(webhooks.id, hook.id)
 			)

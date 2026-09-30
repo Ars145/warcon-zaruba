@@ -229,17 +229,21 @@ export async function updateWebhook(
 		if (!set.enabled) dropMessage = true;
 	}
 	if (!Object.keys(changes).length) throw new ApiError(400, 'Nothing to update.');
-	if (dropMessage && row.statusMessages) {
-		await removeStatusMessages(env, row);
-		set.statusMessages = null;
-		set.statusSentAt = null;
-	}
 	set.updatedAt = new Date();
-	const [updated] = await env.db
-		.update(webhooks)
-		.set(set)
-		.where(eq(webhooks.id, row.id))
-		.returning();
+	// The row lets go of the old messages before they are taken down, under its lock: one the worker
+	// posts meanwhile is either in the row read here, or its claim waits for the lock, finds the
+	// webhook changed and takes the message down itself (webhook-status.ts).
+	const { was, updated } = await env.db.transaction(async (tx) => {
+		const [was] = await tx.select().from(webhooks).where(eq(webhooks.id, row.id)).for('update');
+		if (!was) throw new ApiError(404, 'Webhook not found.');
+		if (dropMessage && was.statusMessages) {
+			set.statusMessages = null;
+			set.statusSentAt = null;
+		}
+		const [updated] = await tx.update(webhooks).set(set).where(eq(webhooks.id, row.id)).returning();
+		return { was, updated };
+	});
+	if (dropMessage && was.statusMessages) await removeStatusMessages(env, was);
 	invalidateWebhookCache(org.id);
 	if (updated.statusEnabled && updated.enabled) gateway().statusChanged();
 	await writeAudit(env, req, {
@@ -262,8 +266,10 @@ export async function deleteWebhook(
 	id: string
 ): Promise<void> {
 	const row = await webhookOf(env, org.id, id);
-	await removeStatusMessages(env, row);
-	await env.db.delete(webhooks).where(eq(webhooks.id, row.id));
+	// The row goes before its messages: one the worker posts meanwhile finds nothing to claim and
+	// takes itself down (webhook-status.ts).
+	const [gone] = await env.db.delete(webhooks).where(eq(webhooks.id, row.id)).returning();
+	if (gone) await removeStatusMessages(env, gone);
 	invalidateWebhookCache(org.id);
 	await writeAudit(env, req, {
 		actor: user,

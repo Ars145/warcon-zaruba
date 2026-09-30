@@ -586,6 +586,10 @@ webhook with only that box ticked; the server's **Settings** tab connects one in
 (which lets anyone post to the channel) is stored encrypted with `ENCRYPTION_KEY` and never shown
 again. **Test** posts a message right away; delivery failures show on the org page.
 
+Posts carry the name and picture the webhook has in Discord (the channel's settings →
+Integrations → Webhooks). A status card keeps the name it was posted under: after renaming the
+webhook, delete the card and Warcon posts it again under the new name.
+
 A webhook can also keep a **live status card** for each server it covers (tick _Keep status
 cards in the channel_ on the org page, or open the server's **Settings** tab, paste a webhook and
 tick the card, team kills, or both; pin what it posts). Three card styles: **banner** (the default) with the wide map art and a
