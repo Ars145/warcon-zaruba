@@ -4,7 +4,7 @@
 	import { MAX_CHAT } from '$lib/chat';
 	import { fmtAgo, fmtSpan, fmtTime, mapLabel } from '$lib/format';
 	import { can } from '$lib/capabilities';
-	import { causeKind, causeLabel, knownCauses } from '$lib/causes';
+	import { causeKind, causeLabel, knownCauses, TEAM_KILL_NOT_COUNTED } from '$lib/causes';
 	import { isSteamId } from '$lib/steam-profiles';
 	import { toast } from '$lib/toast.svelte';
 	import { confirmDialog } from '$lib/confirm.svelte';
@@ -251,19 +251,20 @@
 		'id.item.c4explosive',
 		'id.item.ied.explosive'
 	]);
-	/**
-	 * The weapons a Kill distance rule can watch: the hand-held ones the panel names but placed
-	 * charges, and any the rule already holds.
-	 */
-	const weaponChoices = (chosen: string[]) => {
+	/** A rule's cause choices: the causes the panel names that `offer` keeps, and any the rule holds. */
+	const causeChoices = (offer: (cause: string) => boolean, chosen: string[]) => {
 		const out = new Map<string, { cause: string; label: string }>();
-		for (const c of knownCauses())
-			if (causeKind(c.cause) === 'weapon' && !PLACED.has(c.cause.toLowerCase()))
-				out.set(c.cause.toLowerCase(), c);
+		for (const c of knownCauses()) if (offer(c.cause)) out.set(c.cause.toLowerCase(), c);
 		for (const c of chosen)
 			if (!out.has(c.toLowerCase())) out.set(c.toLowerCase(), { cause: c, label: causeLabel(c) });
 		return [...out.values()].sort((a, b) => a.label.localeCompare(b.label));
 	};
+	/** The weapons a Kill distance rule can watch: the hand-held ones but placed charges. */
+	const weaponChoices = (chosen: string[]) =>
+		causeChoices((c) => causeKind(c) === 'weapon' && !PLACED.has(c.toLowerCase()), chosen);
+	/** What a Team kill limit can leave out of its count: things placed that a teammate runs into. */
+	const notCountedChoices = (chosen: string[]) =>
+		causeChoices((c) => causeKind(c) === 'buildable' || PLACED.has(c.toLowerCase()), chosen);
 	const holds = (list: string[], cause: string) =>
 		list.some((c) => c.toLowerCase() === cause.toLowerCase());
 	/** A kind that lacks what it needs stays in the menu, greyed, with the reason in a few words. */
@@ -373,6 +374,7 @@
 		warnMessage: string;
 		kickAt: number;
 		kickReason: string;
+		notCounted: string[];
 		lowAt: number;
 		untilFull: boolean;
 		fullAt: number | null;
@@ -519,6 +521,9 @@
 			warnMessage: s('warnMessage', 'Careful, {name}: that was a team kill ({count} this match).'),
 			kickAt: n('kickAt', 4),
 			kickReason: s('kickReason', 'Team killing ({count} this match).'),
+			notCounted: Array.isArray(c.notCounted)
+				? [...(c.notCounted as string[])]
+				: [...TEAM_KILL_NOT_COUNTED],
 			lowAt: n('lowAt', 20),
 			untilFull: b('untilFull', true),
 			fullAt: typeof c.fullAt === 'number' ? c.fullAt : null,
@@ -658,7 +663,8 @@
 					warnAt: Number(f.warnAt),
 					warnMessage: f.warnMessage,
 					kickAt: Number(f.kickAt),
-					kickReason: f.kickReason
+					kickReason: f.kickReason,
+					notCounted: f.notCounted
 				};
 			case 'kill_rate':
 				return {
@@ -837,14 +843,23 @@
 					.filter(Boolean)
 					.join(' · ')
 					.concat(` · at least ${c.minPlayers} on`);
-			case 'team_kill':
+			case 'team_kill': {
+				const left = Array.isArray(c.notCounted)
+					? (c.notCounted as string[])
+					: TEAM_KILL_NOT_COUNTED;
 				return [
 					c.warnAt ? `whisper from ${c.warnAt} team kill${c.warnAt === 1 ? '' : 's'}` : '',
-					c.kickAt ? `kick at ${c.kickAt}` : ''
+					c.kickAt ? `kick at ${c.kickAt}` : '',
+					'per match',
+					left.length > 3
+						? `${left.length} causes not counted`
+						: left.length
+							? `${left.map((x) => causeLabel(x)).join(', ')} not counted`
+							: ''
 				]
 					.filter(Boolean)
-					.join(' · ')
-					.concat(' · per match');
+					.join(' · ');
+			}
 			case 'kill_rate':
 				return [
 					c.maxKills ? `${c.maxKills} kills` : '',
@@ -1778,6 +1793,24 @@
 							aria-label="Kick reason"
 							disabled={!Number(f.kickAt)}
 						/>
+					</fieldset>
+					<fieldset class="space-y-1.5 text-[13px]">
+						<legend class="field-label">Not counted</legend>
+						<div class="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-3">
+							{#each notCountedChoices(f.notCounted) as w (w.cause)}
+								<label class="flex items-center gap-2"
+									><input
+										type="checkbox"
+										checked={holds(f.notCounted, w.cause)}
+										onchange={(e) =>
+											(f.notCounted = e.currentTarget.checked
+												? [...f.notCounted, w.cause]
+												: f.notCounted.filter((c) => c.toLowerCase() !== w.cause.toLowerCase()))}
+									/>
+									{w.label}</label
+								>
+							{/each}
+						</div>
 					</fieldset>
 					<p class="note">
 						Team kills come from the game's kill feed and are counted per player within each match.
