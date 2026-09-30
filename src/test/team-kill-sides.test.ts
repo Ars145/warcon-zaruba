@@ -112,7 +112,7 @@ describe.skipIf(!hasTestDb)("a player's side, from the worker's look to the kill
 		spy = spyOn(WardogsClient, 'forServer').mockImplementation(async (_env, server) => {
 			const client = new WardogsClient(
 				env,
-				{ host: 'demo', port: 1, scheme: 'http' },
+				{ id: server.id, host: 'demo', port: 1, scheme: 'http' },
 				'demo',
 				`team-kill-sides-${server.id}`
 			);

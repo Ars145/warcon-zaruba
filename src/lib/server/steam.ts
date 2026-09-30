@@ -40,12 +40,22 @@ const friendsStale = (row: SteamProfileRow, now: number): boolean =>
 export const steamEnabled = (env: Pick<Env, 'STEAM_API_KEY'>): boolean => !!env.STEAM_API_KEY;
 export const isSteamId = (v: unknown): v is string => typeof v === 'string' && /^\d{17}$/.test(v);
 
-/** A request value that must be a SteamID64, trimmed; 400 otherwise. */
+/**
+ * A request value that must be a SteamID64, trimmed; 400 otherwise. Only a string will do: a JSON
+ * number that long arrives rounded (76561198100000101 parses as 76561198100000100), still 17
+ * digits, and would name another player.
+ */
 export function requireSteamId(v: unknown): string {
-	const id = str(v, 32);
-	if (!isSteamId(id)) throw new ApiError(400, 'steamId must be a 17-digit SteamID64.');
+	const id = typeof v === 'string' ? str(v, 32) : '';
+	if (!isSteamId(id)) throw new ApiError(400, steamIdRefusal(v));
 	return id;
 }
+
+/** Why a value was not taken as a SteamID64. */
+export const steamIdRefusal = (v: unknown): string =>
+	typeof v === 'number'
+		? 'steamId must be sent as a string: a number that long loses its last digits.'
+		: 'steamId must be a 17-digit SteamID64.';
 
 /** After Steam answers 429 or 5xx, nothing is asked again until this passes. */
 let backoffUntil = 0;

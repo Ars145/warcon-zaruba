@@ -262,6 +262,7 @@ async function listsGranted(env: Env, user: SessionUser): Promise<Map<string, Li
  */
 const keyListKinds = (key: ApiKeyPrincipal): ListKind[] =>
 	key.serverIds === null ? listKindsIn(key.capabilities) : [];
+const LIST_CAPS = new Set<Capability>(Object.values(LIST_CAPABILITY));
 
 /**
  * What someone may do with the org's lists. Owners run every list, and alone import into them,
@@ -344,7 +345,14 @@ export async function serverAccessFor(
 		// A key without View cannot see the server at all (a role always has View; a key may not).
 		if (!user.apiKey.capabilities.includes('server.view')) return null;
 		if (!row || row.suspendedAt || !keyCoversServer(user.apiKey, row)) return null;
-		return accessFromCaps(user.apiKey.capabilities, 'API key');
+		// Nor, on a server, the org lists' capabilities of a key held to some servers (as
+		// keyListKinds): what they reach is on every server, so an org-wide ban or slot is not to be
+		// had through a server either.
+		const caps =
+			user.apiKey.serverIds === null
+				? user.apiKey.capabilities
+				: user.apiKey.capabilities.filter((c) => !LIST_CAPS.has(c));
+		return accessFromCaps(caps, 'API key');
 	}
 	if (user.role === 'owner') return resolveAccess({ manager: true });
 	const [row] = await env.db

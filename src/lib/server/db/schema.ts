@@ -670,7 +670,8 @@ export const triggers = pgTable(
 				'match_broadcast',
 				'name_filter',
 				'kill_rate',
-				'two_teams'
+				'two_teams',
+				'kill_distance'
 			]
 		}).notNull(),
 		name: text('name').notNull(),

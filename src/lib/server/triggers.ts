@@ -13,6 +13,8 @@
 //                or across the org
 //   two_teams    close one faction and move its players to the smaller of the other two
 //                (two-teams.ts)
+//   kill_distance  flag, kick or ban a player who kills with a chosen weapon from further than it
+//                reaches (kill-distance.ts, acted on in feed-events.ts)
 // The worker evaluates them on every observation and writes the actions they want to the outbox
 // (outbox.ts delivers, and every delivery lands in the audit trail as category "trigger"). A dry
 // run replays the last 24 hours from the samples and sessions tables so a rule can be checked
@@ -87,6 +89,20 @@ import {
 	type RateKill
 } from './kill-rate';
 import {
+	countsForDistance,
+	KILL_DISTANCE_FLAG,
+	killDistanceAction,
+	killDistanceBanScope,
+	killDistanceReplay,
+	killDistanceSettingsKey,
+	killDistanceVerdict,
+	matchKey,
+	type DistanceKill,
+	type KillDistanceConfig
+} from './kill-distance';
+import { banNeeds, PANEL_BAN, type PanelBanParams } from './rule-ban';
+import { causeLabel } from '$lib/causes';
+import {
 	emptyTwoTeamsState,
 	teamName,
 	TWO_TEAMS_ASK_WINDOW_MS,
@@ -147,7 +163,10 @@ async function triggerOf(env: Env, serverId: string, id: string): Promise<Trigge
  * A rule acts without anyone at the controls, so saving it needs the capability its author would
  * need to do the same by hand: a rule that kicks needs Kick players, not only Automation.
  */
-const RULE_NEEDS: Record<Exclude<TriggerKind, 'seed_reward'>, [Capability, string]> = {
+const RULE_NEEDS: Record<
+	Exclude<TriggerKind, 'seed_reward' | 'kill_distance'>,
+	[Capability, string]
+> = {
 	welcome: ['chat.send', 'messages players'],
 	faction_change: ['chat.send', 'messages players'],
 	broadcast: ['chat.send', 'messages players'],
@@ -162,12 +181,22 @@ const RULE_NEEDS: Record<Exclude<TriggerKind, 'seed_reward'>, [Capability, strin
 	two_teams: ['players.moderate', 'moves players between teams']
 };
 
-/** What one rule needs of whoever saves it. The Seeding reward reserves slots: here, or on the organisation's list. */
+/**
+ * What one rule needs of whoever saves it. The Seeding reward reserves slots: here, or on the
+ * organisation's list. A Kill distance rule flags, kicks, or bans: here, or on the organisation's
+ * ban list.
+ */
 export function ruleNeeds(kind: TriggerKind, config: unknown): [Capability, string] {
-	if (kind !== 'seed_reward') return RULE_NEEDS[kind];
-	return (config as Partial<SeedRewardConfig> | null)?.scope !== 'server'
-		? ['lists.reserve', "edits the organisation's reserved-slot list"]
-		: ['slots.manage', 'reserves slots on this server'];
+	if (kind === 'seed_reward')
+		return (config as Partial<SeedRewardConfig> | null)?.scope !== 'server'
+			? ['lists.reserve', "edits the organisation's reserved-slot list"]
+			: ['slots.manage', 'reserves slots on this server'];
+	if (kind === 'kill_distance') {
+		const action = killDistanceAction(config);
+		if (action === 'ban') return banNeeds(killDistanceBanScope(config));
+		return ['players.moderate', action === 'kick' ? 'kicks players' : 'flags players'];
+	}
+	return RULE_NEEDS[kind];
 }
 
 /** What else a rule needs when it also messages players: a Two-team mode rule with a whisper. */
@@ -278,7 +307,13 @@ export async function updateTrigger(
 		.set(set)
 		.where(eq(triggers.id, row.id))
 		.returning();
-	if (row.kind === 'two_teams' && (set.config !== undefined || set.enabled === false))
+	// Saved again with the same settings (a rename, say), what it queued still holds.
+	const settings = SETTINGS_KEYS[row.kind];
+	if (
+		settings &&
+		(set.enabled === false ||
+			(set.config !== undefined && settings(set.config) !== settings(row.config)))
+	)
 		await dropQueued(env, row.id, 'The rule was changed before this was sent.');
 	gateway().triggersChanged(server.id);
 	await writeAudit(env, req, {
@@ -303,7 +338,7 @@ export async function deleteTrigger(
 ): Promise<void> {
 	const row = await triggerOf(env, server.id, id);
 	await env.db.delete(triggers).where(eq(triggers.id, row.id));
-	if (row.kind === 'two_teams')
+	if (SETTINGS_KEYS[row.kind])
 		await dropQueued(env, row.id, 'The rule was deleted before this was sent.');
 	gateway().triggersChanged(server.id);
 	await writeAudit(env, req, {
@@ -319,9 +354,20 @@ export async function deleteTrigger(
 }
 
 /**
- * A Two-team mode rule's queued moves and whispers were decided under settings that no longer hold
- * (a queued move from the old closed faction could now take a player between the two open sides):
- * they are skipped, kept with the reason. A row already being sent goes out.
+ * The kinds whose queued actions go only under the settings they were decided under, and each
+ * one's key of those settings (every row carries it as `params.rule`; outbox.ts checks it again at
+ * delivery): a Two-team move from the old closed faction could take a player between the two open
+ * sides, and a Kill distance kick or ban decided under settings an admin has just corrected, or by
+ * a rule just switched off, is not to be sent.
+ */
+export const SETTINGS_KEYS: Partial<Record<string, (config: unknown) => string>> = {
+	two_teams: (c) => twoTeamsSettingsKey(c as TwoTeamsConfig),
+	kill_distance: (c) => killDistanceSettingsKey(c as KillDistanceConfig)
+};
+
+/**
+ * Such a rule's queued actions were decided under settings that no longer hold: they are skipped,
+ * kept with the reason. One already being sent is checked again at delivery (outbox.ts).
  */
 async function dropQueued(env: Env, triggerId: string, why: string): Promise<void> {
 	const dropped = await env.db
@@ -509,6 +555,7 @@ export async function evaluateTriggers(
 					break;
 				case 'team_kill':
 				case 'kill_rate':
+				case 'kill_distance':
 					// Acted on as kills arrive (feed-events.ts), not per observation.
 					break;
 				case 'seed_reward':
@@ -1144,6 +1191,75 @@ export async function riskInputs(
 }
 
 /** Records a delivery outcome on the trigger row and in the audit trail. */
+/** A counted kill that caught its killer, as the Kill distance rule acts on it. */
+export interface CaughtKill {
+	steamId: string;
+	name: string;
+	cause: string | null;
+	distanceM: number;
+}
+
+/**
+ * What a Kill distance rule does about a player it caught: the outbox row's action and texts, and
+ * the line its dry run shows. The live rule (feed-events.ts) and the dry run both build it here.
+ * A ban stands whether or not the player is still on by the time it is delivered; a kick does not.
+ */
+export function killDistanceAct(
+	cfg: KillDistanceConfig,
+	k: CaughtKill,
+	count: number,
+	server: string
+): Omit<Intent, 'trigger' | 'dedupeKey' | 'target'> & { pending: string; line: string } {
+	const verdict = killDistanceVerdict(cfg, k.cause, k.distanceM, count);
+	const reason = renderTemplate(cfg.reason, {
+		name: k.name,
+		weapon: causeLabel(k.cause),
+		distance: Math.round(k.distanceM),
+		count,
+		server
+	});
+	const detail = { name: k.name, verdict, cause: k.cause, distanceM: k.distanceM, count };
+	const who = `${k.name} (${k.steamId})`;
+	if (cfg.action === 'kick')
+		return {
+			action: 'kick',
+			params: { steamId: k.steamId, reason },
+			okMessage: `Kicked ${k.name}: ${verdict}`,
+			detail,
+			steamId: k.steamId,
+			pending: `Kicking ${k.name}: ${verdict}`,
+			line: `kick ${who}: ${verdict}`
+		};
+	if (cfg.action === 'ban') {
+		const params: PanelBanParams = {
+			steamId: k.steamId,
+			name: k.name,
+			reason,
+			days: cfg.banDays,
+			scope: cfg.banScope
+		};
+		const how = `${cfg.banScope === 'org' ? 'on every server' : 'here'} ${cfg.banDays ? `for ${cfg.banDays} day${cfg.banDays === 1 ? '' : 's'}` : 'for good'}`;
+		return {
+			action: PANEL_BAN,
+			params: { ...params },
+			okMessage: `Banned ${k.name} ${how}: ${verdict}`,
+			detail,
+			steamId: null,
+			pending: `Banning ${k.name}: ${verdict}`,
+			line: `ban ${who} ${how}: ${verdict}`
+		};
+	}
+	return {
+		action: KILL_DISTANCE_FLAG,
+		params: {},
+		okMessage: `Flagged ${k.name}: ${verdict}`,
+		detail,
+		steamId: k.steamId,
+		pending: `Flagging ${k.name}: ${verdict}`,
+		line: `flag ${who}: ${verdict}`
+	};
+}
+
 export async function recordDelivery(
 	env: Env,
 	row: { triggerId: string | null; triggerName: string; triggerKind: string; serverId: string },
@@ -1441,6 +1557,75 @@ export async function dryRun(
 		if (rows.length >= KILL_RATE_REPLAY_MAX)
 			result.notes.push(
 				`Replayed the first ${KILL_RATE_REPLAY_MAX.toLocaleString('en')} kills of the window only.`
+			);
+		return result;
+	}
+	if (kind === 'kill_distance') {
+		const c = cfg as KillDistanceConfig;
+		// The kills of the window the rule counts, per match as the live rule counts them, from the
+		// start of a match already running when the window opens (at most six hours back), so a count
+		// at the window's edge is the live one. Only what happened in the window is listed.
+		const [open] = await env.db.execute<{ startedAt: Date | null }>(sql`
+			SELECT MIN(started_at) AS "startedAt" FROM matches
+			 WHERE server_id = ${server.id} AND started_at < ${from}
+			   AND (ended_at IS NULL OR ended_at >= ${from})`);
+		const since = new Date(
+			Math.max(
+				Math.min(
+					from.getTime(),
+					open?.startedAt ? new Date(open.startedAt).getTime() - 120_000 : Infinity
+				),
+				from.getTime() - 6 * 3600_000
+			)
+		);
+		const rows = await env.db.execute<{
+			ts: Date;
+			steamId: string;
+			name: string | null;
+			cause: string | null;
+			distanceM: number;
+			matchRow: number | null;
+		}>(sql`
+			SELECT ts, killer_steam_id AS "steamId", killer_name AS name, cause,
+			       distance_m AS "distanceM", match_row AS "matchRow"
+			  FROM kills
+			 WHERE server_id = ${server.id} AND ts >= ${since}
+			   AND killer_steam_id IS NOT NULL AND NOT suicide AND distance_m >= ${c.minDistanceM}
+			   AND lower(cause) IN (SELECT jsonb_array_elements_text(${JSON.stringify(c.causes.map((x) => x.toLowerCase()))}::text::jsonb))
+			 ORDER BY ts ASC, event_time ASC LIMIT ${KILL_RATE_REPLAY_MAX}`);
+		const counted: DistanceKill[] = [];
+		for (const r of rows) {
+			const distanceM = Number(r.distanceM);
+			if (!countsForDistance(c, { killer: r.steamId, suicide: false, cause: r.cause, distanceM }))
+				continue;
+			const at = new Date(r.ts).getTime();
+			counted.push({
+				at,
+				match: matchKey(r.matchRow === null ? null : Number(r.matchRow), at),
+				steamId: r.steamId,
+				name: r.name || r.steamId,
+				cause: r.cause,
+				distanceM
+			});
+		}
+		for (const f of killDistanceReplay(c, counted))
+			if (f.at >= from.getTime())
+				push(new Date(f.at), killDistanceAct(c, f, f.count, server.name).line);
+		const [feed] = await env.db
+			.select({ configured: sql<boolean>`feed_token_hash IS NOT NULL` })
+			.from(servers)
+			.where(eq(servers.id, server.id));
+		if (!feed?.configured)
+			result.notes.push(
+				'This server has no kill feed set up (Config tab), so the rule cannot see any kills.'
+			);
+		const inWindow = counted.filter((k) => k.at >= from.getTime()).length;
+		result.notes.push(
+			`${inWindow} kill${inWindow === 1 ? '' : 's'} with ${c.causes.length === 1 ? causeLabel(c.causes[0]) : 'the chosen weapons'} from ${c.minDistanceM} m or more in the window, counted per match.`
+		);
+		if (rows.length >= KILL_RATE_REPLAY_MAX)
+			result.notes.push(
+				`Replayed the first ${KILL_RATE_REPLAY_MAX.toLocaleString('en')} such kills only.`
 			);
 		return result;
 	}

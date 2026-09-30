@@ -4,7 +4,7 @@
 // empty faction, and this rule places them from there. No database, no game server: triggers.ts
 // runs the step on each fresh player list, keeps its state in the worker's memory and writes the
 // moves to the outbox.
-import { createHash } from 'node:crypto';
+import { settingsFingerprint } from './fingerprint';
 import { ApiError, str } from './http';
 
 /** How long a move is waited on before it is asked for again (the player is still on the closed faction). */
@@ -51,23 +51,11 @@ export function validateTwoTeams(c: Record<string, unknown>): TwoTeamsConfig {
 	return { closedFaction, names, message: str(c.message, 200) };
 }
 
-/** A value as JSON with every object's keys in order: the database's jsonb keeps its own order. */
-const stable = (v: unknown): string =>
-	Array.isArray(v)
-		? `[${v.map(stable).join(',')}]`
-		: v && typeof v === 'object'
-			? `{${Object.keys(v)
-					.sort()
-					.map((k) => `${JSON.stringify(k)}:${stable((v as Record<string, unknown>)[k])}`)
-					.join(',')}}`
-			: JSON.stringify(v);
-
 /**
  * A short fingerprint of a rule's settings. Each move and whisper carries the one it was decided
  * under, so delivery can tell a row decided before the settings changed.
  */
-export const twoTeamsSettingsKey = (cfg: TwoTeamsConfig): string =>
-	createHash('sha256').update(stable(cfg)).digest('base64url').slice(0, 16);
+export const twoTeamsSettingsKey = (cfg: TwoTeamsConfig): string => settingsFingerprint(cfg);
 
 /** What the rule remembers between player lists (the worker's memory, per rule). */
 export interface TwoTeamsState {

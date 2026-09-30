@@ -92,14 +92,17 @@ export { DEMO_HOST, isDemoServer } from './env';
 
 export class WardogsClient {
 	private target: GameTarget;
+	/** the panel's id for the server, for what an action keeps per server */
+	readonly serverId: string;
 	constructor(
 		private env: Env,
-		server: Pick<ServerRow, 'host' | 'port' | 'scheme'>,
+		server: Pick<ServerRow, 'id' | 'host' | 'port' | 'scheme'>,
 		private key: string,
 		private demoKey: string | null,
 		private timeoutMs = 10000,
 		addresses: string[] = []
 	) {
+		this.serverId = server.id;
 		this.target = { host: server.host, port: server.port, scheme: server.scheme, addresses };
 	}
 

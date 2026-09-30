@@ -108,6 +108,76 @@ describe('buildEmbed', () => {
 	});
 });
 
+describe('names a player chose, in a staff channel', () => {
+	// A masked link renders as its text in an embed: a player named like this would put a sign-in
+	// lookalike in front of every admin who reads the channel.
+	const name = '[Sign in](https://evil.example) **x** <@&1>\n# big';
+	const shown = '\\[Sign in\\](https:\u200B//evil.example) \\*\\*x\\*\\* \\<@&1\\> # big';
+	const intact = (text: string) => {
+		expect(text).not.toContain('[Sign in](');
+		// nor a bare address, which Discord links on its own
+		expect(text).not.toContain('https://evil.example');
+		expect(text).not.toContain('\n# big');
+		expect(text).toContain(shown);
+	};
+	test('a flag or a kick carries the name as text', () => {
+		const base = {
+			id: 1,
+			ts: new Date('2026-09-28T12:00:00Z'),
+			actorId: 'u1',
+			actorName: 'trigger: Name change watch',
+			serverId: 's1',
+			serverName: 'EU #1',
+			orgId: 'o1',
+			category: 'trigger',
+			action: 'trigger.name_filter',
+			target: '76561198000000001` [x](evil.example) `',
+			detail: {},
+			outcome: 'ok' as const,
+			status: 200,
+			message: `Flagged ${name}: blocked word 'x'`,
+			userAgent: 'curl',
+			durationMs: 12
+		};
+		const e = buildEmbed('Warcon', base);
+		intact(e.description);
+		// the target stays inside its code span
+		expect(e.description).toContain('→ `76561198000000001ˋ [x](evil.example) ˋ`\nServer: EU #1');
+		// a message that starts with outside text starts no heading
+		const heading = buildEmbed('Warcon', {
+			...base,
+			message: '# Free admin at https://evil.example'
+		});
+		expect(heading.description).toContain('\n\\# Free admin at https:\u200B//evil.example');
+	});
+	test('a team kill and a watched join carry the names as text', () => {
+		intact(
+			buildTeamKillEmbed('Warcon', 'EU #1', {
+				eventId: 'x',
+				ts: '2026-09-28T12:00:00.000Z',
+				map: 'Kavkazi',
+				eventTime: 12,
+				killer: { steamId: '76561198000000001', name, faction: 'Valkyra' },
+				victim: { steamId: '76561198000000002', name, faction: 'Valkyra' },
+				cause: 'Id.Item.AK74M',
+				distanceM: 39.6,
+				headshot: true,
+				suicide: false,
+				teamKill: true,
+				tags: []
+			}).description
+		);
+		intact(
+			buildWatchedJoinEmbed(
+				'Warcon',
+				'EU #1',
+				{ steamId: '76561198000000001', name, reason: 'alt' },
+				'2026-09-28T12:00:00.000Z'
+			).description
+		);
+	});
+});
+
 describe('buildTeamKillEmbed', () => {
 	test('names both players, the weapon, the distance and the server', () => {
 		const e = buildTeamKillEmbed('Warcon', 'TLR #1', {
