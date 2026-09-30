@@ -19,7 +19,7 @@
 // (outbox.ts delivers, and every delivery lands in the audit trail as category "trigger"). A dry
 // run replays the last 24 hours from the samples and sessions tables so a rule can be checked
 // before it touches anyone.
-import { and, asc, desc, eq, gte, inArray, isNotNull, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNotNull, or, sql, type SQL } from 'drizzle-orm';
 import type { Env } from './env';
 import { ApiError, int, newId, str } from './http';
 import { writeAudit } from './audit';
@@ -53,6 +53,7 @@ import {
 	restartNoticeStage,
 	riskKickVerdict,
 	pingKickStep,
+	teamKillNotCounted,
 	teamKillStage,
 	TRIGGER_LABELS,
 	validateConfig,
@@ -1469,28 +1470,42 @@ export async function dryRun(
 		const c = cfg as TeamKillConfig;
 		// Each team kill in the window, with the killer's running count in the match it arrived in:
 		// the rows carrying that match from two minutes before it opened (killsOfMatch), else, for
-		// a kill that came in with no match open, the other such kills of the hour before.
+		// a kill that came in with no match open, the other such kills of the hour before. A kill by
+		// a cause the rule does not count adds to no count and comes back with none.
+		const notCounted = JSON.stringify(teamKillNotCounted(c).map((x) => x.toLowerCase()));
+		const counts = (cause: SQL) =>
+			sql`(${cause} IS NULL OR lower(${cause}) NOT IN (SELECT jsonb_array_elements_text(${notCounted}::text::jsonb)))`;
 		const rows = await env.db.execute<{
 			ts: Date;
 			killerName: string;
 			killerSteamId: string;
 			victimName: string;
-			n: string;
+			cause: string | null;
+			n: string | null;
 		}>(sql`
 			SELECT k.ts, k.killer_name AS "killerName", k.killer_steam_id AS "killerSteamId",
-			       k.victim_name AS "victimName",
+			       k.victim_name AS "victimName", k.cause,
+			       CASE WHEN ${counts(sql`k.cause`)} THEN
 			       (SELECT COUNT(*) FROM kills k2
 			         WHERE k2.server_id = k.server_id AND k2.killer_steam_id = k.killer_steam_id
-			           AND k2.team_kill AND k2.ts <= k.ts
+			           AND k2.team_kill AND ${counts(sql`k2.cause`)} AND k2.ts <= k.ts
 			           AND k2.match_row IS NOT DISTINCT FROM k.match_row
 			           AND k2.ts >= COALESCE((SELECT m.started_at - interval '2 minutes' FROM matches m
 			                                    WHERE m.id = k.match_row AND m.server_id = k.server_id),
-			                                 k.ts - interval '1 hour')) AS n
+			                                 k.ts - interval '1 hour')) END AS n
 			  FROM kills k
 			 WHERE k.server_id = ${server.id} AND k.team_kill AND k.killer_steam_id IS NOT NULL
 			   AND k.ts >= ${from}
 			 ORDER BY k.ts ASC LIMIT ${REPLAY_ROWS_MAX}`);
+		let counted = 0;
+		const left = new Map<string, number>();
 		for (const r of rows) {
+			if (r.n === null) {
+				const label = causeLabel(r.cause);
+				left.set(label, (left.get(label) ?? 0) + 1);
+				continue;
+			}
+			counted++;
 			const stage = teamKillStage(c, Number(r.n));
 			if (!stage) continue;
 			const v = {
@@ -1515,8 +1530,12 @@ export async function dryRun(
 				'This server has no kill feed set up (Config tab), so the rule cannot see any team kills.'
 			);
 		result.notes.push(
-			`${rows.length} team kill${rows.length === 1 ? '' : 's'} in the window${rows.length === REPLAY_ROWS_MAX ? ` (the first ${REPLAY_ROWS_MAX} only)` : ''}, counted per killer within each match.`
+			`${counted} team kill${counted === 1 ? '' : 's'} in the window${rows.length === REPLAY_ROWS_MAX ? ` (the first ${REPLAY_ROWS_MAX} only)` : ''}, counted per killer within each match.`
 		);
+		if (left.size)
+			result.notes.push(
+				`Not counted: ${[...left].map(([label, n]) => `${n} by ${label}`).join(', ')}.`
+			);
 		return result;
 	}
 	if (kind === 'kill_rate') {
