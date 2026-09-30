@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { invalidateAll } from '$app/navigation';
 	import { api, errorMessage } from '$lib/api';
+	import { MAX_CHAT } from '$lib/chat';
 	import { fmtAgo, fmtSpan, fmtTime, mapLabel } from '$lib/format';
 	import { can } from '$lib/capabilities';
 	import { causeKind, causeLabel, knownCauses } from '$lib/causes';
@@ -1205,7 +1206,7 @@
 				{#if f.kind === 'welcome'}
 					<fieldset class="space-y-2">
 						<legend class="field-label">Whisper</legend>
-						<input class="input" type="text" bind:value={f.message} maxlength="200" required />
+						<input class="input" type="text" bind:value={f.message} maxlength={MAX_CHAT} required />
 						{@render placeholders(['name', 'faction', 'server', 'map', 'players', 'max'])}
 					</fieldset>
 					<fieldset class="space-y-1.5 text-[13px]">
@@ -1223,7 +1224,7 @@
 				{:else if f.kind === 'faction_change'}
 					<fieldset class="space-y-2">
 						<legend class="field-label">Whisper</legend>
-						<input class="input" type="text" bind:value={f.message} maxlength="200" required />
+						<input class="input" type="text" bind:value={f.message} maxlength={MAX_CHAT} required />
 						{@render placeholders([
 							'name',
 							'faction',
@@ -1281,7 +1282,7 @@
 					</fieldset>
 					<p class="note">
 						Blank for no ceiling; a fill-the-server message can stop once it has. Broadcasts are
-						limited to 200 characters.
+						limited to {MAX_CHAT} characters.
 					</p>
 				{:else if f.kind === 'empty_reset'}
 					<fieldset class="space-y-2">
@@ -1337,7 +1338,7 @@
 							class="input"
 							type="text"
 							bind:value={f.leadMessage}
-							maxlength="200"
+							maxlength={MAX_CHAT}
 							aria-label="Heads-up message"
 							disabled={!Number(f.leadMinutes)}
 						/>
@@ -1348,7 +1349,7 @@
 							class="input"
 							type="text"
 							bind:value={f.message}
-							maxlength="200"
+							maxlength={MAX_CHAT}
 							aria-label="Message once the window is open"
 							required
 						/>
@@ -1390,7 +1391,7 @@
 							class="input"
 							type="text"
 							bind:value={f.endMessage}
-							maxlength="200"
+							maxlength={MAX_CHAT}
 							aria-label="Message when a match ends"
 							placeholder="Leave empty to say nothing"
 						/>
@@ -1413,7 +1414,7 @@
 							class="input"
 							type="text"
 							bind:value={f.startMessage}
-							maxlength="200"
+							maxlength={MAX_CHAT}
 							aria-label="Message as the next match starts"
 							placeholder="Leave empty to say nothing"
 						/>
@@ -1717,7 +1718,7 @@
 					</fieldset>
 					<fieldset class="space-y-2">
 						<legend class="field-label">Whisper once a player is placed (optional)</legend>
-						<input class="input" type="text" bind:value={f.message} maxlength="200" />
+						<input class="input" type="text" bind:value={f.message} maxlength={MAX_CHAT} />
 						{@render placeholders(['team', 'name', 'server', 'map'])}
 						<p class="text-[12px] text-mist-600">
 							Sent once per player; they are told again only after two hours away. Empty sends
@@ -1749,7 +1750,7 @@
 							class="input"
 							type="text"
 							bind:value={f.warnMessage}
-							maxlength="200"
+							maxlength={MAX_CHAT}
 							aria-label="Whisper"
 							disabled={!Number(f.warnAt)}
 						/>
@@ -2073,7 +2074,7 @@
 					</fieldset>
 					<fieldset class="space-y-2">
 						<legend class="field-label">Whisper on the grant, blank for none</legend>
-						<input class="input" type="text" bind:value={f.message} maxlength="200" />
+						<input class="input" type="text" bind:value={f.message} maxlength={MAX_CHAT} />
 						{@render placeholders(['name', 'server', 'minutes', 'until', 'days', 'players', 'max'])}
 					</fieldset>
 					<p class="note">

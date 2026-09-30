@@ -47,6 +47,7 @@ import {
 	broadcastWanted,
 	factionChangeTargets,
 	isTriggerKind,
+	MAX_REASON,
 	onTarget,
 	renderTemplate,
 	restartNoticeStage,
@@ -80,6 +81,7 @@ import {
 	type TeamKillConfig,
 	type WelcomeConfig
 } from './trigger-rules';
+import { MAX_CHAT } from '$lib/chat';
 import { NAME_FLAG, nameFilterTargets, nameVerdict, type NameFilterConfig } from './name-filter';
 import {
 	countsForRate,
@@ -586,7 +588,7 @@ function evalWelcome(ctx: TickContext, row: TriggerRow, cfg: WelcomeConfig, out:
 	let n = 0;
 	let last = '';
 	for (const p of welcomeTargets(cfg, ctx)) {
-		const message = renderTemplate(cfg.message, vars(ctx, p));
+		const message = renderTemplate(cfg.message, vars(ctx, p), MAX_CHAT);
 		out.intents.push({
 			trigger: row,
 			action: 'whisper',
@@ -617,7 +619,7 @@ function evalFactionChange(
 	let n = 0;
 	let last = '';
 	for (const { player: p, from } of factionChangeTargets(ctx)) {
-		const message = renderTemplate(cfg.message, vars(ctx, p, from ?? ''));
+		const message = renderTemplate(cfg.message, vars(ctx, p, from ?? ''), MAX_CHAT);
 		out.intents.push({
 			trigger: row,
 			action: 'whisper',
@@ -646,7 +648,7 @@ function evalBroadcast(ctx: TickContext, row: TriggerRow, cfg: BroadcastConfig, 
 	if (!due) return;
 	const state = (row.state as { index?: number } | null) ?? {};
 	const index = (state.index ?? 0) % cfg.messages.length;
-	const message = renderTemplate(cfg.messages[index], vars(ctx));
+	const message = renderTemplate(cfg.messages[index], vars(ctx), MAX_CHAT);
 	out.intents.push({
 		trigger: row,
 		action: 'broadcast',
@@ -787,7 +789,7 @@ function evalNameFilter(ctx: TickContext, row: TriggerRow, cfg: NameFilterConfig
 			params: kick
 				? {
 						steamId: p.steamId,
-						reason: renderTemplate(cfg.reason, { ...vars(ctx, p), why: v.why })
+						reason: renderTemplate(cfg.reason, { ...vars(ctx, p), why: v.why }, MAX_REASON)
 					}
 				: {},
 			target: p.steamId,
@@ -907,13 +909,17 @@ function evalTwoTeams(ctx: TickContext, row: TriggerRow, cfg: TwoTeamsConfig, ou
 			params: {
 				steamId: w.steamId,
 				rule: config,
-				message: renderTemplate(cfg.message, {
-					...vars(
-						ctx,
-						ctx.players.find((p) => p.steamId === w.steamId)
-					),
-					team: teamName(cfg, w.faction)
-				})
+				message: renderTemplate(
+					cfg.message,
+					{
+						...vars(
+							ctx,
+							ctx.players.find((p) => p.steamId === w.steamId)
+						),
+						team: teamName(cfg, w.faction)
+					},
+					MAX_CHAT
+				)
 			},
 			target: w.steamId,
 			okMessage: `Whispered ${w.name}.`,
@@ -948,11 +954,15 @@ function evalRestartNotice(
 		now: ctx.ts.getTime()
 	});
 	if (!hit) return;
-	const message = renderTemplate(hit.stage === 'lead' ? cfg.leadMessage : cfg.message, {
-		...vars(ctx),
-		minutes: hit.minutes,
-		uptime: fmtUptime(ctx.ts.getTime() - ctx.startedAt)
-	});
+	const message = renderTemplate(
+		hit.stage === 'lead' ? cfg.leadMessage : cfg.message,
+		{
+			...vars(ctx),
+			minutes: hit.minutes,
+			uptime: fmtUptime(ctx.ts.getTime() - ctx.startedAt)
+		},
+		MAX_CHAT
+	);
 	out.intents.push({
 		trigger: row,
 		action: 'broadcast',
@@ -1119,12 +1129,16 @@ async function evalSeedReward(
 			dedupeKey: key(row, p.steamId, now)
 		});
 		if (cfg.message) {
-			const message = renderTemplate(cfg.message, {
-				...vars(ctx, p),
-				minutes,
-				until: dateOf(expiresAt),
-				days: cfg.slotDays
-			});
+			const message = renderTemplate(
+				cfg.message,
+				{
+					...vars(ctx, p),
+					minutes,
+					until: dateOf(expiresAt),
+					days: cfg.slotDays
+				},
+				MAX_CHAT
+			);
 			out.intents.push({
 				trigger: row,
 				action: 'whisper',
@@ -1211,13 +1225,17 @@ export function killDistanceAct(
 	server: string
 ): Omit<Intent, 'trigger' | 'dedupeKey' | 'target'> & { pending: string; line: string } {
 	const verdict = killDistanceVerdict(cfg, k.cause, k.distanceM, count);
-	const reason = renderTemplate(cfg.reason, {
-		name: k.name,
-		weapon: causeLabel(k.cause),
-		distance: Math.round(k.distanceM),
-		count,
-		server
-	});
+	const reason = renderTemplate(
+		cfg.reason,
+		{
+			name: k.name,
+			weapon: causeLabel(k.cause),
+			distance: Math.round(k.distanceM),
+			count,
+			server
+		},
+		MAX_REASON
+	);
 	const detail = { name: k.name, verdict, cause: k.cause, distanceM: k.distanceM, count };
 	const who = `${k.name} (${k.steamId})`;
 	if (cfg.action === 'kick')
@@ -1343,7 +1361,7 @@ export async function dryRun(
 			if (c.onlyFirstVisit && !j.first) continue;
 			push(
 				new Date(j.joinedAt),
-				`whisper ${j.name}: ${renderTemplate(c.message, { name: j.name, server: server.name, map: '…', players: '…', max: '…' })}`
+				`whisper ${j.name}: ${renderTemplate(c.message, { name: j.name, server: server.name, map: '…', players: '…', max: '…' }, MAX_CHAT)}`
 			);
 		}
 		result.notes.push(
@@ -1484,8 +1502,8 @@ export async function dryRun(
 			push(
 				new Date(r.ts),
 				stage === 'kick'
-					? `kick ${r.killerName} (${r.killerSteamId}): ${renderTemplate(c.kickReason, v)}`
-					: `whisper ${r.killerName}: ${renderTemplate(c.warnMessage, v)}`
+					? `kick ${r.killerName} (${r.killerSteamId}): ${renderTemplate(c.kickReason, v, MAX_REASON)}`
+					: `whisper ${r.killerName}: ${renderTemplate(c.warnMessage, v, MAX_CHAT)}`
 			);
 		}
 		const [feed] = await env.db
@@ -1657,12 +1675,12 @@ export async function dryRun(
 			const leadAt = new Date(dueAt.getTime() - c.leadMinutes * 60_000);
 			push(
 				leadAt,
-				`${leadAt < to ? 'already ' : ''}broadcast: ${renderTemplate(c.leadMessage, { ...v, minutes: c.leadMinutes })}`
+				`${leadAt < to ? 'already ' : ''}broadcast: ${renderTemplate(c.leadMessage, { ...v, minutes: c.leadMinutes }, MAX_CHAT)}`
 			);
 		}
 		push(
 			dueAt,
-			`${w.due ? 'already ' : ''}broadcast: ${renderTemplate(c.message, { ...v, minutes: 0 })}`
+			`${w.due ? 'already ' : ''}broadcast: ${renderTemplate(c.message, { ...v, minutes: 0 }, MAX_CHAT)}`
 		);
 		result.notes.push(
 			`Up ${fmtUptime(w.upMs)}; the restart window ${w.due ? 'is open: the game restarts when this round ends' : `opens in ${fmtUptime(w.untilDueMs ?? 0)}`}. Times shown are the coming cycle, not a replay; each stage goes once per game start${c.repeatMinutes ? `, the main message again every ${c.repeatMinutes} min while the window stays open` : ''}, and only with at least ${c.minPlayers} on.`

@@ -17,15 +17,17 @@ import {
 	teamKillStage,
 	validateConfig,
 	welcomeTargets,
-	riskKickScore
+	riskKickScore,
+	MAX_REASON
 } from './trigger-rules';
 import type { MatchBroadcastConfig, RiskKickConfig } from './trigger-rules';
+import { MAX_CHAT } from '$lib/chat';
 
 describe('validateConfig', () => {
-	test('welcome needs a message and trims it to 200 characters', () => {
+	test('welcome needs a message and trims it to the 256 characters the game takes', () => {
 		expect(() => validateConfig('welcome', { message: '  ' })).toThrow('empty');
 		const c = validateConfig('welcome', { message: 'x'.repeat(300), onlyFirstVisit: 'yes' });
-		expect(c).toEqual({ message: 'x'.repeat(200), onlyFirstVisit: true, afterFaction: false });
+		expect(c).toEqual({ message: 'x'.repeat(256), onlyFirstVisit: true, afterFaction: false });
 		expect(validateConfig('welcome', { message: 'hi', afterFaction: 1 })).toMatchObject({
 			afterFaction: true
 		});
@@ -395,17 +397,16 @@ describe('welcomeTargets', () => {
 describe('renderTemplate', () => {
 	test('fills placeholders case-insensitively and leaves unknown ones', () => {
 		expect(
-			renderTemplate('Hi {NAME}, welcome to {server} ({players}/{max}) on {map} {nope}', {
-				name: 'Nomad',
-				server: 'EU #1',
-				players: 3,
-				max: 64,
-				map: 'Kavkazi'
-			})
+			renderTemplate(
+				'Hi {NAME}, welcome to {server} ({players}/{max}) on {map} {nope}',
+				{ name: 'Nomad', server: 'EU #1', players: 3, max: 64, map: 'Kavkazi' },
+				MAX_CHAT
+			)
 		).toBe('Hi Nomad, welcome to EU #1 (3/64) on Kavkazi {nope}');
 	});
-	test('clips to 200 characters', () => {
-		expect(renderTemplate('{name}', { name: 'y'.repeat(500) })).toHaveLength(200);
+	test('clips to the length it is given: chat or a kick reason', () => {
+		expect(renderTemplate('{name}', { name: 'y'.repeat(500) }, MAX_CHAT)).toHaveLength(256);
+		expect(renderTemplate('{name}', { name: 'y'.repeat(500) }, MAX_REASON)).toHaveLength(200);
 	});
 });
 
@@ -708,6 +709,14 @@ describe('team_kill', () => {
 			kickAt: 3,
 			kickReason: 'Out.'
 		});
+		// The whisper is chat, held to the game's chat cap; the kick reason keeps its own.
+		const long = validateConfig('team_kill', {
+			warnAt: 1,
+			kickAt: 2,
+			warnMessage: 'w'.repeat(400),
+			kickReason: 'k'.repeat(400)
+		}) as { warnMessage: string; kickReason: string };
+		expect([long.warnMessage.length, long.kickReason.length]).toEqual([256, 200]);
 	});
 
 	test('teamKillStage: a whisper from warnAt on, a kick from kickAt on', () => {

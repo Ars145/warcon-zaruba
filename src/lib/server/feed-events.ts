@@ -16,7 +16,8 @@ import {
 	teamKillStage,
 	type Evaluation
 } from './triggers';
-import type { TeamKillConfig } from './trigger-rules';
+import { MAX_REASON, type TeamKillConfig } from './trigger-rules';
+import { MAX_CHAT } from '$lib/chat';
 import {
 	countsForRate,
 	KILL_RATE_FLAG,
@@ -346,7 +347,9 @@ async function actOnTeamKills(env: Env, serverId: string, teamKills: KillView[])
 			const stage = teamKillStage(cfg, count);
 			if (!stage) continue;
 			const kick = stage === 'kick';
-			const text = renderTemplate(kick ? cfg.kickReason : cfg.warnMessage, v);
+			const text = kick
+				? renderTemplate(cfg.kickReason, v, MAX_REASON)
+				: renderTemplate(cfg.warnMessage, v, MAX_CHAT);
 			out.intents.push({
 				trigger: row,
 				action: kick ? 'kick' : 'whisper',

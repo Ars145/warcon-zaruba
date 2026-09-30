@@ -891,3 +891,56 @@ test('the trail keeps the faction, or the SteamIDs, as the target', () => {
 	expect(target({ steamIds: [sid(1), sid(2)], message: 'Hi' })).toBe(`${sid(1)} ${sid(2)}`);
 	expect(target({ message: 'Hi' })).toBe('');
 });
+
+// ---- chat length ------------------------------------------------------------------------------
+
+test('a whisper, a broadcast and a group whisper carry up to 256 characters; a kick reason 200', async () => {
+	const sent: { path: string; body: any }[] = [];
+	const client: any = {
+		serverId: 'chat-cap',
+		json: async (method: string, path: string, body?: unknown) => {
+			if (path === '/v1/players')
+				return { players: [{ name: 'x', steamId: sid(1), faction: 'Valkyra' }] };
+			sent.push({ path, body });
+			return { message: 'ok' };
+		}
+	};
+	const long = 'm'.repeat(400);
+	await ACTIONS.broadcast.run(client, { message: long });
+	await ACTIONS.whisper.run(client, { steamId: sid(1), message: long });
+	await ACTIONS.whisperMany.run(client, { steamIds: [sid(1)], message: long });
+	await ACTIONS.kick.run(client, { steamId: sid(1), reason: long });
+	expect(
+		sent.map((s) => [s.path.split('/').at(-1), (s.body.message ?? s.body.reason).length])
+	).toEqual([
+		['broadcast', 256],
+		['message', 256],
+		['message', 256],
+		['kick', 200]
+	]);
+	expect(ACTIONS.broadcast.target!({ message: long })).toHaveLength(256);
+	resetRates();
+});
+
+test('the live build refuses 257 characters, and the broadcast action never sends that many', async () => {
+	const { WardogsClient } = await import('./rcon');
+	const before = process.env.MOCK_LIVE_BUILD;
+	process.env.MOCK_LIVE_BUILD = 'true';
+	try {
+		const server = { id: 'chat-live', host: 'demo', port: 1, scheme: 'http' as const };
+		const client = new WardogsClient({} as any, server, 'demo', 'chat-live');
+		const sent = (n: number) =>
+			client.raw('POST', '/v1/broadcast', JSON.stringify({ message: 'x'.repeat(n) }), {
+				'Content-Type': 'application/json'
+			});
+		expect((await sent(256)).status).toBe(200);
+		const refused = await sent(257);
+		expect(refused.status).toBe(400);
+		expect(JSON.parse(refused.text).error.code).toBe('message_too_long');
+		const r: any = await ACTIONS.broadcast.run(client, { message: 'x'.repeat(400) });
+		expect(r.message).toContain('Announcement sent');
+	} finally {
+		if (before === undefined) delete process.env.MOCK_LIVE_BUILD;
+		else process.env.MOCK_LIVE_BUILD = before;
+	}
+});
