@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { scoreCapOf } from '$lib/match';
 	import { ApiError, rconGet, rconPost, errorMessage } from '$lib/api';
+	import { MAX_CHAT } from '$lib/chat';
 	import { poll } from '$lib/poll';
 	import { watchLive, type KillsNotice } from '$lib/live';
 	import { causeLabel } from '$lib/causes';
@@ -432,7 +433,7 @@
 				<input
 					class="input"
 					type="text"
-					maxlength="200"
+					maxlength={MAX_CHAT}
 					aria-label="Message"
 					placeholder={to
 						? `Whispered to everyone on ${to}…`

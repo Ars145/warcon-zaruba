@@ -6,6 +6,7 @@
 // moves to the outbox.
 import { settingsFingerprint } from './fingerprint';
 import { ApiError, str } from './http';
+import { MAX_CHAT } from '$lib/chat';
 
 /** How long a move is waited on before it is asked for again (the player is still on the closed faction). */
 export const TWO_TEAMS_RETRY_MS = 30_000;
@@ -48,7 +49,7 @@ export function validateTwoTeams(c: Record<string, unknown>): TwoTeamsConfig {
 			const name = str(v, 40);
 			if (faction && name && faction !== closedFaction) names[faction] = name;
 		}
-	return { closedFaction, names, message: str(c.message, 200) };
+	return { closedFaction, names, message: str(c.message, MAX_CHAT) };
 }
 
 /**

@@ -1029,8 +1029,9 @@ game's (a 401 or a 5xx from it becomes a 502), and `error` carries the game's `c
 | `serverLog`                         | Audit trail       | `limit` (1 to 500, default 50)                                                          |
 | `raw`                               | Raw RCON          | `method`, `path` (a `/v1` route), `body`                                                |
 
-`message` and `reason` are cut at 200 characters; rotation indexes count from 0. A SteamID goes as
-a string: as a JSON number it loses its last digits, so it is refused.
+`message` is cut at 256 characters, the most the game takes in a whisper or broadcast, and
+`reason` at 200; rotation indexes count from 0. A SteamID goes as a string: as a JSON number it
+loses its last digits, so it is refused.
 
 `whisperMany` reads who is on and whispers each of them in turn, so a faction means whoever is on
 it at that moment. It answers the SteamIDs in three lists: `sent`, `absent` (not on the server, or

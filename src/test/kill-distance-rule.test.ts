@@ -182,6 +182,18 @@ describe.skipIf(!hasTestDb)('Kill distance rule, live', () => {
 					eq(auditLog.target, target)
 				)
 			);
+	/**
+	 * A delivered row's own audit row is written after its state, by the chain that delivered it,
+	 * which stopDelivery lets finish on its own: wait for it rather than read once.
+	 */
+	const auditSoon = async (serverId: string, action: string, target: string) => {
+		for (let i = 0; i < 40; i++) {
+			const rows = await auditOf(serverId, action, target);
+			if (rows.length) return rows;
+			await Bun.sleep(50);
+		}
+		return auditOf(serverId, action, target);
+	};
 
 	test('defibrillator kills from across the map: caught at the second, flagged once and audited, on their own server only', async () => {
 		const w = await seedWorld(env);
@@ -210,7 +222,7 @@ describe.skipIf(!hasTestDb)('Kill distance rule, live', () => {
 		// worker has looked at the server yet: it has not, here.
 		const [done] = await deliver(rows[0].id);
 		expect([done.state, done.outcome]).toEqual(['delivered', message]);
-		const audited = await auditOf(w.server.id, 'trigger.kill_distance', CHEAT);
+		const audited = await auditSoon(w.server.id, 'trigger.kill_distance', CHEAT);
 		expect(audited.map((a) => [a.outcome, a.message])).toEqual([['ok', message]]);
 		expect(kicked.filter(([s]) => s === w.server.id)).toEqual([]);
 	});
@@ -330,7 +342,7 @@ describe.skipIf(!hasTestDb)('Kill distance rule, live', () => {
 					b.entry.addedByName
 				])
 			).toEqual([[w.server.id, REASON, null, null, 'trigger: Kill distance watch']]);
-			const [audit] = await auditOf(w.server.id, 'trigger.kill_distance', CHEAT);
+			const [audit] = await auditSoon(w.server.id, 'trigger.kill_distance', CHEAT);
 			expect([audit.outcome, audit.category]).toEqual(['ok', 'trigger']);
 			// the server takes its lists again at its next look, and the player is removed
 			expect(m.syncAt).toBe(0);

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { invalidateAll } from '$app/navigation';
 	import { api, errorMessage, rconPost } from '$lib/api';
+	import { MAX_CHAT } from '$lib/chat';
 	import { fmtNum, fmtTime } from '$lib/format';
 	import { causeLabel } from '$lib/causes';
 	import { can } from '$lib/capabilities';
@@ -420,7 +421,7 @@
 						class="input"
 						type="text"
 						placeholder="Private message…"
-						maxlength="200"
+						maxlength={MAX_CHAT}
 						bind:value={whisper}
 					/>
 					<button
