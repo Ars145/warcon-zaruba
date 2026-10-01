@@ -238,10 +238,10 @@
 	let canSlotHere = $derived(can(data.server.caps, 'slots.manage'));
 	let canSlotOrg = $derived(can(data.server.caps, 'lists.reserve'));
 	/**
-	 * what a Kill distance rule may do: flag or kick (Kick, kill, move), ban on this server's list
-	 * (Bans) or the org's (Org ban list)
+	 * what a Kill distance rule may do: flag or kick (Kick), ban on this server's list (Bans) or the
+	 * org's (Org ban list)
 	 */
-	let canModerate = $derived(can(data.server.caps, 'players.moderate'));
+	let canKick = $derived(can(data.server.caps, 'players.kick'));
 	let canBanHere = $derived(can(data.server.caps, 'bans.manage'));
 	let canBanOrg = $derived(can(data.server.caps, 'lists.ban'));
 	/** Charges that are placed and set off from anywhere: how far away the killer was says nothing. */
@@ -567,7 +567,7 @@
 			distanceAction:
 				c.action === 'flag' || c.action === 'kick' || c.action === 'ban'
 					? c.action
-					: canModerate || (!canBanHere && !canBanOrg)
+					: canKick || (!canBanHere && !canBanOrg)
 						? 'kick'
 						: 'ban',
 			banDays: n('banDays', 0),
@@ -2002,23 +2002,13 @@
 					</fieldset>
 					<fieldset class="space-y-1.5 text-[13px]">
 						<legend class="field-label">Then</legend>
-						<label class="flex flex-wrap items-center gap-2 {canModerate ? '' : 'text-mist-600'}"
-							><input
-								type="radio"
-								value="flag"
-								bind:group={f.distanceAction}
-								disabled={!canModerate}
-							/>
+						<label class="flex flex-wrap items-center gap-2 {canKick ? '' : 'text-mist-600'}"
+							><input type="radio" value="flag" bind:group={f.distanceAction} disabled={!canKick} />
 							Flag for staff
 							<span class="text-mist-600">(audit trail and Discord)</span></label
 						>
-						<label class="flex items-center gap-2 {canModerate ? '' : 'text-mist-600'}"
-							><input
-								type="radio"
-								value="kick"
-								bind:group={f.distanceAction}
-								disabled={!canModerate}
-							/> Kick</label
+						<label class="flex items-center gap-2 {canKick ? '' : 'text-mist-600'}"
+							><input type="radio" value="kick" bind:group={f.distanceAction} disabled={!canKick} /> Kick</label
 						>
 						<label class="flex items-center gap-2 {canBanHere || canBanOrg ? '' : 'text-mist-600'}"
 							><input

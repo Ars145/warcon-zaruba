@@ -166,7 +166,7 @@ async function triggerOf(env: Env, serverId: string, id: string): Promise<Trigge
 
 /**
  * A rule acts without anyone at the controls, so saving it needs the capability its author would
- * need to do the same by hand: a rule that kicks needs Kick players, not only Automation.
+ * need to do the same by hand: a rule that kicks needs Kick, not only Automation.
  */
 const RULE_NEEDS: Record<
 	Exclude<TriggerKind, 'seed_reward' | 'kill_distance'>,
@@ -178,12 +178,12 @@ const RULE_NEEDS: Record<
 	restart_notice: ['chat.send', 'messages players'],
 	match_broadcast: ['chat.send', 'messages players'],
 	empty_reset: ['match.control', 'changes the map'],
-	risk_kick: ['players.moderate', 'kicks players'],
-	name_filter: ['players.moderate', 'kicks players'],
-	ping_kick: ['players.moderate', 'kicks players'],
-	team_kill: ['players.moderate', 'kicks players'],
-	kill_rate: ['players.moderate', 'flags players'],
-	two_teams: ['players.moderate', 'moves players between teams']
+	risk_kick: ['players.kick', 'kicks players'],
+	name_filter: ['players.kick', 'kicks players'],
+	ping_kick: ['players.kick', 'kicks players'],
+	team_kill: ['players.kick', 'kicks players'],
+	kill_rate: ['players.kick', 'flags players'],
+	two_teams: ['players.move', 'moves players between teams']
 };
 
 /**
@@ -199,7 +199,7 @@ export function ruleNeeds(kind: TriggerKind, config: unknown): [Capability, stri
 	if (kind === 'kill_distance') {
 		const action = killDistanceAction(config);
 		if (action === 'ban') return banNeeds(killDistanceBanScope(config));
-		return ['players.moderate', action === 'kick' ? 'kicks players' : 'flags players'];
+		return ['players.kick', action === 'kick' ? 'kicks players' : 'flags players'];
 	}
 	return RULE_NEEDS[kind];
 }
