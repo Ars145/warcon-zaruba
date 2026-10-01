@@ -43,7 +43,7 @@ export const TRIGGER_LABELS: Record<TriggerKind, string> = {
 	match_broadcast: 'Match broadcast',
 	name_filter: 'Name filter',
 	kill_rate: 'Kill rate watch',
-	two_teams: 'Two-team mode',
+	two_teams: 'Team balance',
 	kill_distance: 'Kill distance watch'
 };
 
