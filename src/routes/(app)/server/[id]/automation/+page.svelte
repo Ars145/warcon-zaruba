@@ -184,8 +184,8 @@
 		{
 			kind: 'two_teams',
 			group: 'Players',
-			label: 'Two-team mode',
-			blurb: 'Close one faction and move its players to the smaller of the other two.'
+			label: 'Team balance',
+			blurb: 'Keep the sides even, and close a faction to play two teams.'
 		},
 		{
 			kind: 'seed_reward',
@@ -396,6 +396,11 @@
 		headshotMinKills: number;
 		closedFaction: string;
 		teamNames: Record<string, string>;
+		balance: boolean;
+		gap: number;
+		clans: boolean;
+		exempt: string;
+		watchOnly: boolean;
 		causes: string[];
 		minDistanceM: number;
 		count: number;
@@ -403,7 +408,7 @@
 		banDays: number;
 		banScope: 'server' | 'org';
 	}
-	/** WARDOGS' factions, offered for Two-team mode; a name the game adds later can still be typed. */
+	/** WARDOGS' factions, offered for Team balance; a name the game adds later can still be typed. */
 	const FACTIONS = ['Lonestar', 'Valkyra', 'Manticore'];
 	/** The alphabets a Latin policy can let in, by the name the rule stores and the one people use. */
 	const SCRIPTS: [string, string][] = [
@@ -475,7 +480,7 @@
 						: kind === 'seed_reward'
 							? 'Thanks for seeding {server}, {name}: you have a reserved slot until {until}.'
 							: kind === 'two_teams'
-								? 'This server plays two teams: you have been placed on {team}.'
+								? 'You have been placed on {team}.'
 								: 'Welcome to {server}, {name}! Read the rules with /rules.'
 			),
 			onlyFirstVisit: b('onlyFirstVisit', false),
@@ -544,9 +549,15 @@
 			maxKills: n('maxKills', 25),
 			headshotPct: n('headshotPct', 70),
 			headshotMinKills: n('headshotMinKills', 15),
-			closedFaction: s('closedFaction', 'Lonestar'),
+			closedFaction: s('closedFaction', ''),
 			teamNames:
 				c.names && typeof c.names === 'object' ? { ...(c.names as Record<string, string>) } : {},
+			// a rule saved before balancing keeps only closing its faction
+			balance: b('balance', !t),
+			gap: n('gap', 3),
+			clans: b('clans', !t),
+			exempt: Array.isArray(c.exempt) ? (c.exempt as string[]).join('\n') : '',
+			watchOnly: b('watchOnly', false),
 			causes: Array.isArray(c.causes)
 				? [...(c.causes as string[])]
 				: ['Id.Item.Defibrillator.Standard'],
@@ -693,7 +704,12 @@
 							([k, v]) => k !== f.closedFaction.trim() && v?.trim()
 						)
 					),
-					message: f.message
+					message: f.message,
+					balance: f.balance,
+					gap: Number(f.gap),
+					clans: f.clans,
+					exempt: f.exempt.split(/[\s,]+/).filter(Boolean),
+					watchOnly: f.watchOnly
 				};
 			case 'seed_reward':
 				return {
@@ -887,8 +903,16 @@
 				const names = Object.entries((c.names as Record<string, string> | undefined) ?? {}).map(
 					([k, v]) => `${k} as ${v}`
 				);
+				const exempt = Array.isArray(c.exempt) ? c.exempt.length : 0;
 				return [
-					`${c.closedFaction} closed, its players moved to the smaller side`,
+					c.watchOnly ? 'Watch only' : '',
+					c.closedFaction
+						? c.balance
+							? `${c.closedFaction} closed`
+							: `${c.closedFaction} closed, its players moved to the smaller side`
+						: '',
+					c.balance ? `sides within ${c.gap ?? 3}${c.clans ? ', clans together' : ''}` : '',
+					exempt ? `${exempt} never moved` : '',
 					names.length ? names.join(', ') : '',
 					c.message ? 'with a whisper' : ''
 				]
@@ -1691,8 +1715,37 @@
 						time.
 					</p>
 				{:else if f.kind === 'two_teams'}
+					<fieldset class="space-y-2 text-[13px]">
+						<legend class="field-label">Balance</legend>
+						<label class="flex items-center gap-2"
+							><input type="checkbox" bind:checked={f.balance} /> Keep the sides even</label
+						>
+						{#if f.balance}
+							<div class="flex flex-wrap items-center gap-2">
+								Sides may differ by up to
+								<input
+									class="input w-20 text-right"
+									type="number"
+									min="1"
+									max="20"
+									bind:value={f.gap}
+									aria-label="Most the sides may differ by"
+									required
+								/>
+								players
+							</div>
+							<label class="flex items-center gap-2"
+								><input type="checkbox" bind:checked={f.clans} /> Keep clan tags together</label
+							>
+							<p class="text-[12px] text-mist-600">
+								Nobody playing is moved mid-match. An arrival who would put their side past the gap
+								goes to the lighter side, a player who switches onto the bigger side is put back,
+								and a new match is evened up.
+							</p>
+						{/if}
+					</fieldset>
 					<fieldset class="space-y-2">
-						<legend class="field-label">Closed faction</legend>
+						<legend class="field-label">Closed faction (optional)</legend>
 						<input
 							class="input w-48"
 							type="text"
@@ -1700,18 +1753,32 @@
 							bind:value={f.closedFaction}
 							maxlength="100"
 							aria-label="Closed faction"
-							required
+							placeholder="None"
+							required={!f.balance}
 						/>
 						<datalist id="two-teams-factions">
 							{#each FACTIONS as x (x)}<option value={x}></option>{/each}
 						</datalist>
 						<p class="text-[12px] text-mist-600">
-							Everyone on it is moved to whichever of the other two has fewer players, then respawns
-							there.
+							Everyone on it is moved to the smaller other side (or their clan's, within the gap)
+							and respawns there.
 						</p>
 					</fieldset>
 					<fieldset class="space-y-2">
-						<legend class="field-label">What players call the two sides (optional)</legend>
+						<legend class="field-label">Never move (optional)</legend>
+						<textarea
+							class="input font-mono text-[12.5px]"
+							rows="3"
+							data-plain
+							bind:value={f.exempt}
+							aria-label="SteamIDs never moved, one per line"
+							placeholder="SteamID64, one per line"></textarea>
+						<p class="text-[12px] text-mist-600">
+							Staff who switch sides themselves. A move made from the Players tab is kept anyway.
+						</p>
+					</fieldset>
+					<fieldset class="space-y-2">
+						<legend class="field-label">What players call the sides (optional)</legend>
 						{#each FACTIONS.filter((x) => x !== f.closedFaction.trim()) as x (x)}
 							<div class="flex flex-wrap items-center gap-2 text-[13px]">
 								<span class="w-24">{x}</span>
@@ -1740,11 +1807,16 @@
 							nothing.
 						</p>
 					</fieldset>
+					<label class="flex items-center gap-2 text-[13px]"
+						><input type="checkbox" bind:checked={f.watchOnly} /> Watch only: list the moves under Actions,
+						move nobody</label
+					>
 					<p class="note">
-						Players are placed a few at a time as the player list refreshes. A player asked to move
-						three times in ten minutes is left where they are until the ten minutes pass. It never
-						moves players between the two open sides, so a manual switch sticks. One rule per
-						server.
+						Moves go out a few at a time as the player list refreshes; each kills the player so they
+						respawn on the new side. A player asked to move three times in ten minutes is left where
+						they are until the ten minutes pass.{f.balance
+							? ''
+							: ' Players are never moved between the open sides.'} One rule per server.
 					</p>
 				{:else if f.kind === 'team_kill'}
 					<fieldset class="space-y-2">
