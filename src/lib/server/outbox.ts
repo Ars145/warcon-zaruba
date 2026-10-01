@@ -18,7 +18,13 @@ import { LaneFull, LaneTimeout, PRIORITY, withServer } from './dispatcher';
 import { emit } from './events';
 import { isOwner, LostOwnership, ownedSince, withOwnedTransaction } from './leadership';
 import { settings } from './settings';
-import { recordDelivery, SETTINGS_KEYS, type Intent, type TriggerUpdate } from './triggers';
+import {
+	recordDelivery,
+	SETTINGS_KEYS,
+	twoTeamsMoveVerdict,
+	type Intent,
+	type TriggerUpdate
+} from './triggers';
 import { allMemory, memoryOf } from './observe';
 import { grantEntry, listOf, serverListOf } from './lists';
 import { getOrg, getServer } from './access';
@@ -48,11 +54,16 @@ const CLAIM_LIMIT = 50;
 const PER_SERVER = 5;
 const PASS_MS = 1000;
 
-/** Writes intents; a dedupe key seen before is dropped silently. Returns how many were new. */
+/**
+ * Writes intents; a dedupe key seen before is dropped silently. Returns how many were new. A watch
+ * only row is written as skipped: its id goes into `watched`, for the caller to announce once the
+ * write is committed.
+ */
 export async function enqueueIntents(
 	db: DbOrTx,
 	serverId: string,
-	intents: Intent[]
+	intents: Intent[],
+	watched?: number[]
 ): Promise<number> {
 	if (!intents.length) return 0;
 	const rows = await db
@@ -69,11 +80,15 @@ export async function enqueueIntents(
 				detail: i.detail,
 				steamId: i.steamId,
 				okMessage: i.okMessage,
-				dedupeKey: i.dedupeKey
+				dedupeKey: i.dedupeKey,
+				...(i.watchOnly
+					? { state: 'skipped', outcome: i.watchOnly.slice(0, 300), doneAt: new Date() }
+					: {})
 			}))
 		)
 		.onConflictDoNothing({ target: outbox.dedupeKey })
-		.returning({ id: outbox.id });
+		.returning({ id: outbox.id, state: outbox.state });
+	if (watched) for (const r of rows) if (r.state === 'skipped') watched.push(r.id);
 	return rows.length;
 }
 
@@ -278,12 +293,14 @@ function skipReason(row: OutboxRow, m: ReturnType<typeof memoryOf>): string | nu
 		return 'Player already left.';
 	if (row.action === 'empty_reset' && (m.players.length > 0 || (m.status?.playerCount ?? 0) > 0))
 		return 'Players arrived before the reset.';
-	// A Two-team move for a player already off the closed faction: the move before it landed, or
-	// they changed side themselves. Moving (and killing) someone twice is not harmless.
+	// A Team balance move for a player already off the side it was decided from: the move before it
+	// landed, or they changed side themselves. Moving (and killing) someone twice is not harmless.
 	if (row.triggerKind === 'two_teams' && row.action === 'changeTeam') {
 		const from = (row.params as { from?: string } | null)?.from;
 		const p = m.players.find((q) => q.steamId === row.steamId);
 		if (from && p && p.faction !== from) return `Already off ${from}.`;
+		const verdict = twoTeamsMoveVerdict(row);
+		if (verdict !== 'send' && verdict !== 'wait') return verdict;
 	}
 	return null;
 }
@@ -295,15 +312,19 @@ function skipReason(row: OutboxRow, m: ReturnType<typeof memoryOf>): string | nu
  */
 function mustWait(row: OutboxRow, m: ReturnType<typeof memoryOf>): boolean {
 	return (
-		!!row.steamId &&
-		!!m?.playersAt &&
-		!m.players.some((p) => p.steamId === row.steamId) &&
-		m.presence.open.has(row.steamId)
+		(!!row.steamId &&
+			!!m?.playersAt &&
+			!m.players.some((p) => p.steamId === row.steamId) &&
+			m.presence.open.has(row.steamId)) ||
+		// a Team balance move whose deciding look is not written yet here
+		(row.triggerKind === 'two_teams' &&
+			row.action === 'changeTeam' &&
+			twoTeamsMoveVerdict(row) === 'wait')
 	);
 }
 
 /**
- * When a Two-team move was last sent for a player, by server and SteamID. The check above can only
+ * When a Team balance move was last sent for a player, by server and SteamID. The check above can only
  * tell a move landed from a player list taken after it, so a second move for the same player waits
  * for one (a retry claimed right behind the first would otherwise read the same list and go too).
  */
@@ -313,7 +334,7 @@ const moveOf = (row: OutboxRow) =>
 		? `${row.serverId}:${row.steamId}`
 		: null;
 
-/** True while a Two-team move for this row's player went out after the last player list. */
+/** True while a Team balance move for this row's player went out after the last player list. */
 function moveUnconfirmed(row: OutboxRow, m: ReturnType<typeof memoryOf>): boolean {
 	const key = moveOf(row);
 	if (!key) return false;
@@ -349,11 +370,17 @@ function noteMoveSent(row: OutboxRow): void {
  */
 function holdsFor(
 	row: OutboxRow,
-	rule: { enabled: boolean; config: unknown } | undefined
+	rule: { enabled: boolean; config: unknown; state?: unknown } | undefined
 ): boolean {
 	if (!rule?.enabled) return false;
 	const key = SETTINGS_KEYS[row.triggerKind];
-	return !key || (row.params as { rule?: string } | null)?.rule === key(rule.config);
+	const params = row.params as { rule?: string; on?: number | null } | null;
+	if (key && params?.rule !== key(rule.config)) return false;
+	// A Team balance move carries the switch-on it was decided under: switched off and on again
+	// since, the rule has started over and the move is not its decision.
+	if (row.triggerKind === 'two_teams' && params?.on !== undefined && 'state' in rule)
+		return params.on === ((rule.state as { enabledAt?: number } | null)?.enabledAt ?? null);
+	return true;
 }
 
 /**
@@ -364,10 +391,10 @@ function holdsFor(
 async function stillHolds(env: Env, row: OutboxRow): Promise<boolean | null> {
 	if (!SETTINGS_KEYS[row.triggerKind]) return true;
 	if (!row.triggerId) return false;
-	let rule: { enabled: boolean; config: unknown } | undefined;
+	let rule: { enabled: boolean; config: unknown; state: unknown } | undefined;
 	try {
 		[rule] = await env.db
-			.select({ enabled: triggers.enabled, config: triggers.config })
+			.select({ enabled: triggers.enabled, config: triggers.config, state: triggers.state })
 			.from(triggers)
 			.where(eq(triggers.id, row.triggerId))
 			.limit(1);

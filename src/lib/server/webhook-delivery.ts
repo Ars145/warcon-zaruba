@@ -461,7 +461,7 @@ export async function recordResult(env: Env, id: string, result: PostResult): Pr
 }
 
 /**
- * Rules whose actions come by the hundred as a matter of course: a Two-team mode sort at every match
+ * Rules whose actions come by the hundred as a matter of course: a Team balance sort at every match
  * start. The audit trail keeps each one; Discord hears only of those that fail, so a sort neither
  * floods a staff channel nor pushes another rule's card out of the webhook's queue.
  */
