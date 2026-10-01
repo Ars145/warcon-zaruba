@@ -1,15 +1,17 @@
 <script lang="ts">
 	// Roles × capabilities. Each column is one of the org's server roles; each row is one thing a
 	// role may do. Built-ins can be edited and reset but not deleted; custom roles can be deleted
-	// once nothing points at them. Edits are held locally until Save, like the access matrix.
-	import { untrack } from 'svelte';
+	// once nothing points at them. Edits are held locally until Save, like the access matrix. The
+	// columns follow the org's role order, which Reorder changes and saves on its own.
+	import { tick, untrack } from 'svelte';
 	import { invalidateAll } from '$app/navigation';
-	import { api, errorMessage } from '$lib/api';
+	import { api, ApiError, errorMessage } from '$lib/api';
 	import { toast } from '$lib/toast.svelte';
 	import { confirmDialog } from '$lib/confirm.svelte';
 	import Badge from '$lib/components/Badge.svelte';
 	import Modal from '$lib/components/Modal.svelte';
 	import CapabilityPicker from '$lib/components/CapabilityPicker.svelte';
+	import RoleOrder from './RoleOrder.svelte';
 	import { CAPABILITY_INFO, capabilitiesByGroup, VIEW, type Capability } from '$lib/capabilities';
 	import type { RoleView } from '$lib/types';
 	import type { PageProps } from './$types';
@@ -142,6 +144,31 @@
 			adding = null;
 		}, `'${d.name.trim()}' added.`);
 	}
+
+	let ordering = $state(false);
+	let reorderButton: HTMLButtonElement | undefined = $state();
+	async function saveOrder(ids: string[]) {
+		busy = true;
+		let close = false;
+		try {
+			await api('PUT', `${orgPath}/roles/order`, { ids });
+			close = true;
+			toast('Role order saved.', 'ok');
+		} catch (err) {
+			toast(errorMessage(err), 'err');
+			// a role was added or deleted since the dialog opened: close it, so Reorder opens it again
+			// on the current list
+			close = err instanceof ApiError && err.code === 'stale';
+		} finally {
+			await invalidateAll().finally(() => (busy = false));
+		}
+		if (!close) return;
+		// closed once the reload is in, then focus handed back to Reorder by hand: the dialog's
+		// own hand-back finds the button still disabled while the page is busy
+		ordering = false;
+		await tick();
+		reorderButton?.focus();
+	}
 </script>
 
 <div class="mb-4 flex flex-wrap items-center gap-3">
@@ -149,9 +176,17 @@
 		What each server role may do. Changing a role changes it for everyone who holds it, on every
 		server. Owners of the organisation always hold everything.
 	</div>
-	<button class="ml-auto btn" onclick={() => (adding = { name: '', caps: [VIEW] })} disabled={busy}
-		>New role</button
-	>
+	<span class="ml-auto inline-flex gap-2">
+		<button
+			class="btn"
+			bind:this={reorderButton}
+			onclick={() => (ordering = true)}
+			disabled={busy || data.roles.length < 2}>Reorder</button
+		>
+		<button class="btn" onclick={() => (adding = { name: '', caps: [VIEW] })} disabled={busy}
+			>New role</button
+		>
+	</span>
 </div>
 
 <div class="roles-grid table-wrap">
@@ -277,6 +312,10 @@
 			</div>
 		</form>
 	</Modal>
+{/if}
+
+{#if ordering}
+	<RoleOrder roles={data.roles} {busy} onsave={saveOrder} onclose={() => (ordering = false)} />
 {/if}
 
 <style>
