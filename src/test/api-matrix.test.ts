@@ -80,6 +80,7 @@ const MATRIX: Record<string, Policy | typeof PER_LIST> = {
 	'PUT api/orgs/[id]/members/[userId]/grants': 'orgOwner',
 	'GET api/orgs/[id]/roles': 'orgOwner',
 	'POST api/orgs/[id]/roles': 'orgOwner',
+	'PUT api/orgs/[id]/roles/order': 'orgOwner',
 	'PATCH api/orgs/[id]/roles/[roleId]': 'orgOwner',
 	'DELETE api/orgs/[id]/roles/[roleId]': 'orgOwner',
 	'POST api/orgs/[id]/roles/[roleId]/reset': 'orgOwner',
