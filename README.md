@@ -289,7 +289,9 @@ A server role is a named set of **capabilities**. Every organisation starts with
 `operator` and `admin`, holding what the table shows. Its owners can change any of them on the
 org's **Roles** tab (a change applies at once to everyone holding the role), reset a built-in to
 what it shipped with, and add roles of their own, say a `Trial staff` that may kick but not ban.
-Org owners and the site owner hold every capability on every server in scope.
+**Reorder** on the same tab sets the order of the roles (drag a row, or move it with its arrows),
+which the tab's columns and every role picker follow; a new role goes in last. Org owners and the
+site owner hold every capability on every server in scope.
 
 | Capability         | Unlocks                                                                                                                                                                   | viewer | operator | admin |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | -------- | ----- |
@@ -1388,7 +1390,7 @@ own `/api/auth/*` routes only the OAuth callback is reachable over HTTP; everyth
 ```
 GET/POST /api/orgs  PATCH/DELETE /api/orgs/:id   PATCH {name} | {discordInviteUrl} | {membersReserved} | {banMessage} | site owner: {serverLimit, suspended, reason, allowPublicStatus, allowPublicLeaderboards}
 GET  /api/orgs/:id/members  PATCH/DELETE /api/orgs/:id/members/:userId {role}  PUT .../:userId/grants {grants:[{serverId,roleId}]}
-GET/POST /api/orgs/:id/roles {name,capabilities[]}  PATCH/DELETE .../:roleId {name?,capabilities?}  POST .../:roleId/reset
+GET/POST /api/orgs/:id/roles {name,capabilities[]}  PATCH/DELETE .../:roleId {name?,capabilities?}  POST .../:roleId/reset  PUT .../order {ids[]} (every role once, else 409 stale)
 GET/POST /api/orgs/:id/keys {label,capabilities[],serverIds[]|null,expiresDays}  DELETE .../:keyId   (POST returns the token once)
 GET/POST /api/orgs/:id/json-webhooks {label,url,events[],serverIds[]|null,enabled}  PATCH/DELETE .../:webhookId {…, signing:"new"}  POST .../:webhookId/test   (POST, and PATCH with signing, return the secret once)
 GET/POST /api/orgs/:id/invites {label,orgRole,serverRoleId,expiresDays,maxUses}  DELETE /api/orgs/:id/invites/:inviteId
