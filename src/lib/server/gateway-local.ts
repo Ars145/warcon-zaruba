@@ -12,13 +12,44 @@ import { liveView, readLiveRows } from './live';
 import { memoryOf, requestIdentityRefresh } from './observe';
 import { observeNow, observeSoon, pollerStats, resyncSoon } from './poller';
 import { loadSettings, settings } from './settings';
-import { invalidateTriggers } from './triggers';
+import { invalidateTriggers, noteStaffMove } from './triggers';
 import { nudgeStatusMirror } from './webhook-status';
 import type { Gateway } from './gateway';
 import type { KillView, LiveView } from '$lib/types';
 import { onKillsIngested } from './feed-events';
 
-/** Runs one registry action against a server through its lane. */
+/**
+ * The player and faction a person's action moved, or null: `changeTeam` (which throws when the game
+ * refuses), or a raw PATCH of one player's faction that the game answered with a 2xx (raw hands
+ * back the game's status rather than throwing). A Team balance rule takes that side as placed
+ * (noteStaffMove).
+ */
+export function staffMoveOf(
+	action: string,
+	params: Record<string, unknown>,
+	result: unknown
+): { steamId: string; faction: string } | null {
+	let body = (action === 'raw' ? params.body : params) as Record<string, unknown> | undefined;
+	if (typeof body === 'string')
+		try {
+			body = JSON.parse(body);
+		} catch {
+			return null;
+		}
+	const faction = typeof body?.faction === 'string' ? body.faction.trim() : '';
+	if (!faction) return null;
+	if (action === 'changeTeam' && typeof params.steamId === 'string')
+		return /^\d{17}$/.test(params.steamId.trim())
+			? { steamId: params.steamId.trim(), faction }
+			: null;
+	if (action !== 'raw' || String(params.method ?? '').toUpperCase() !== 'PATCH') return null;
+	const status = (result as { status?: unknown } | null)?.status;
+	if (typeof status !== 'number' || status < 200 || status > 299) return null;
+	const m = /^\/v1\/players\/(\d{17})\/?$/i.exec(String(params.path ?? '').trim());
+	return m ? { steamId: m[1], faction } : null;
+}
+
+/** Runs one registry action against a server through its lane: a person's, from the web or the API. */
 export async function runGameAction(
 	env: Env,
 	server: ServerRow,
@@ -31,7 +62,10 @@ export async function runGameAction(
 	try {
 		return await withServer(server.id, priority, async () => {
 			const client = await WardogsClient.forServer(env, server);
-			return def.run(client, params);
+			const result = await def.run(client, params);
+			const moved = staffMoveOf(action, params, result);
+			if (moved) noteStaffMove(server.id, moved.steamId, moved.faction);
+			return result;
 		});
 	} catch (err) {
 		if (err instanceof LaneFull) throw new ApiError(503, err.message, 'server_busy');
