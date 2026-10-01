@@ -3,7 +3,7 @@ import type { Env } from './env';
 import type { OrgRow, ServerRow } from './access';
 import { LaneFull, LaneTimeout, PRIORITY, withServer, type Priority } from './dispatcher';
 import { ACTIONS } from './actions';
-import { ApiError } from './http';
+import { ApiError, str } from './http';
 import { WardogsClient } from './rcon';
 import { subscribe } from './events';
 import { touchInterest } from './interest';
@@ -49,6 +49,20 @@ export function staffMoveOf(
 	return m ? { steamId: m[1], faction } : null;
 }
 
+/**
+ * A move kills the player so they respawn on the new side. A move to the side they are already on
+ * would be that kill and nothing else, so Move alone could kill anyone: it is refused, whoever asks,
+ * judged from the player list the worker last read. A player missing from that list goes to the
+ * game, which answers for them.
+ */
+function refuseSameSide(serverId: string, params: Record<string, unknown>): void {
+	const steamId = str(params.steamId, 32);
+	const faction = str(params.faction, 100).toLowerCase();
+	const on = memoryOf(serverId)?.players.find((p) => p.steamId === steamId)?.faction;
+	if (faction && on?.trim().toLowerCase() === faction)
+		throw new ApiError(409, `That player is already on ${on}.`, 'same_side');
+}
+
 /** Runs one registry action against a server through its lane: a person's, from the web or the API. */
 export async function runGameAction(
 	env: Env,
@@ -61,6 +75,7 @@ export async function runGameAction(
 	if (!def) throw new ApiError(404, `Unknown action '${action}'.`, 'unknown_action');
 	try {
 		return await withServer(server.id, priority, async () => {
+			if (action === 'changeTeam') refuseSameSide(server.id, params);
 			const client = await WardogsClient.forServer(env, server);
 			const result = await def.run(client, params);
 			const moved = staffMoveOf(action, params, result);
