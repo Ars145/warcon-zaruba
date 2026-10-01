@@ -2,8 +2,10 @@
 // arrive in, so an earlier match of the same stay never adds to it, and leaving and joining again
 // does not start it over. A batch counts up to itself, even when it is acted on after its match
 // closed or after later batches came in; one that came in with no match open counts that server's
-// such kills of the hour before. The dry run replays the same count, and rules saved with the old
-// default texts are moved to the new ones by migration 0035.
+// such kills of the hour before. Team kills by a cause the rule leaves out (barbed wire, unless its
+// list says otherwise) stay team kills but add to no count and are never acted on. The dry run
+// replays the same count, and rules saved with the old default texts are moved to the new ones by
+// migration 0035.
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { and, asc, eq, sql } from 'drizzle-orm';
@@ -12,7 +14,7 @@ import { kills, matches, outbox, playerSessions, triggers } from '$lib/server/db
 import { acquireOrRenew, releaseOwnership } from '$lib/server/leadership';
 import { onKillsIngested } from '$lib/server/feed-events';
 import { ingestBatch } from '$lib/server/feed';
-import { dryRun } from '$lib/server/triggers';
+import { dryRun, invalidateTriggers } from '$lib/server/triggers';
 import { newId } from '$lib/server/http';
 import { hasTestDb, testEnv } from './db';
 import { seedWorld, type World } from './world';
@@ -21,29 +23,38 @@ const STAYER = { id: '76561198000000501', name: 'Stayer' };
 const REJOINER = { id: '76561198000000502', name: 'Rejoiner' };
 const MATE = { id: '76561198000000503', name: 'Mate' };
 const LATE = { id: '76561198000000504', name: 'Late' };
+const BUILDER = { id: '76561198000000505', name: 'Builder' };
+const FENCER = { id: '76561198000000506', name: 'Fencer' };
+const SAPPER = { id: '76561198000000507', name: 'Sapper' };
+const MIXER = { id: '76561198000000508', name: 'Mixer' };
+const WIRE = 'Id.Buildable.BarbedWire';
 const MIN = 60_000;
 const ago = (ms: number) => new Date(Date.now() - ms);
 
+/** One `killed` event as the game posts it; a null cause is one the game left out. */
+const eventOf = (
+	killer: typeof STAYER,
+	victim: typeof STAYER,
+	cause: string | null = 'Id.Item.AK74M'
+) => ({
+	eventId: randomUUID(),
+	type: 'killed',
+	eventTime: 100,
+	matchId: randomUUID(),
+	mapName: 'Kavkazi',
+	killerName: killer.name,
+	killerSteamId: killer.id,
+	victimName: victim.name,
+	victimSteamId: victim.id,
+	cause,
+	distance: 3000,
+	contextTags: []
+});
 /** One feed batch with one kill, as the game posts it. */
-const batchOf = (killer: typeof STAYER, victim: typeof STAYER) => ({
+const batchOf = (killer: typeof STAYER, victim: typeof STAYER, cause?: string | null) => ({
 	serverId: randomUUID(),
 	serverName: 'Test',
-	events: [
-		{
-			eventId: randomUUID(),
-			type: 'killed',
-			eventTime: 100,
-			matchId: randomUUID(),
-			mapName: 'Kavkazi',
-			killerName: killer.name,
-			killerSteamId: killer.id,
-			victimName: victim.name,
-			victimSteamId: victim.id,
-			cause: 'Id.Item.AK74M',
-			distance: 3000,
-			contextTags: []
-		}
-	]
+	events: [eventOf(killer, victim, cause)]
 });
 
 describe.skipIf(!hasTestDb)('Team kill limit, live', () => {
@@ -92,16 +103,22 @@ describe.skipIf(!hasTestDb)('Team kill limit, live', () => {
 	});
 
 	/** A team kill coming in through the feed, stamped with whatever match is open, as the web does. */
-	const receive = async (serverId: string, killer: typeof STAYER, now = new Date()) => {
-		const r = await ingestBatch(env, serverId, batchOf(killer, MATE), now);
+	const receive = async (
+		serverId: string,
+		killer: typeof STAYER,
+		now = new Date(),
+		cause?: string | null
+	) => {
+		const r = await ingestBatch(env, serverId, batchOf(killer, MATE, cause), now);
 		expect(r.kills.map((k) => k.teamKill)).toEqual([true]);
 		return r.kills;
 	};
 	/** ...and handed to the rules at once, as the worker does. */
-	const arrives = async (serverId: string, killer: typeof STAYER) =>
-		onKillsIngested(env, serverId, await receive(serverId, killer));
+	const arrives = async (serverId: string, killer: typeof STAYER, cause?: string | null) =>
+		onKillsIngested(env, serverId, await receive(serverId, killer, new Date(), cause));
 
-	const ruleOn = async (serverId: string) => {
+	/** A rule as saved; without `extra` it is one saved before the list of causes not counted existed. */
+	const ruleOn = async (serverId: string, extra: Record<string, unknown> = {}) => {
 		const id = newId();
 		await env.db.insert(triggers).values({
 			id,
@@ -114,7 +131,8 @@ describe.skipIf(!hasTestDb)('Team kill limit, live', () => {
 				warnAt: 1,
 				warnMessage: 'Careful, {name}: that was a team kill ({count} this match).',
 				kickAt: 3,
-				kickReason: 'Team killing ({count} this match).'
+				kickReason: 'Team killing ({count} this match).',
+				...extra
 			}
 		});
 		return id;
@@ -157,6 +175,10 @@ describe.skipIf(!hasTestDb)('Team kill limit, live', () => {
 			session(w.server.id, REJOINER, 5 * MIN),
 			session(w.server.id, MATE, 125 * MIN),
 			session(w.server.id, LATE, 5 * MIN),
+			session(w.server.id, BUILDER, 5 * MIN),
+			session(w.server.id, FENCER, 5 * MIN),
+			session(w.server.id, SAPPER, 5 * MIN),
+			session(w.server.id, MIXER, 5 * MIN),
 			session(w.otherServer.id, STAYER, 125 * MIN),
 			session(w.otherServer.id, MATE, 125 * MIN)
 		]);
@@ -244,6 +266,100 @@ describe.skipIf(!hasTestDb)('Team kill limit, live', () => {
 			'whisper Stayer: Careful, Stayer: that was a team kill (1 this match).',
 			'whisper Stayer: Careful, Stayer: that was a team kill (1 this match).',
 			'whisper Stayer: Careful, Stayer: that was a team kill (2 this match).'
+		]);
+	});
+
+	test('a rule saved before the list: barbed wire stays a team kill but is never counted or acted on', async () => {
+		await arrives(w.server.id, BUILDER, WIRE);
+		await arrives(w.server.id, BUILDER, WIRE.toUpperCase());
+		expect(await actionsOn(here, BUILDER.id)).toEqual([]);
+		await arrives(w.server.id, BUILDER);
+		expect(await actionsOn(here, BUILDER.id)).toEqual([['whisper', 1]]);
+	});
+
+	test('each rule counts by its own list: an empty one counts barbed wire', async () => {
+		const all = await ruleOn(w.server.id, { notCounted: [] });
+		const claymores = await ruleOn(w.server.id, { notCounted: ['Id.Item.Claymore'] });
+		invalidateTriggers(w.server.id);
+		await arrives(w.server.id, FENCER, WIRE);
+		await arrives(w.server.id, FENCER);
+		await arrives(w.server.id, FENCER, 'Id.Item.Claymore');
+		expect(await actionsOn(all, FENCER.id)).toEqual([
+			['whisper', 1],
+			['whisper', 2],
+			['kick', 3]
+		]);
+		expect(await actionsOn(claymores, FENCER.id)).toEqual([
+			['whisper', 1],
+			['whisper', 2]
+		]);
+		expect(await actionsOn(here, FENCER.id)).toEqual([
+			['whisper', 1],
+			['whisper', 2]
+		]);
+		// the two rules take nothing more from here on
+		await env.db.update(triggers).set({ enabled: false }).where(eq(triggers.id, all));
+		await env.db.update(triggers).set({ enabled: false }).where(eq(triggers.id, claymores));
+		invalidateTriggers(w.server.id);
+	});
+
+	test('the dry run leaves out what the rule does not count, and says how many', async () => {
+		const server = { ...w.server, name: 'one' } as Parameters<typeof dryRun>[1];
+		const of = (r: Awaited<ReturnType<typeof dryRun>>, name: string) =>
+			r.items
+				.map((i) => i.text)
+				.filter((t) => t.startsWith(`whisper ${name}:`) || t.startsWith(`kick ${name} `));
+		const before = await dryRun(env, server, 'team_kill', { warnAt: 1, kickAt: 3 });
+		expect(of(before, 'Builder')).toEqual([
+			'whisper Builder: Careful, Builder: that was a team kill (1 this match).'
+		]);
+		expect(of(before, 'Fencer')).toEqual([
+			'whisper Fencer: Careful, Fencer: that was a team kill (1 this match).',
+			'whisper Fencer: Careful, Fencer: that was a team kill (2 this match).'
+		]);
+		expect(before.notes).toContain('Not counted: 3 by Barbed wire.');
+		const all = await dryRun(env, server, 'team_kill', { warnAt: 1, kickAt: 3, notCounted: [] });
+		expect(of(all, 'Fencer')).toEqual([
+			'whisper Fencer: Careful, Fencer: that was a team kill (1 this match).',
+			'whisper Fencer: Careful, Fencer: that was a team kill (2 this match).',
+			`kick Fencer (${FENCER.id}): Team killing (3 this match).`
+		]);
+		expect(all.notes.some((n) => n.startsWith('Not counted'))).toBe(false);
+		const both = await dryRun(env, server, 'team_kill', {
+			warnAt: 1,
+			kickAt: 3,
+			notCounted: ['Id.Item.Claymore', WIRE]
+		});
+		expect(of(both, 'Fencer')).toEqual([
+			'whisper Fencer: Careful, Fencer: that was a team kill (1 this match).'
+		]);
+		expect(both.notes).toContain('Not counted: 3 by Barbed wire, 1 by Claymore.');
+	});
+
+	test('a team kill with no cause is counted, live and in the dry run', async () => {
+		await arrives(w.server.id, SAPPER, null);
+		expect(await actionsOn(here, SAPPER.id)).toEqual([['whisper', 1]]);
+		const server = { ...w.server, name: 'one' } as Parameters<typeof dryRun>[1];
+		const r = await dryRun(env, server, 'team_kill', { warnAt: 1, kickAt: 3 });
+		expect(r.items.map((i) => i.text).filter((t) => t.startsWith('whisper Sapper:'))).toEqual([
+			'whisper Sapper: Careful, Sapper: that was a team kill (1 this match).'
+		]);
+	});
+
+	test('a batch with a counted and a left-out kill by one player acts on the counted one', async () => {
+		const r = await ingestBatch(env, w.server.id, {
+			serverId: randomUUID(),
+			serverName: 'Test',
+			events: [eventOf(MIXER, MATE), eventOf(MIXER, LATE, WIRE)]
+		});
+		expect(r.kills.map((k) => k.teamKill)).toEqual([true, true]);
+		await onKillsIngested(env, w.server.id, r.kills);
+		const rows = await env.db
+			.select()
+			.from(outbox)
+			.where(and(eq(outbox.triggerId, here), eq(outbox.steamId, MIXER.id)));
+		expect(rows.map((row) => row.detail)).toEqual([
+			{ name: 'Mixer', victim: 'Mate', count: 1, eventId: r.kills[0].eventId }
 		]);
 	});
 

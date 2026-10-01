@@ -7,6 +7,7 @@
 // numbers. No database, no game server; the live path (feed-events.ts) and the dry run
 // (triggers.ts) run the same step.
 import { ApiError, int, str } from './http';
+import { causeTags } from './cause-tags';
 import { settingsFingerprint } from './fingerprint';
 import { causeLabel } from '$lib/causes';
 import type { BanScope } from './rule-ban';
@@ -33,10 +34,6 @@ export interface KillDistanceConfig {
 	cooldownMinutes: number;
 }
 
-/** A weapon tag as the feed writes them: dotted words. */
-const TAG_RE = /^[A-Za-z0-9_.-]{1,200}$/;
-const MAX_CAUSES = 40;
-
 /**
  * The action a rule's settings ask for; anything else is a flag. Validation and the capability
  * check both read it here, so a dry run of settings that were never saved is checked for what
@@ -53,23 +50,8 @@ export const killDistanceBanScope = (c: unknown): BanScope =>
 		: 'server';
 
 export function validateKillDistance(c: Record<string, unknown>): KillDistanceConfig {
-	const raw = Array.isArray(c.causes) ? c.causes : String(c.causes ?? '').split(/[\n,]/);
-	const causes: string[] = [];
-	const seen = new Set<string>();
-	for (const v of raw) {
-		const tag = str(v, 200);
-		if (!tag) continue;
-		if (!TAG_RE.test(tag))
-			throw new ApiError(
-				400,
-				'A weapon is its kill feed tag, such as Id.Item.Defibrillator.Standard.'
-			);
-		if (seen.has(tag.toLowerCase())) continue;
-		seen.add(tag.toLowerCase());
-		causes.push(tag);
-	}
+	const causes = causeTags(c.causes, 'weapon', 'Id.Item.Defibrillator.Standard');
 	if (!causes.length) throw new ApiError(400, 'Pick at least one weapon.');
-	if (causes.length > MAX_CAUSES) throw new ApiError(400, `Pick at most ${MAX_CAUSES} weapons.`);
 	return {
 		causes,
 		minDistanceM: int(c.minDistanceM, 100, 1, 20_000),

@@ -78,6 +78,12 @@ const LABELS: Record<string, string> = {
 	'Id.Vehicle.WeaponExtension.STN_02.MainCannon': 'STN 02 main cannon',
 	'Id.Vehicle.WeaponExtension.STN_03.MainBarrel': 'STN 03 main gun'
 };
+/**
+ * What a Team kill limit leaves out of its count unless its settings say otherwise: a player who
+ * runs into a teammate's barbed wire is reported as killed by whoever built it.
+ */
+export const TEAM_KILL_NOT_COUNTED: readonly string[] = ['Id.Buildable.BarbedWire'];
+
 /** The table by lower-case tag, for a lookup in any case. */
 const BY_TAG = new Map(
 	Object.entries(LABELS).map(([cause, label]) => [cause.toLowerCase(), label])
