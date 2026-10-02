@@ -13,7 +13,7 @@ import type { DbOrTx } from './db';
 import { outbox, triggers, type OutboxRow } from './db/schema';
 import { ACTIONS } from './actions';
 import { GameError, WardogsClient } from './rcon';
-import { ApiError, forLog } from './http';
+import { ApiError, forLog, str } from './http';
 import { LaneFull, LaneTimeout, PRIORITY, withServer } from './dispatcher';
 import { emit } from './events';
 import { isOwner, LostOwnership, ownedSince, withOwnedTransaction } from './leadership';
@@ -37,6 +37,13 @@ import { writeAudit } from './audit';
 import { PANEL_BAN, type PanelBanParams } from './rule-ban';
 import { queueEvent } from './json-webhook-queue';
 import { seedRewardGranted } from './json-webhook-events';
+import {
+	AFK_ROUND,
+	AFK_ROUND_MAX_AGE_MS,
+	AFK_ROUND_MAX_MS,
+	AFK_ROUND_MAX_PLAYERS
+} from './afk-protection';
+import { MAX_CHAT } from '$lib/chat';
 import type { OutboxView } from '$lib/types';
 
 /** Actions delivered without a game request: they need no roster, only the server's row. */
@@ -293,6 +300,16 @@ function skipReason(row: OutboxRow, m: ReturnType<typeof memoryOf>): string | nu
 		return 'Player already left.';
 	if (row.action === 'empty_reset' && (m.players.length > 0 || (m.status?.playerCount ?? 0) > 0))
 		return 'Players arrived before the reset.';
+	// An AFK protection round goes only while what the worker last saw still says the server seeds:
+	// a round in a live match kills everyone mid-fight. It goes soon or not at all.
+	if (row.action === AFK_ROUND) {
+		if (age > AFK_ROUND_MAX_AGE_MS) return `Stale (${Math.round(age / 1000)}s old).`;
+		if (!m.status || !m.playersAt) return 'The server has not been looked at yet.';
+		const goal = Number((row.params as { goal?: unknown } | null)?.goal);
+		const count = Math.max(m.status.playerCount || 0, m.players.length);
+		if (m.status.scores.some((s) => s.score > 0) || !(count < goal))
+			return 'The match started before this was sent.';
+	}
 	// A Team balance move for a player already off the side it was decided from: the move before it
 	// landed, or they changed side themselves. Moving (and killing) someone twice is not harmless.
 	if (row.triggerKind === 'two_teams' && row.action === 'changeTeam') {
@@ -720,9 +737,87 @@ const messageOf = (r: unknown): string =>
 		? (r as { message: string }).message
 		: '';
 
+/**
+ * One AFK protection round: each player it names who is still on is killed in turn, then the rule's
+ * message goes out. A player gone since, or one the game will not kill (with no living character,
+ * presumably: dead, or not spawned yet; its answer then has not been seen), is passed over. A refusal for sending too fast ends the round and holds the
+ * server; no answer, a refused password or a server error ends it as a failure. After
+ * AFK_ROUND_MAX_MS the rest are left for the next round, so the lane is never held for long. The
+ * result is fixed phrases and counts only.
+ */
+async function afkRound(
+	client: WardogsClient,
+	params: Record<string, unknown>,
+	m: ReturnType<typeof memoryOf>
+): Promise<{ message: string; retryAfterMs?: number }> {
+	const ids = (Array.isArray(params.steamIds) ? params.steamIds : [])
+		.filter((v): v is string => typeof v === 'string')
+		.slice(0, AFK_ROUND_MAX_PLAYERS);
+	const on = new Set((m?.players ?? []).map((p) => p.steamId));
+	const started = Date.now();
+	let killed = 0;
+	let refused = 0;
+	let gone = 0;
+	let left = 0;
+	let retryAfterMs = 0;
+	for (let i = 0; i < ids.length; i++) {
+		if (!on.has(ids[i])) {
+			gone++;
+			continue;
+		}
+		if (Date.now() - started >= AFK_ROUND_MAX_MS) {
+			left = ids.length - i;
+			break;
+		}
+		try {
+			await ACTIONS.kill.run(client, { steamId: ids[i] });
+			killed++;
+		} catch (err) {
+			if (!(err instanceof GameError)) throw err;
+			if (err.code === 'rate_limited') {
+				retryAfterMs = err.retryAfterMs || WAIT_MS;
+				left = ids.length - i;
+				break;
+			}
+			if (
+				err.code === 'unreachable' ||
+				err.status === 401 ||
+				err.status === 403 ||
+				err.status >= 500
+			)
+				throw err;
+			if (err.code === 'player_not_found') gone++;
+			else refused++;
+		}
+	}
+	const message = typeof params.message === 'string' ? str(params.message, MAX_CHAT) : '';
+	let announced = false;
+	if (killed && message && !retryAfterMs)
+		try {
+			await ACTIONS.broadcast.run(client, { message });
+			announced = true;
+		} catch (err) {
+			if (!(err instanceof GameError)) throw err;
+			// The round stands without its message; one refused for sending too fast holds the server.
+			if (err.code === 'rate_limited') retryAfterMs = err.retryAfterMs || WAIT_MS;
+		}
+	const parts = [`Killed ${killed} of ${ids.length}`];
+	if (refused) parts.push(`${refused} refused`);
+	if (gone) parts.push(`${gone} gone`);
+	if (left)
+		parts.push(
+			retryAfterMs
+				? `${left} not reached: the server asked the panel to slow down`
+				: `${left} not reached in time`
+		);
+	if (killed && message) parts.push(announced ? 'announced' : 'message not sent');
+	return { message: `${parts.join(' · ')}.`, ...(retryAfterMs ? { retryAfterMs } : {}) };
+}
+
 /** Runs the row's action; "empty_reset" decides between a rotation edit and a direct change. */
 async function execute(client: WardogsClient, row: OutboxRow): Promise<unknown> {
 	const params = (row.params as Record<string, unknown>) ?? {};
+	if (row.action === AFK_ROUND) return afkRound(client, params, memoryOf(row.serverId));
 	if (row.action === 'empty_reset') {
 		let rotationOn = false;
 		try {
