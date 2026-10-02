@@ -15,6 +15,8 @@
 //                (two-teams.ts)
 //   kill_distance  flag, kick or ban a player who kills with a chosen weapon from further than it
 //                reaches (kill-distance.ts, acted on in feed-events.ts)
+//   afk_protection  kill everyone every few minutes while the server seeds, so the game's idle kick
+//                spares the seeders (afk-protection.ts)
 // The worker evaluates them on every observation and writes the actions they want to the outbox
 // (outbox.ts delivers, and every delivery lands in the audit trail as category "trigger"). A dry
 // run replays the last 24 hours from the samples and sessions tables so a rule can be checked
@@ -119,6 +121,16 @@ import {
 	type TwoTeamsConfig,
 	type TwoTeamsState
 } from './two-teams';
+import {
+	AFK_REARM_EMPTY_MS,
+	AFK_ROUND,
+	AFK_ROUND_MAX_PLAYERS,
+	afkReplay,
+	afkSettingsKey,
+	afkState,
+	afkStep,
+	type AfkProtectionConfig
+} from './afk-protection';
 import { fmtUptime, RESTART_AFTER_HOURS, restartWindow } from '$lib/uptime';
 import { DEFAULT_SCORE_CAP, scoreCapOf } from '$lib/match';
 import { settings } from './settings';
@@ -142,8 +154,16 @@ const shape = (t: TriggerRow): TriggerView => ({
 	lastFiredAt: t.lastFiredAt ? t.lastFiredAt.toISOString() : null,
 	lastResult: t.lastResult,
 	fireCount: t.fireCount,
-	createdAt: t.createdAt ? t.createdAt.toISOString() : null
+	createdAt: t.createdAt ? t.createdAt.toISOString() : null,
+	...(t.kind === 'afk_protection' ? { phase: afkPhase(t.state) } : {})
 });
+
+/** Where an AFK protection rule stands, as its row shows it; null until the worker has looked. */
+function afkPhase(state: unknown): TriggerView['phase'] {
+	const s = afkState(state);
+	if (!s) return null;
+	return { on: s.on, since: s.since ? new Date(s.since).toISOString() : null, why: s.why };
+}
 
 export async function listTriggers(env: Env, serverId: string): Promise<TriggerView[]> {
 	const rows = await env.db
@@ -183,7 +203,8 @@ const RULE_NEEDS: Record<
 	ping_kick: ['players.kick', 'kicks players'],
 	team_kill: ['players.kick', 'kicks players'],
 	kill_rate: ['players.kick', 'flags players'],
-	two_teams: ['players.move', 'moves players between teams']
+	two_teams: ['players.move', 'moves players between teams'],
+	afk_protection: ['players.kill', 'kills players']
 };
 
 /**
@@ -204,10 +225,16 @@ export function ruleNeeds(kind: TriggerKind, config: unknown): [Capability, stri
 	return RULE_NEEDS[kind];
 }
 
-/** What else a rule needs when it also messages players: a Team balance rule with a whisper. */
+/**
+ * What else a rule needs when it also messages players: a Team balance rule with a whisper, an AFK
+ * protection rule with a broadcast.
+ */
 function ruleAlsoNeeds(kind: TriggerKind, config: unknown): [Capability, string] | null {
 	if (kind === 'two_teams' && str((config as Partial<TwoTeamsConfig> | null)?.message))
 		return ['chat.send', 'whispers players'];
+	const afk = config as Partial<AfkProtectionConfig> | null;
+	if (kind === 'afk_protection' && (str(afk?.message) || str(afk?.doneMessage)))
+		return ['chat.send', 'messages players'];
 	return null;
 }
 
@@ -243,9 +270,10 @@ export async function createTrigger(
 	const name = str(body.name, 60) || TRIGGER_LABELS[kind];
 	const row = await env.db.transaction(async (tx) => {
 		// Seed time is one count per server, taken against one threshold, so one rule holds it. Two
-		// Team balance rules would move a player back and forth, killing them at every move. Saves to
-		// one server take turns, so two at once cannot both find none.
-		if (kind === 'seed_reward' || kind === 'two_teams') {
+		// Team balance rules would move a player back and forth, killing them at every move; two AFK
+		// protection rules would kill everyone twice a round. Saves to one server take turns, so two at
+		// once cannot both find none.
+		if (kind === 'seed_reward' || kind === 'two_teams' || kind === 'afk_protection') {
 			await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`triggers:${server.id}`}))`);
 			const [other] = await tx
 				.select({ name: triggers.name })
@@ -308,10 +336,15 @@ export async function updateTrigger(
 	// who switched sides while it was off is unknown, so whoever is on then counts as placed. Whether
 	// it was off is the row's at the write, not the read above, so a switch-off landing between them
 	// still gets its switch-on.
+	// Switched on again, an AFK protection rule starts from what the server shows then: whether it
+	// emptied or restarted while the rule was off is unknown. An edit keeps where it stands, so
+	// changing a message while a match is on cannot turn it on.
 	const switchOn =
 		row.kind === 'two_teams' && set.enabled === true
 			? sql`CASE WHEN ${triggers.enabled} THEN ${triggers.state} ELSE (${JSON.stringify({ enabledAt: Date.now() })}::text)::jsonb END`
-			: undefined;
+			: row.kind === 'afk_protection' && set.enabled === true
+				? sql`CASE WHEN ${triggers.enabled} THEN ${triggers.state} ELSE NULL END`
+				: undefined;
 	requireRuleCaps(row.kind, set.config ?? row.config, server, access);
 	if (!Object.keys(set).length) throw new ApiError(400, 'Nothing to update.');
 	set.updatedAt = new Date();
@@ -371,11 +404,13 @@ export async function deleteTrigger(
  * one's key of those settings (every row carries it as `params.rule`; outbox.ts checks it again at
  * delivery): a Team balance move decided under the old closed faction or gap could take a player
  * to the wrong side, and a Kill distance kick or ban decided under settings an admin has just corrected, or by
- * a rule just switched off, is not to be sent.
+ * a rule just switched off, is not to be sent; nor is an AFK protection round once the rule is off,
+ * which is how it is stopped in a hurry.
  */
 export const SETTINGS_KEYS: Partial<Record<string, (config: unknown) => string>> = {
 	two_teams: (c) => twoTeamsSettingsKey(c as TwoTeamsConfig),
-	kill_distance: (c) => killDistanceSettingsKey(c as KillDistanceConfig)
+	kill_distance: (c) => killDistanceSettingsKey(c as KillDistanceConfig),
+	afk_protection: (c) => afkSettingsKey(c as AfkProtectionConfig)
 };
 
 /**
@@ -587,6 +622,9 @@ export async function evaluateTriggers(
 					break;
 				case 'two_teams':
 					evalTwoTeams(ctx, row, row.config as TwoTeamsConfig, out);
+					break;
+				case 'afk_protection':
+					evalAfkProtection(ctx, row, row.config as AfkProtectionConfig, out);
 					break;
 			}
 		} catch (err) {
@@ -1119,6 +1157,94 @@ function evalRestartNotice(
 	});
 }
 
+/**
+ * When each AFK protection rule's server was first seen empty, in worker memory, counted only over
+ * looks the rule itself took: a restart, an outage or the rule starting over (switched on again)
+ * starts the count afresh, which only turns the rule back on later.
+ */
+const afkEmpty = new Map<string, number>();
+
+function evalAfkProtection(
+	ctx: TickContext,
+	row: TriggerRow,
+	cfg: AfkProtectionConfig,
+	out: Evaluation
+) {
+	const now = ctx.ts.getTime();
+	// The most anyone says is on: a status a few seconds old must not hide a full list.
+	const count = Math.max(ctx.status.playerCount || 0, ctx.players.length);
+	const prev = afkState(row.state);
+	if (count > 0 || ctx.recovered || !prev) afkEmpty.delete(row.id);
+	if (count === 0 && !ctx.recovered && !afkEmpty.has(row.id)) afkEmpty.set(row.id, now);
+	const emptySince = afkEmpty.get(row.id);
+	const goal = cfg.stopAt;
+	const step = afkStep(
+		cfg,
+		prev,
+		{
+			now,
+			count,
+			scored: (ctx.status.scores ?? []).some((s) => s.score > 0),
+			startedAt: ctx.startedAt,
+			listed: ctx.playersObserved,
+			recovered: !!ctx.recovered,
+			emptyFor: emptySince === undefined ? 0 : now - emptySince
+		},
+		goal
+	);
+	if (!step.round && !step.done && JSON.stringify(step.state) === JSON.stringify(prev)) return;
+	// Kept on the cached row as well, for the looks before the cache is read again; a failed write
+	// reloads the rules (observe.ts), so a round that was not queued is decided again.
+	row.state = step.state;
+	const update: TriggerUpdate = { id: row.id, state: step.state };
+	if (step.off) update.lastResult = `Off until the server empties or restarts: ${step.off}.`;
+	else if (step.state.on && (!prev || step.rearmed))
+		update.lastResult = `On while fewer than ${goal} are on and no side has scored.`;
+	const rule = afkSettingsKey(cfg);
+	const say = (text: string) => renderTemplate(text, { ...vars(ctx), goal }, MAX_CHAT);
+	if (step.round) {
+		const listed = ctx.players
+			.filter((p) => /^\d{17}$/.test(p.steamId))
+			.slice(0, AFK_ROUND_MAX_PLAYERS);
+		const n = listed.length;
+		const players = `${n} player${n === 1 ? '' : 's'}`;
+		if (n) {
+			out.intents.push({
+				trigger: row,
+				action: AFK_ROUND,
+				params: {
+					steamIds: listed.map((p) => p.steamId),
+					goal,
+					rule,
+					message: cfg.message ? say(cfg.message) : ''
+				},
+				target: players,
+				okMessage: `Killed ${players}.`,
+				detail: { players: n, goal },
+				steamId: null,
+				dedupeKey: key(row, 'round', now)
+			});
+			update.lastFiredAt = ctx.ts;
+			update.lastResult = `Killing ${players} (${count} on, off at ${goal}).`;
+		}
+	}
+	if (step.done && cfg.doneMessage) {
+		const message = say(cfg.doneMessage);
+		out.intents.push({
+			trigger: row,
+			action: 'broadcast',
+			params: { message, rule },
+			target: message,
+			okMessage: 'Broadcast sent.',
+			detail: { stage: 'done' },
+			steamId: null,
+			dedupeKey: key(row, 'done', now)
+		});
+		update.lastFiredAt = ctx.ts;
+	}
+	out.updates.push(update);
+}
+
 // A match boundary is one tick, so the rule keeps no state: the end message then the start
 // message, each an outbox row keyed on the tick.
 // A match end the rule is holding until the server has its players on again, per rule (in memory
@@ -1131,6 +1257,7 @@ export function forgetRuleMemory(): void {
 	seedState.clear();
 	twoTeamsMemory.clear();
 	staffMoves.clear();
+	afkEmpty.clear();
 }
 
 function evalMatchBroadcast(
@@ -1856,6 +1983,37 @@ export async function dryRun(
 		.orderBy(asc(samples.ts));
 	if (!rows.length) {
 		result.notes.push('No samples in the last 24 hours; the poller may be off or the server new.');
+		return result;
+	}
+	if (kind === 'afk_protection') {
+		const c = cfg as AfkProtectionConfig;
+		const replay = afkReplay(
+			c,
+			rows.map((r) => ({
+				ts: r.ts.getTime(),
+				ok: r.ok,
+				count: r.count ?? 0,
+				scores: Array.isArray(r.scores) ? (r.scores as { score: number }[]) : []
+			})),
+			c.stopAt
+		);
+		let kills = 0;
+		for (const it of replay) {
+			const at = new Date(it.at);
+			if (it.kind === 'round') {
+				kills += it.count;
+				push(at, `kill everyone on (${it.count})`);
+			} else if (result.items.length < 50)
+				// the rule turning off or on is no action: listed, not counted
+				result.items.push({
+					at: at.toISOString(),
+					text: it.kind === 'off' ? `off: ${it.why}` : 'back on: the server sat empty'
+				});
+		}
+		if (result.fires) result.notes.push(`${kills} kills in all.`);
+		result.notes.push(
+			`Off from ${c.stopAt} on; back on after ${AFK_REARM_EMPTY_MS / 60_000} min empty or a restart (restarts are not replayed).`
+		);
 		return result;
 	}
 	if (kind === 'seed_reward') {
