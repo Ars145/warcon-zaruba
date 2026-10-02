@@ -289,13 +289,17 @@ A server role is a named set of **capabilities**. Every organisation starts with
 `operator` and `admin`, holding what the table shows. Its owners can change any of them on the
 org's **Roles** tab (a change applies at once to everyone holding the role), reset a built-in to
 what it shipped with, and add roles of their own, say a `Trial staff` that may kick but not ban.
-Org owners and the site owner hold every capability on every server in scope.
+**Reorder** on the same tab sets the order of the roles (drag a row, or move it with its arrows),
+which the tab's columns and every role picker follow; a new role goes in last. Org owners and the
+site owner hold every capability on every server in scope.
 
 | Capability         | Unlocks                                                                                                                                                                   | viewer | operator | admin |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | -------- | ----- |
 | View               | what is happening on the server: status, players, kills, rotation, who is banned and who holds a reserved slot, analytics, leaderboards, player stats. Every role has it. | ✓      | ✓        | ✓     |
 | Chat               | broadcast; whisper one player, several, or everyone on a faction                                                                                                          |        | ✓        | ✓     |
-| Kick, kill, move   | kick, kill, change team                                                                                                                                                   |        | ✓        | ✓     |
+| Kick               | kick a player; the rules that kick or flag players                                                                                                                        |        | ✓        | ✓     |
+| Kill               | kill a player's character                                                                                                                                                 |        | ✓        | ✓     |
+| Move               | move a player to another team, which kills them so they respawn on it (a move to the side they are on is refused); a Team balance rule                                    |        | ✓        | ✓     |
 | Match control      | end/restart match, change map, next map, weather                                                                                                                          |        | ✓        | ✓     |
 | Live rotation      | add, remove and reorder rotation entries on the running server                                                                                                            |        | ✓        | ✓     |
 | Notes & watchlist  | read and add player notes (delete your own), watch and unwatch, the reason a player is watched                                                                            |        | ✓        | ✓     |
@@ -333,7 +337,9 @@ includes _Audit trail_. Existing installs keep their access on upgrade: every gr
 the matching built-in role of its organisation. _Org lists_ has since been split into _Org ban
 list_ and _Org reserved slots_, so an org can hand out one without the other: every role, and
 every API key over the whole organisation, that held it was given both; a key limited to some
-servers, which could never open the org lists, was given neither.
+servers, which could never open the org lists, was given neither. _Kick, kill, move_ has since been
+split into _Kick_, _Kill_ and _Move_: every role and API key that held it was given all three, and
+its old id, `players.moderate`, is refused when a role or key is saved.
 
 ### Self-service sign-up
 
@@ -513,8 +519,8 @@ The **Automation** tab on each server holds rules the poller evaluates on every 
 create them; every action they take is in the audit trail under the `trigger` category with the
 rule that fired, and can be mirrored to Discord. A rule acts with nobody at the controls, so
 saving or dry-running one needs, besides _Automation_, the capability for what it does: _Chat_ for
-the rules that message players, _Match control_ for the map reset, _Kick, kill, move_ for the rules
-that kick, the Kill rate watch, a Kill distance watch that flags or kicks, and Team balance (with
+the rules that message players, _Match control_ for the map reset, _Kick_ for the rules that kick,
+the Kill rate watch and a Kill distance watch that flags or kicks, _Move_ for Team balance (with
 _Chat_ as well when it whispers), for a Kill distance watch that bans _Bans_ (on this server) or _Org
 ban list_ (on every server), and for the Seeding reward _Reserved slots_ or _Org reserved slots_ (see
 its row). A custom role or API key with _Automation_ alone can read the rules and
@@ -850,6 +856,7 @@ Act on the status and `error.code`; the message is written for people and can ch
 | 403    | `suspended`                                             | the organisation is suspended                                                                                                                       |
 | 404    | `not_found`                                             | nothing there, or nothing the key may see: a server of another organisation or outside the key's servers, and every server for a key without _View_ |
 | 409    | `duplicate`                                             | the player is already on that list                                                                                                                  |
+| 409    | `same_side`                                             | `changeTeam` to the side the player is already on                                                                                                   |
 | 429    | `rate_limited`                                          | too many calls; the message says how many seconds to wait (there is no `Retry-After` header)                                                        |
 | 502    | `unreachable`, or the game's own                        | a game action could not reach the game server, or the game refused the stored RCON password                                                         |
 
@@ -869,7 +876,9 @@ Answers name capabilities by id:
 | ---------------------- | ------------------ |
 | `server.view`          | View               |
 | `chat.send`            | Chat               |
-| `players.moderate`     | Kick, kill, move   |
+| `players.kick`         | Kick               |
+| `players.kill`         | Kill               |
+| `players.move`         | Move               |
 | `match.control`        | Match control      |
 | `rotation.edit`        | Live rotation      |
 | `players.notes`        | Notes & watchlist  |
@@ -1013,9 +1022,9 @@ game's (a 401 or a 5xx from it becomes a 502), and `error` carries the game's `c
 | `broadcast`                         | Chat              | `message`                                                                               |
 | `whisper`                           | Chat              | `steamId`, `message`                                                                    |
 | `whisperMany`                       | Chat              | `message`, and either `faction` or `steamIds` (a list, up to 200)                       |
-| `kick`                              | Kick, kill, move  | `steamId`, `reason` (optional)                                                          |
-| `kill`                              | Kick, kill, move  | `steamId`                                                                               |
-| `changeTeam`                        | Kick, kill, move  | `steamId`, `faction`                                                                    |
+| `kick`                              | Kick              | `steamId`, `reason` (optional)                                                          |
+| `kill`                              | Kill              | `steamId`                                                                               |
+| `changeTeam`                        | Move              | `steamId`, `faction`; the player is killed so they respawn on that side                 |
 | `endMatch`, `restartMatch`          | Match control     | none                                                                                    |
 | `changeMap`, `setNextMap`           | Match control     | `map`, and optionally `experiences` (a list), `lighting`, `zoneAlternator`              |
 | `setWeather`                        | Match control     | `lighting`                                                                              |
@@ -1144,7 +1153,7 @@ A kill, as the kills route and the event stream carry it (`ts` is when the panel
 | Route                                          | Needs                                                                                                                                                                                                            |
 | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `GET /api/servers/:id/triggers`                | _Automation_                                                                                                                                                                                                     |
-| `POST /api/servers/:id/triggers`               | _Automation_, and what the rule does (_Chat_ to send messages, _Kick, kill, move_ to kick, and so on; the refusal names it): `{"kind", "name", "enabled", "config"}`                                             |
+| `POST /api/servers/:id/triggers`               | _Automation_, and what the rule does (_Chat_ to send messages, _Kick_ to kick, and so on; the refusal names it): `{"kind", "name", "enabled", "config"}`                                                         |
 | `PATCH /api/servers/:id/triggers/:triggerId`   | the same; `{"enabled": false}` switches a rule off                                                                                                                                                               |
 | `DELETE /api/servers/:id/triggers/:triggerId`  | _Automation_                                                                                                                                                                                                     |
 | `POST /api/servers/:id/triggers/dry-run`       | as for `POST`: `{"kind", "config"}`, and the answer is what the rule would have done over the last 24 hours                                                                                                      |
@@ -1381,7 +1390,7 @@ own `/api/auth/*` routes only the OAuth callback is reachable over HTTP; everyth
 ```
 GET/POST /api/orgs  PATCH/DELETE /api/orgs/:id   PATCH {name} | {discordInviteUrl} | {membersReserved} | {banMessage} | site owner: {serverLimit, suspended, reason, allowPublicStatus, allowPublicLeaderboards}
 GET  /api/orgs/:id/members  PATCH/DELETE /api/orgs/:id/members/:userId {role}  PUT .../:userId/grants {grants:[{serverId,roleId}]}
-GET/POST /api/orgs/:id/roles {name,capabilities[]}  PATCH/DELETE .../:roleId {name?,capabilities?}  POST .../:roleId/reset
+GET/POST /api/orgs/:id/roles {name,capabilities[]}  PATCH/DELETE .../:roleId {name?,capabilities?}  POST .../:roleId/reset  PUT .../order {ids[]} (every role once, else 409 stale)
 GET/POST /api/orgs/:id/keys {label,capabilities[],serverIds[]|null,expiresDays}  DELETE .../:keyId   (POST returns the token once)
 GET/POST /api/orgs/:id/json-webhooks {label,url,events[],serverIds[]|null,enabled}  PATCH/DELETE .../:webhookId {…, signing:"new"}  POST .../:webhookId/test   (POST, and PATCH with signing, return the secret once)
 GET/POST /api/orgs/:id/invites {label,orgRole,serverRoleId,expiresDays,maxUses}  DELETE /api/orgs/:id/invites/:inviteId
@@ -1421,7 +1430,7 @@ GET  /api/steam/profiles?ids=a,b      GET /api/health
 
 Actions, by the capability each needs: `capabilities status health serverId players maps lightings
 experiences alternators catalog rotation bans reserved sponsor` (View) ·
-`broadcast whisper whisperMany` (Chat) · `kick kill changeTeam` (Kick, kill, move) · `endMatch restartMatch
+`broadcast whisper whisperMany` (Chat) · `kick` (Kick) · `kill` (Kill) · `changeTeam` (Move) · `endMatch restartMatch
 changeMap setWeather setNextMap` (Match control) · `rotationAdd rotationRemove rotationMove
 rotationReorder` (Live rotation) · `ban unban` (Bans) · `reservedAdd reservedRemove` (Reserved
 slots) · `rotationSave rotationSettings` (Save rotation) · `config settings configValidate configApply` (Config &

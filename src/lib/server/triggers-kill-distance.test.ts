@@ -11,9 +11,9 @@ const rule = (c: Record<string, unknown>) =>
 	validateConfig('kill_distance', { causes: [DEFIB], ...c }) as KillDistanceConfig;
 
 describe('ruleNeeds for a Kill distance rule', () => {
-	test('a flag or a kick needs Kick players; a ban needs what a ban by hand on that list needs', () => {
-		expect(ruleNeeds('kill_distance', rule({ action: 'flag' }))[0]).toBe('players.moderate');
-		expect(ruleNeeds('kill_distance', rule({ action: 'kick' }))[0]).toBe('players.moderate');
+	test('a flag or a kick needs Kick; a ban needs what a ban by hand on that list needs', () => {
+		expect(ruleNeeds('kill_distance', rule({ action: 'flag' }))[0]).toBe('players.kick');
+		expect(ruleNeeds('kill_distance', rule({ action: 'kick' }))[0]).toBe('players.kick');
 		expect(ruleNeeds('kill_distance', rule({ action: 'ban' }))[0]).toBe('bans.manage');
 		expect(ruleNeeds('kill_distance', rule({ action: 'ban', banScope: 'org' }))[0]).toBe(
 			'lists.ban'

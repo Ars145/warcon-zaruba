@@ -515,17 +515,17 @@ describe.skipIf(!hasTestDb)('access', () => {
 			const rules: [string, Record<string, unknown>, string][] = [
 				['welcome', { message: 'hello' }, 'chat.send'],
 				['empty_reset', { map: 'Bakurani', afterMinutes: 10 }, 'match.control'],
-				['risk_kick', { vacBans: true }, 'players.moderate'],
-				['name_filter', { characters: 'ascii' }, 'players.moderate'],
-				['name_filter', { characters: 'ascii', action: 'alert' }, 'players.moderate'],
-				['team_kill', { kickAt: 3 }, 'players.moderate'],
-				['team_kill', { kickAt: 3, notCounted: ['Id.Item.Claymore'] }, 'players.moderate'],
-				['kill_rate', { maxKills: 20 }, 'players.moderate'],
-				['kill_distance', { causes: [DEFIB], action: 'flag' }, 'players.moderate'],
-				['kill_distance', { causes: [DEFIB], action: 'kick' }, 'players.moderate'],
+				['risk_kick', { vacBans: true }, 'players.kick'],
+				['name_filter', { characters: 'ascii' }, 'players.kick'],
+				['name_filter', { characters: 'ascii', action: 'alert' }, 'players.kick'],
+				['team_kill', { kickAt: 3 }, 'players.kick'],
+				['team_kill', { kickAt: 3, notCounted: ['Id.Item.Claymore'] }, 'players.kick'],
+				['kill_rate', { maxKills: 20 }, 'players.kick'],
+				['kill_distance', { causes: [DEFIB], action: 'flag' }, 'players.kick'],
+				['kill_distance', { causes: [DEFIB], action: 'kick' }, 'players.kick'],
 				['kill_distance', { causes: [DEFIB], action: 'ban' }, 'bans.manage'],
 				['kill_distance', { causes: [DEFIB], action: 'ban', banScope: 'org' }, 'lists.ban'],
-				['two_teams', { closedFaction: 'Lonestar' }, 'players.moderate'],
+				['two_teams', { closedFaction: 'Lonestar' }, 'players.move'],
 				['seed_reward', { minutes: 60, scope: 'server' }, 'slots.manage'],
 				['seed_reward', { minutes: 60, scope: 'org' }, 'lists.reserve']
 			];
@@ -553,15 +553,15 @@ describe.skipIf(!hasTestDb)('access', () => {
 			});
 			expect(refused.status).toBe(403);
 			// a ban on the organisation's list is not this server's Bans, nor the other way round, and
-			// Kick players reaches neither
+			// Kick reaches neither
 			const ban = (banScope: string) => ({
 				kind: 'kill_distance',
 				config: { causes: [DEFIB], action: 'ban', banScope }
 			});
 			for (const [caps, banScope] of [
-				[['bans.manage', 'players.moderate'], 'org'],
-				[['lists.ban', 'players.moderate'], 'server'],
-				[['players.moderate'], 'server']
+				[['bans.manage', 'players.kick'], 'org'],
+				[['lists.ban', 'players.kick'], 'server'],
+				[['players.kick'], 'server']
 			] as const) {
 				await holds([...caps]);
 				for (const route of [
@@ -573,7 +573,7 @@ describe.skipIf(!hasTestDb)('access', () => {
 				}
 			}
 			// a flag or kick rule cannot be turned into a ban by an edit its author could not save
-			await holds(['players.moderate']);
+			await holds(['players.kick']);
 			const made = await api(w, 'viewer', 'POST api/servers/[id]/triggers', {
 				params,
 				body: { kind: 'kill_distance', config: { causes: [DEFIB], action: 'kick' } }
@@ -598,7 +598,7 @@ describe.skipIf(!hasTestDb)('access', () => {
 			});
 			expect(made.status).toBe(201);
 			const triggerId = (made.body as { trigger: { id: string } }).trigger.id;
-			// Automation without Kick players: the rule is not theirs to make, replay or enable.
+			// Automation without Kick: the rule is not theirs to make, replay or enable.
 			await env.db
 				.update(orgRoles)
 				.set({ capabilities: ['server.view', 'automation.manage'] })
@@ -653,7 +653,7 @@ describe.skipIf(!hasTestDb)('access', () => {
 			});
 			expect(made.status).toBe(201);
 			const triggerId = (made.body as { trigger: { id: string } }).trigger.id;
-			// Automation without Kick players: a flag-only rule is still not theirs to make, replay or enable.
+			// Automation without Kick: a flag-only rule is still not theirs to make, replay or enable.
 			await env.db
 				.update(orgRoles)
 				.set({ capabilities: ['server.view', 'automation.manage'] })
@@ -701,10 +701,10 @@ describe.skipIf(!hasTestDb)('access', () => {
 
 		test('a Kill distance rule that bans: who may save, dry-run and switch it on, for each list', async () => {
 			const w = await seedWorld(env);
-			// Automation and Kick players, but neither ban list: a ban rule is not theirs.
+			// Automation and Kick, but neither ban list: a ban rule is not theirs.
 			await env.db
 				.update(orgRoles)
-				.set({ capabilities: ['server.view', 'automation.manage', 'players.moderate'] })
+				.set({ capabilities: ['server.view', 'automation.manage', 'players.kick'] })
 				.where(eq(orgRoles.id, w.roles.viewer));
 			const expected: Record<PrincipalName, number> = {
 				anon: 401,
@@ -793,7 +793,7 @@ describe.skipIf(!hasTestDb)('access', () => {
 				});
 				expect(made.status).toBe(201);
 				const triggerId = (made.body as { trigger: { id: string } }).trigger.id;
-				// Automation without Kick, kill, move: the rule is not theirs to make, replay or enable.
+				// Automation without Move: the rule is not theirs to make, replay or enable.
 				await env.db
 					.update(orgRoles)
 					.set({ capabilities: ['server.view', 'automation.manage'] })
@@ -860,7 +860,7 @@ describe.skipIf(!hasTestDb)('access', () => {
 			const whispers = { closedFaction: 'Lonestar', message: 'You are on {team}.' };
 			await env.db
 				.update(orgRoles)
-				.set({ capabilities: ['server.view', 'automation.manage', 'players.moderate'] })
+				.set({ capabilities: ['server.view', 'automation.manage', 'players.move'] })
 				.where(eq(orgRoles.id, w.roles.viewer));
 			const dryRun = (config: Record<string, unknown>) =>
 				api(w, 'viewer', 'POST api/servers/[id]/triggers/dry-run', {
@@ -891,7 +891,7 @@ describe.skipIf(!hasTestDb)('access', () => {
 			await env.db
 				.update(orgRoles)
 				.set({
-					capabilities: ['server.view', 'automation.manage', 'players.moderate', 'chat.send']
+					capabilities: ['server.view', 'automation.manage', 'players.move', 'chat.send']
 				})
 				.where(eq(orgRoles.id, w.roles.viewer));
 			expect((await dryRun(whispers)).status).toBe(200);
