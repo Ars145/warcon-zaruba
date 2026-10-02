@@ -47,9 +47,9 @@ What is in the box:
   that server, searched by name, alias or SteamID64, with when they were last on, their sessions
   and playtime. Anyone who can open the server can look; a row's Ban (for people who hold _Bans_)
   lands the moment the player next joins, and Watch needs _Notes_.
-- **Analytics**: the worker keeps what the game does not: players online over time, cash in play
-  per faction, uptime, time per map, wins per team, busiest hours, player playtime and sessions,
-  match history
+- **Analytics**: the worker keeps what the game does not: players online over time, players per
+  day and how many of them were new, how long sessions last, cash in play per faction, uptime,
+  time per map, wins per team, busiest hours, player playtime and sessions, match history
   with results. Samples are written when something changes plus a heartbeat, and every figure is
   duration-weighted, so a faster cadence never distorts them.
 - **Player dossiers**: click any player for their history across the organisation's servers
@@ -1149,6 +1149,7 @@ These need _View_ on the server unless the table says otherwise.
 | `GET /api/servers/:id/leaderboard`                       | `scope` (`server` or `org`), `range` (`7d`, `30d`, `90d`, `all`), `sort` (`kills`, `deaths`, `kd`, `perHour`, `playtime`, `seeded`, `matches`, `wins`, `winRate`, `cash`), `dir`, `page` (fifty a page), `minMinutes` (default 60)                                                                                                                                                  |
 | `GET /api/servers/:id/leaderboard/export`                | the same query as the board, as a CSV file of every row from the top (up to 10,000; `page` is ignored); ten a minute                                                                                                                                                                                                                                                                |
 | `GET /api/servers/:id/analytics?range=`                  | population, uptime, wins per team (`wins`) and, with a kill feed, combat, over `24h`, `7d` or `30d`                                                                                                                                                                                                                                                                                 |
+| `GET /api/servers/:id/analytics/periods?range=&tz=`      | per hour over `24h`, per day over `7d` and `30d`, oldest first, the last one running: `ts`, `players`, `newPlayers` (here for the first time), `sessions` (that ended in it), `avgSessionS`, `medianSessionS`; days and hours start in `tz`, such as `Europe/Berlin` (UTC when missing or unknown), sent back with `unit`                                                           |
 | `GET /api/orgs/:orgId/players`                           | either org list: the organisation's players on the servers the key can see, with the filters of `players/seen` and `server`; `limit` up to 200                                                                                                                                                                                                                                      |
 | `GET /api/steam/profiles?ids=a,b`                        | Steam name and avatar for up to 100 SteamIDs, as `{"<steamId>": {"name", "avatar"}}` (null for one Steam does not know; no `ok`); 404 `steam_disabled` when the panel has no Steam key                                                                                                                                                                                              |
 | `POST /api/servers/:id/players/:steamId/steam`           | asks Steam about the player again and answers the dossier                                                                                                                                                                                                                                                                                                                           |
@@ -1198,6 +1199,7 @@ valid one is to make the rule in the panel and read it back.
 | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
 | game actions                                                                 | 120 a minute per key, `raw` at most 30 of them                                               |
 | `GET /api/servers/:id/players/seen`                                          | 60 a minute per key                                                                          |
+| `GET /api/servers/:id/analytics/periods`                                     | 30 a minute per key                                                                          |
 | `GET /api/steam/profiles` and `POST /api/servers/:id/players/:steamId/steam` | 60 and 20 a minute per key, counted together                                                 |
 | `POST /api/servers/:id/test`                                                 | 20 a minute per key                                                                          |
 | tokens the panel refuses                                                     | 20 a minute from one address; then a 429 for each further bad token (good keys keep working) |
@@ -1427,6 +1429,7 @@ GET/POST /api/servers {orgId,...}  PATCH/DELETE /api/servers/:id  POST /api/serv
 GET/PUT /api/servers/:id/grants {grants:[{userId,roleId}]}   GET /api/servers/:id/summary
 GET|POST /api/servers/:id/rcon/:action   (GET for reads with query params, POST JSON for mutations)
 GET  /api/servers/:id/analytics?range=24h|7d|30d       includes `combat` from the kill feed when the server has one
+GET  /api/servers/:id/analytics/periods?range=7d&tz=Europe/Berlin   players, new players and session lengths per hour (24h) or per day in that zone
 GET  /api/servers/:id/kills?before=<iso>&beforeTime=<s>&limit=50&count=1&match=<matchId>   the stored kill feed, newest first; `count=1` adds the total, `match` narrows it to one match; `kills` frames on /api/live/events carry new ones
 GET  /api/servers/:id/matches?page=1                    match history, newest first, fifty a page   GET /api/servers/:id/matches/:matchId   a match that ended: lines, score timeline, awards
 POST /api/servers/:id/stats/purge {name}                 deletes the server's kills, matches and match rows (org owners; the name must be the server's; sessions stay)
@@ -1473,6 +1476,11 @@ settings) · `serverLog` (Audit trail) · `raw` (Raw RCON).
   faction scores falling back to zero and, on builds that send one, the match clock. Nothing is
   deleted: raw samples, their hourly rollups (behind the 30-day charts), sessions and matches are
   kept for good. On TimescaleDB, samples older than two weeks are compressed in place.
+- On the Analytics charts per day, a player is new on the day their first session on that server
+  began, as far back as the panel has watched it: in the first weeks after a server is added, its
+  regulars count as new once each. A session counts on the day it ended, with its whole length, so
+  one still running counts on none yet. Days are the viewer's own (the browser's time zone); over
+  24 hours the charts go by the hour.
 - Several `web` processes can share one database and one worker; the worker's lease makes exactly
   one process observe, and a second worker takes over within seconds if the first stops renewing.
   Run `WARCON_ROLE=all` as a single replica only: two `all` processes would each keep their own
