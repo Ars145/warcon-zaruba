@@ -24,7 +24,7 @@
 import { randomUUID } from 'node:crypto';
 import { and, asc, desc, eq, gte, inArray, isNotNull, or, sql, type SQL } from 'drizzle-orm';
 import type { Env } from './env';
-import { ApiError, int, newId, str } from './http';
+import { ApiError, forLog, int, newId, str } from './http';
 import { writeAudit } from './audit';
 import { emit } from './events';
 import {
@@ -132,10 +132,22 @@ import {
 	type AfkProtectionConfig
 } from './afk-protection';
 import { fmtUptime, RESTART_AFTER_HOURS, restartWindow } from '$lib/uptime';
-import { DEFAULT_SCORE_CAP, scoreCapOf } from '$lib/match';
+import { DEFAULT_SCORE_CAP } from '$lib/match';
+import { mapName } from '$lib/format';
+import { statsIn, usesStats } from '$lib/placeholders';
 import { settings } from './settings';
-import { riskPerformanceFor } from './leaderboards';
+import { playerStats, riskPerformanceFor } from './leaderboards';
 import type { RiskPerformance } from './risk';
+import {
+	dryRunVars,
+	keptVars,
+	messageVars,
+	NO_STATS,
+	serverVars,
+	type MessageVars,
+	type PlayerStats,
+	type StatsBy
+} from './message-vars';
 
 export * from './trigger-rules';
 
@@ -506,15 +518,94 @@ export interface Evaluation {
 	afterCommit?: (() => void)[];
 }
 
-const vars = (ctx: TickContext, p?: Player, previous = '') => ({
-	name: p?.name ?? '',
-	faction: p?.faction ?? '',
-	previous,
-	server: ctx.status.serverName || ctx.server.name,
-	map: ctx.status.map,
-	players: ctx.status.playerCount,
-	max: ctx.status.maxPlayers,
-	cap: scoreCapOf(ctx.status)
+/**
+ * Everything a message on this look fills ($lib/placeholders): the server's, the player's when it
+ * is to or about one (with their stats, when read), and what the rule decided (`own`).
+ */
+const vars = (
+	ctx: TickContext,
+	p?: Player | null,
+	stats: StatsBy = {},
+	own: MessageVars = {}
+): MessageVars =>
+	messageVars(
+		serverVars({
+			name: ctx.server.name,
+			status: ctx.status,
+			startedAt: ctx.startedAt,
+			now: ctx.ts.getTime()
+		}),
+		p ? { name: p.name, steamId: p.steamId, faction: p.faction, ping: p.ping } : null,
+		stats,
+		own
+	);
+
+/**
+ * Reads players' stats for the messages of one evaluation (or one feed batch): this server's
+ * (`here`) or its organisation's (`org`), each player once a side. A player whose read failed has
+ * none, so their stats show as `…` and the rule acts all the same.
+ */
+export type StatsReader = (
+	side: 'here' | 'org',
+	steamIds: string[]
+) => Promise<Map<string, PlayerStats>>;
+
+export function statsReader(env: Env, serverId: string): StatsReader {
+	const known = { here: new Map<string, PlayerStats>(), org: new Map<string, PlayerStats>() };
+	let org: string[] | null = null;
+	return async (side, steamIds) => {
+		const seen = known[side];
+		const want = [...new Set(steamIds)].filter((id) => !seen.has(id));
+		if (want.length)
+			try {
+				const ids = side === 'here' ? [serverId] : (org ??= await orgServerIds(env, serverId));
+				const read = await playerStats(env, ids, want);
+				for (const id of want) seen.set(id, read.get(id) ?? NO_STATS);
+			} catch (err) {
+				console.warn(`[warcon] player stats on ${serverId}:`, forLog(err));
+			}
+		return seen;
+	};
+}
+
+/** Every server of this server's organisation, itself included. */
+async function orgServerIds(env: Env, serverId: string): Promise<string[]> {
+	const rows = await env.db.execute<{ id: string }>(sql`
+		SELECT s.id FROM servers s JOIN servers me ON me.org_id = s.org_id WHERE me.id = ${serverId}`);
+	return rows.map((r) => r.id);
+}
+
+/**
+ * The stats of each side that one of these messages uses, read for the players whose text does;
+ * `org: false` for a text kept where staff read it, which has no org-wide stats.
+ */
+export interface StatsRead {
+	here: Map<string, PlayerStats> | null;
+	org: Map<string, PlayerStats> | null;
+}
+
+export async function statsFor(
+	read: StatsReader,
+	wants: { steamId: string; text: string }[],
+	{ org: orgSide = true } = {}
+): Promise<StatsRead> {
+	const sides = new Map<string, { here: boolean; org: boolean }>();
+	const ids = (side: 'here' | 'org') =>
+		wants
+			.filter((w) => (sides.get(w.text) ?? sides.set(w.text, statsIn(w.text)).get(w.text)!)[side])
+			.map((w) => w.steamId);
+	const here = ids('here');
+	const org = orgSide ? ids('org') : [];
+	return {
+		here: here.length ? await read('here', here) : null,
+		org: org.length ? await read('org', org) : null
+	};
+}
+
+/** One player's stats from what was read. */
+export const statsOf = (s: StatsRead, steamId: string): StatsBy => ({
+	here: s.here?.get(steamId),
+	org: s.org?.get(steamId)
 });
 
 // Enabled triggers per server, cached briefly: the worker asks on every observation.
@@ -582,14 +673,16 @@ export async function evaluateTriggers(
 	rows: TriggerRow[]
 ): Promise<Evaluation> {
 	const out: Evaluation = { intents: [], updates: [] };
+	// Stats are read only for a message that uses them, once per player whichever rules ask.
+	const read = statsReader(env, ctx.server.id);
 	for (const row of rows) {
 		try {
 			switch (row.kind) {
 				case 'welcome':
-					evalWelcome(ctx, row, row.config as WelcomeConfig, out);
+					await evalWelcome(ctx, row, row.config as WelcomeConfig, out, read);
 					break;
 				case 'faction_change':
-					evalFactionChange(ctx, row, row.config as FactionChangeConfig, out);
+					await evalFactionChange(ctx, row, row.config as FactionChangeConfig, out, read);
 					break;
 				case 'broadcast':
 					evalBroadcast(ctx, row, row.config as BroadcastConfig, out);
@@ -598,10 +691,10 @@ export async function evaluateTriggers(
 					await evalEmptyReset(env, ctx, row, row.config as EmptyResetConfig, out);
 					break;
 				case 'risk_kick':
-					evalRiskKick(env, ctx, row, row.config as RiskKickConfig, out);
+					await evalRiskKick(env, ctx, row, row.config as RiskKickConfig, out, read);
 					break;
 				case 'ping_kick':
-					evalPingKick(ctx, row, row.config as PingKickConfig, out);
+					await evalPingKick(ctx, row, row.config as PingKickConfig, out, read);
 					break;
 				case 'restart_notice':
 					evalRestartNotice(ctx, row, row.config as RestartNoticeConfig, out);
@@ -612,16 +705,16 @@ export async function evaluateTriggers(
 					// Acted on as kills arrive (feed-events.ts), not per observation.
 					break;
 				case 'seed_reward':
-					await evalSeedReward(env, ctx, row, row.config as SeedRewardConfig, out);
+					await evalSeedReward(env, ctx, row, row.config as SeedRewardConfig, out, read);
 					break;
 				case 'match_broadcast':
 					evalMatchBroadcast(ctx, row, row.config as MatchBroadcastConfig, out);
 					break;
 				case 'name_filter':
-					evalNameFilter(ctx, row, row.config as NameFilterConfig, out);
+					await evalNameFilter(ctx, row, row.config as NameFilterConfig, out, read);
 					break;
 				case 'two_teams':
-					evalTwoTeams(ctx, row, row.config as TwoTeamsConfig, out);
+					await evalTwoTeams(ctx, row, row.config as TwoTeamsConfig, out, read);
 					break;
 				case 'afk_protection':
 					evalAfkProtection(ctx, row, row.config as AfkProtectionConfig, out);
@@ -638,11 +731,22 @@ export async function evaluateTriggers(
 
 const key = (row: TriggerRow, ...parts: (string | number)[]) => [row.id, ...parts].join(':');
 
-function evalWelcome(ctx: TickContext, row: TriggerRow, cfg: WelcomeConfig, out: Evaluation) {
+async function evalWelcome(
+	ctx: TickContext,
+	row: TriggerRow,
+	cfg: WelcomeConfig,
+	out: Evaluation,
+	read: StatsReader
+) {
 	let n = 0;
 	let last = '';
-	for (const p of welcomeTargets(cfg, ctx)) {
-		const message = renderTemplate(cfg.message, vars(ctx, p), MAX_CHAT);
+	const targets = welcomeTargets(cfg, ctx);
+	const stats = await statsFor(
+		read,
+		targets.map((p) => ({ steamId: p.steamId, text: cfg.message }))
+	);
+	for (const p of targets) {
+		const message = renderTemplate(cfg.message, vars(ctx, p, statsOf(stats, p.steamId)), MAX_CHAT);
 		out.intents.push({
 			trigger: row,
 			action: 'whisper',
@@ -664,16 +768,26 @@ function evalWelcome(ctx: TickContext, row: TriggerRow, cfg: WelcomeConfig, out:
 		});
 }
 
-function evalFactionChange(
+async function evalFactionChange(
 	ctx: TickContext,
 	row: TriggerRow,
 	cfg: FactionChangeConfig,
-	out: Evaluation
+	out: Evaluation,
+	read: StatsReader
 ) {
 	let n = 0;
 	let last = '';
-	for (const { player: p, from } of factionChangeTargets(ctx)) {
-		const message = renderTemplate(cfg.message, vars(ctx, p, from ?? ''), MAX_CHAT);
+	const targets = factionChangeTargets(ctx);
+	const stats = await statsFor(
+		read,
+		targets.map((t) => ({ steamId: t.player.steamId, text: cfg.message }))
+	);
+	for (const { player: p, from } of targets) {
+		const message = renderTemplate(
+			cfg.message,
+			vars(ctx, p, statsOf(stats, p.steamId), { previous: from ?? '' }),
+			MAX_CHAT
+		);
 		out.intents.push({
 			trigger: row,
 			action: 'whisper',
@@ -779,16 +893,18 @@ async function evalEmptyReset(
 	out.updates.push({ id: row.id, lastFiredAt: ctx.ts, lastResult: `Resetting to ${cfg.map}` });
 }
 
-function evalRiskKick(
+async function evalRiskKick(
 	env: Env,
 	ctx: TickContext,
 	row: TriggerRow,
 	cfg: RiskKickConfig,
-	out: Evaluation
+	out: Evaluation,
+	read: StatsReader
 ) {
 	if (!ctx.riskCheck.length) return;
 	let n = 0;
 	let last = '';
+	const kicks: { p: Player; verdict: string }[] = [];
 	for (const p of ctx.riskCheck) {
 		const l = ctx.signals.get(p.steamId);
 		const verdict = riskKickVerdict(cfg, {
@@ -801,11 +917,20 @@ function evalRiskKick(
 			performance: ctx.performance.get(p.steamId),
 			now: ctx.ts
 		});
-		if (!verdict) continue;
+		if (verdict) kicks.push({ p, verdict });
+	}
+	const stats = await statsFor(
+		read,
+		kicks.map((k) => ({ steamId: k.p.steamId, text: cfg.reason }))
+	);
+	for (const { p, verdict } of kicks) {
+		// The verdict is staff's (it can quote ban reasons and the watchlist): the player is told
+		// only the rule's reason.
+		const reason = renderTemplate(cfg.reason, vars(ctx, p, statsOf(stats, p.steamId)), MAX_REASON);
 		out.intents.push({
 			trigger: row,
 			action: 'kick',
-			params: { steamId: p.steamId, reason: cfg.reason },
+			params: { steamId: p.steamId, reason },
 			target: p.steamId,
 			okMessage: `Kicked ${p.name}: ${verdict}`,
 			detail: { name: p.name, verdict },
@@ -823,7 +948,13 @@ function evalRiskKick(
 		});
 }
 
-function evalNameFilter(ctx: TickContext, row: TriggerRow, cfg: NameFilterConfig, out: Evaluation) {
+async function evalNameFilter(
+	ctx: TickContext,
+	row: TriggerRow,
+	cfg: NameFilterConfig,
+	out: Evaluation,
+	read: StatsReader
+) {
 	// A name is judged when it is first seen, at the join or later: the clan tag is part of the
 	// name, and the game may only show it once the player is in. A kick rule also judges a player
 	// back after missing a look: a kicked player reconnecting inside the leave grace is no join.
@@ -835,15 +966,24 @@ function evalNameFilter(ctx: TickContext, row: TriggerRow, cfg: NameFilterConfig
 	];
 	let n = 0;
 	let last = '';
-	for (const { player: p, verdict: v } of nameFilterTargets(cfg, named, ctx.reserved)) {
-		const kick = cfg.action === 'kick';
+	const kick = cfg.action === 'kick';
+	const targets = nameFilterTargets(cfg, named, ctx.reserved);
+	const stats = await statsFor(
+		read,
+		kick ? targets.map((t) => ({ steamId: t.player.steamId, text: cfg.reason })) : []
+	);
+	for (const { player: p, verdict: v } of targets) {
 		out.intents.push({
 			trigger: row,
 			action: kick ? 'kick' : NAME_FLAG,
 			params: kick
 				? {
 						steamId: p.steamId,
-						reason: renderTemplate(cfg.reason, { ...vars(ctx, p), why: v.why }, MAX_REASON)
+						reason: renderTemplate(
+							cfg.reason,
+							vars(ctx, p, statsOf(stats, p.steamId), { why: v.why }),
+							MAX_REASON
+						)
 					}
 				: {},
 			target: p.steamId,
@@ -865,7 +1005,13 @@ function evalNameFilter(ctx: TickContext, row: TriggerRow, cfg: NameFilterConfig
 	}
 }
 
-function evalPingKick(ctx: TickContext, row: TriggerRow, cfg: PingKickConfig, out: Evaluation) {
+async function evalPingKick(
+	ctx: TickContext,
+	row: TriggerRow,
+	cfg: PingKickConfig,
+	out: Evaluation,
+	read: StatsReader
+) {
 	if (!ctx.playersObserved) return;
 	const previous = row.state as PingKickState | null;
 	const { state, kicks } = pingKickStep(
@@ -884,14 +1030,19 @@ function evalPingKick(ctx: TickContext, row: TriggerRow, cfg: PingKickConfig, ou
 	)
 		out.updates.push({ id: row.id, state });
 	const kicked = new Set(kicks);
+	const stats = await statsFor(
+		read,
+		kicks.map((steamId) => ({ steamId, text: cfg.reason }))
+	);
 	for (const p of ctx.players) {
 		if (!kicked.has(p.steamId)) continue;
 		const steamId = p.steamId;
 		const verdict = `ping ${p.ping} ms above ${cfg.maxPingMs} ms for ${cfg.durationSeconds} s`;
+		const reason = renderTemplate(cfg.reason, vars(ctx, p, statsOf(stats, steamId)), MAX_REASON);
 		out.intents.push({
 			trigger: row,
 			action: 'kick',
-			params: { steamId, reason: cfg.reason },
+			params: { steamId, reason },
 			target: steamId,
 			okMessage: `Kicked ${p.name}: ${verdict}`,
 			detail: { name: p.name, pingMs: p.ping, verdict },
@@ -987,7 +1138,13 @@ export function twoTeamsMoveVerdict(row: {
 	return 'send';
 }
 
-function evalTwoTeams(ctx: TickContext, row: TriggerRow, cfg: TwoTeamsConfig, out: Evaluation) {
+async function evalTwoTeams(
+	ctx: TickContext,
+	row: TriggerRow,
+	cfg: TwoTeamsConfig,
+	out: Evaluation,
+	read: StatsReader
+) {
 	const now = ctx.ts.getTime();
 	// The same fingerprint rides on every move and whisper, for delivery to check against.
 	const config = twoTeamsSettingsKey(cfg);
@@ -1074,6 +1231,10 @@ function evalTwoTeams(ctx: TickContext, row: TriggerRow, cfg: TwoTeamsConfig, ou
 			...(cfg.watchOnly ? { watchOnly: `Watch only: would move ${moved}.` } : {})
 		});
 	}
+	const stats = await statsFor(
+		read,
+		step.whispers.map((w) => ({ steamId: w.steamId, text: cfg.message }))
+	);
 	for (const w of step.whispers)
 		out.intents.push({
 			trigger: row,
@@ -1083,13 +1244,20 @@ function evalTwoTeams(ctx: TickContext, row: TriggerRow, cfg: TwoTeamsConfig, ou
 				rule: config,
 				message: renderTemplate(
 					cfg.message,
-					{
-						...vars(
-							ctx,
-							ctx.players.find((p) => p.steamId === w.steamId)
-						),
-						team: teamName(cfg, w.faction)
-					},
+					vars(
+						ctx,
+						ctx.players.find((p) => p.steamId === w.steamId) ?? {
+							name: w.name,
+							steamId: w.steamId,
+							faction: w.faction,
+							kills: 0,
+							deaths: 0,
+							cash: 0,
+							ping: null
+						},
+						statsOf(stats, w.steamId),
+						{ team: teamName(cfg, w.faction) }
+					),
 					MAX_CHAT
 				)
 			},
@@ -1129,11 +1297,7 @@ function evalRestartNotice(
 	if (!hit) return;
 	const message = renderTemplate(
 		hit.stage === 'lead' ? cfg.leadMessage : cfg.message,
-		{
-			...vars(ctx),
-			minutes: hit.minutes,
-			uptime: fmtUptime(ctx.ts.getTime() - ctx.startedAt)
-		},
+		vars(ctx, null, {}, { minutes: hit.minutes }),
 		MAX_CHAT
 	);
 	out.intents.push({
@@ -1201,7 +1365,7 @@ function evalAfkProtection(
 	else if (step.state.on && (!prev || step.rearmed))
 		update.lastResult = `On while fewer than ${goal} are on and no side has scored.`;
 	const rule = afkSettingsKey(cfg);
-	const say = (text: string) => renderTemplate(text, { ...vars(ctx), goal }, MAX_CHAT);
+	const say = (text: string) => renderTemplate(text, vars(ctx, null, {}, { goal }), MAX_CHAT);
 	if (step.round) {
 		const listed = ctx.players
 			.filter((p) => /^\d{17}$/.test(p.steamId))
@@ -1326,7 +1490,8 @@ async function evalSeedReward(
 	ctx: TickContext,
 	row: TriggerRow,
 	cfg: SeedRewardConfig,
-	out: Evaluation
+	out: Evaluation,
+	read: StatsReader
 ) {
 	// Not before the reserved list is known: a player reserved on this server alone must not be
 	// handed an org-wide entry because the worker has not read the list yet.
@@ -1366,12 +1531,19 @@ async function evalSeedReward(
 	const earlier = new Map(closed.map((r) => [r.steamId, r.seconds]));
 	// The whisper names this date; the entry's own expiry is set when the grant is delivered.
 	const expiresAt = new Date(now + cfg.slotDays * 86400_000);
+	const earned = candidates
+		.map((p) => ({
+			p,
+			seconds: (earlier.get(p.steamId) ?? 0) + Math.floor((ctx.seedMs.get(p.steamId) ?? 0) / 1000)
+		}))
+		.filter((e) => e.seconds >= cfg.minutes * 60);
+	const stats = await statsFor(
+		read,
+		cfg.message ? earned.map((e) => ({ steamId: e.p.steamId, text: cfg.message })) : []
+	);
 	let n = 0;
 	let last = '';
-	for (const p of candidates) {
-		const seconds =
-			(earlier.get(p.steamId) ?? 0) + Math.floor((ctx.seedMs.get(p.steamId) ?? 0) / 1000);
-		if (seconds < cfg.minutes * 60) continue;
+	for (const { p, seconds } of earned) {
 		const minutes = Math.floor(seconds / 60);
 		const reason = `Seeded ${ctx.server.name}: ${minutes} min with ${cfg.lowAt} or fewer on`;
 		out.intents.push({
@@ -1394,12 +1566,11 @@ async function evalSeedReward(
 		if (cfg.message) {
 			const message = renderTemplate(
 				cfg.message,
-				{
-					...vars(ctx, p),
+				vars(ctx, p, statsOf(stats, p.steamId), {
 					minutes,
 					until: dateOf(expiresAt),
 					days: cfg.slotDays
-				},
+				}),
 				MAX_CHAT
 			);
 			out.intents.push({
@@ -1478,24 +1649,26 @@ export interface CaughtKill {
 
 /**
  * What a Kill distance rule does about a player it caught: the outbox row's action and texts, and
- * the line its dry run shows. The live rule (feed-events.ts) and the dry run both build it here.
+ * the line its dry run shows. The live rule (feed-events.ts) and the dry run both build it here,
+ * the reason from the placeholders the caller has for the killer (`vars`) and the kill's own; a
+ * ban's reason is kept on the ban list where staff read it, so the player's org-wide stats are no
+ * placeholders in it, kick or ban (keptVars).
  * A ban stands whether or not the player is still on by the time it is delivered; a kick does not.
  */
 export function killDistanceAct(
 	cfg: KillDistanceConfig,
 	k: CaughtKill,
 	count: number,
-	server: string
+	vars: MessageVars
 ): Omit<Intent, 'trigger' | 'dedupeKey' | 'target'> & { pending: string; line: string } {
 	const verdict = killDistanceVerdict(cfg, k.cause, k.distanceM, count);
 	const reason = renderTemplate(
 		cfg.reason,
 		{
-			name: k.name,
+			...keptVars(vars),
 			weapon: causeLabel(k.cause),
 			distance: Math.round(k.distanceM),
-			count,
-			server
+			count
 		},
 		MAX_REASON
 	);
@@ -1624,7 +1797,7 @@ export async function dryRun(
 			if (c.onlyFirstVisit && !j.first) continue;
 			push(
 				new Date(j.joinedAt),
-				`whisper ${j.name}: ${renderTemplate(c.message, { name: j.name, server: server.name, map: '…', players: '…', max: '…' }, MAX_CHAT)}`
+				`whisper ${j.name}: ${renderTemplate(c.message, dryRunVars(server.name, { name: j.name, steamId: j.steamId }), MAX_CHAT)}`
 			);
 		}
 		result.notes.push(
@@ -1742,11 +1915,12 @@ export async function dryRun(
 			killerName: string;
 			killerSteamId: string;
 			victimName: string;
+			map: string | null;
 			cause: string | null;
 			n: string | null;
 		}>(sql`
 			SELECT k.ts, k.killer_name AS "killerName", k.killer_steam_id AS "killerSteamId",
-			       k.victim_name AS "victimName", k.cause,
+			       k.victim_name AS "victimName", k.map, k.cause,
 			       CASE WHEN ${counts(sql`k.cause`)} THEN
 			       (SELECT COUNT(*) FROM kills k2
 			         WHERE k2.server_id = k.server_id AND k2.killer_steam_id = k.killer_steam_id
@@ -1770,12 +1944,11 @@ export async function dryRun(
 			counted++;
 			const stage = teamKillStage(c, Number(r.n));
 			if (!stage) continue;
-			const v = {
-				name: r.killerName,
-				victim: r.victimName,
-				count: Number(r.n),
-				server: server.name
-			};
+			const v = dryRunVars(
+				server.name,
+				{ name: r.killerName, steamId: r.killerSteamId },
+				{ victim: r.victimName, count: Number(r.n), ...(r.map ? { map: mapName(r.map) } : {}) }
+			);
 			push(
 				new Date(r.ts),
 				stage === 'kick'
@@ -1909,7 +2082,7 @@ export async function dryRun(
 		}
 		for (const f of killDistanceReplay(c, counted))
 			if (f.at >= from.getTime())
-				push(new Date(f.at), killDistanceAct(c, f, f.count, server.name).line);
+				push(new Date(f.at), killDistanceAct(c, f, f.count, dryRunVars(server.name, f)).line);
 		const [feed] = await env.db
 			.select({ configured: sql<boolean>`feed_token_hash IS NOT NULL` })
 			.from(servers)
@@ -1945,13 +2118,10 @@ export async function dryRun(
 			return result;
 		}
 		const dueAt = new Date(live.startedAt.getTime() + RESTART_AFTER_HOURS * 3600_000);
-		const v = {
-			server: server.name,
-			map: '…',
+		const v = dryRunVars(server.name, null, {
 			players: live.players,
-			max: '…',
 			uptime: fmtUptime(w.upMs)
-		};
+		});
 		if (c.leadMinutes) {
 			const leadAt = new Date(dueAt.getTime() - c.leadMinutes * 60_000);
 			push(
@@ -2144,15 +2314,17 @@ export async function dryRun(
 			held = step.held;
 			if (!step.fire) continue;
 			// The samples hold no player lines, so the dry run cannot name anyone.
-			for (const { message } of matchBroadcastMessages(c, step.fire.end, r.count, {
-				server: server.name,
-				map: r.map,
-				players: r.count,
-				max: '…',
-				cap: DEFAULT_SCORE_CAP,
-				mvp: '…',
-				top: '…'
-			}))
+			for (const { message } of matchBroadcastMessages(
+				c,
+				step.fire.end,
+				r.count,
+				dryRunVars(server.name, null, {
+					...(r.map ? { map: mapName(r.map) } : {}),
+					players: r.count,
+					cap: DEFAULT_SCORE_CAP
+				}),
+				null
+			))
 				push(new Date(r.ts), `broadcast (${r.count} on): ${message}`);
 		}
 		result.notes.push(
@@ -2170,7 +2342,16 @@ export async function dryRun(
 			if (!r.ok || !broadcastWanted(c, r.count ?? 0)) continue;
 			if (last && r.ts.getTime() - last.getTime() < c.everyMinutes * 60_000) continue;
 			last = r.ts;
-			push(r.ts, `broadcast (${r.count} on): ${c.messages[index++ % c.messages.length]}`);
+			const message = renderTemplate(
+				c.messages[index++ % c.messages.length],
+				dryRunVars(server.name, null, {
+					...(r.map ? { map: mapName(r.map) } : {}),
+					players: r.count ?? 0,
+					...(r.max ? { max: r.max } : {})
+				}),
+				MAX_CHAT
+			);
+			push(r.ts, `broadcast (${r.count} on): ${message}`);
 		}
 		return result;
 	}

@@ -509,7 +509,12 @@ async function deliverOne(env: Env, row: OutboxRow): Promise<'held' | 'refused' 
 			},
 			settings().outboxLeaseMs
 		);
-		await finish(env, row, 'delivered', messageOf(result) || row.okMessage);
+		await finish(
+			env,
+			row,
+			'delivered',
+			(!OWN_WORDS.has(row.action) && messageOf(result)) || row.okMessage
+		);
 		// Done, but a later step was refused for sending too fast (changeTeam's kill): hold the rest.
 		const wait = retryAfterOf(result);
 		if (wait) {
@@ -531,11 +536,12 @@ async function deliverOne(env: Env, row: OutboxRow): Promise<'held' | 'refused' 
 		if (err instanceof GameError && err.code === 'rate_limited') {
 			const until = Date.now() + (err.retryAfterMs || WAIT_MS);
 			held.set(row.serverId, Math.max(held.get(row.serverId) ?? 0, until));
-			await finish(env, row, 'failed', err.message);
+			await finish(env, row, 'failed', OWN_WORDS.has(row.action) ? refusal(err) : err.message);
 			return 'refused';
 		}
 		if (err instanceof GameError && err.code === 'unreachable')
 			await finish(env, row, 'unknown', `No answer from the server (${err.message})`);
+		else if (OWN_WORDS.has(row.action)) await finish(env, row, 'failed', refusal(err));
 		else if (err instanceof GameError || err instanceof ApiError)
 			await finish(env, row, 'failed', err.message);
 		else await finish(env, row, 'failed', err instanceof Error ? err.message : String(err));
@@ -731,6 +737,26 @@ const retryAfterOf = (r: unknown): number =>
 	r && typeof r === 'object' && typeof (r as { retryAfterMs?: unknown }).retryAfterMs === 'number'
 		? (r as { retryAfterMs: number }).retryAfterMs
 		: 0;
+
+/**
+ * A rule's whisper or kick carries what it tells one player, their stats across the organisation
+ * among it: what became of it is told in the panel's own words, never the game's, which staff of
+ * this server read (Recent actions, the audit trail, Discord) and which might repeat the text.
+ */
+const OWN_WORDS = new Set(['whisper', 'kick']);
+
+/** Why the game refused a whisper or kick, as a fixed phrase: its status and its code. */
+function refusal(err: unknown): string {
+	if (!(err instanceof GameError)) {
+		// the panel's own refusal says why in its own words; anything else is logged, not shown
+		if (err instanceof ApiError) return err.message;
+		console.warn('[warcon] a rule message was not sent:', forLog(err));
+		return 'Not sent: the panel could not send it.';
+	}
+	if (err.code === 'rate_limited') return 'Refused: the server asked the panel to slow down.';
+	if (err.code === 'player_not_found') return 'Refused: the player is not on the server.';
+	return `Refused by the server (${err.status}${/^[a-z_]{1,40}$/.test(err.code) ? `, ${err.code}` : ''}).`;
+}
 
 const messageOf = (r: unknown): string =>
 	r && typeof r === 'object' && typeof (r as { message?: unknown }).message === 'string'

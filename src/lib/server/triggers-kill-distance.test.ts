@@ -4,6 +4,7 @@ import { describe, expect, test } from 'bun:test';
 import { killDistanceAct, ruleNeeds, validateConfig } from './triggers';
 import { KILL_DISTANCE_FLAG, type KillDistanceConfig } from './kill-distance';
 import { PANEL_BAN } from './rule-ban';
+import { messageVars } from './message-vars';
 
 const DEFIB = 'Id.Item.Defibrillator.Standard';
 const A = '76561198000000001';
@@ -46,8 +47,12 @@ describe('ruleNeeds for a Kill distance rule', () => {
 
 describe('killDistanceAct', () => {
 	const caught = { steamId: A, name: '[ABC] Night Owl', cause: DEFIB, distanceM: 4057.2 };
+	const vars = messageVars(
+		{ server: 'Example #1' },
+		{ name: caught.name, steamId: A, faction: null }
+	);
 	test('a flag sends nothing to the game', () => {
-		const a = killDistanceAct(rule({ action: 'flag' }), caught, 2, 'Example #1');
+		const a = killDistanceAct(rule({ action: 'flag' }), caught, 2, vars);
 		expect(a).toMatchObject({
 			action: KILL_DISTANCE_FLAG,
 			params: {},
@@ -64,7 +69,7 @@ describe('killDistanceAct', () => {
 			}),
 			caught,
 			1,
-			'Example #1'
+			vars
 		);
 		expect(a).toMatchObject({
 			action: 'kick',
@@ -77,7 +82,7 @@ describe('killDistanceAct', () => {
 		});
 	});
 	test('a ban names its list and length, and stands whether or not the player is still on', () => {
-		const here = killDistanceAct(rule({ action: 'ban' }), caught, 2, 'Example #1');
+		const here = killDistanceAct(rule({ action: 'ban' }), caught, 2, vars);
 		expect(here).toMatchObject({
 			action: PANEL_BAN,
 			params: {
@@ -95,7 +100,7 @@ describe('killDistanceAct', () => {
 			rule({ action: 'ban', banScope: 'org', banDays: 7 }),
 			caught,
 			2,
-			'Example #1'
+			vars
 		);
 		expect(org.params).toMatchObject({ days: 7, scope: 'org' });
 		expect(org.okMessage).toStartWith('Banned [ABC] Night Owl on every server for 7 days:');

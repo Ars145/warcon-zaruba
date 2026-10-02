@@ -215,6 +215,9 @@ check trigger-update '"enabled":false' "$(req $J1 PATCH /api/servers/$SID/trigge
 check trigger-dryrun '"fires"' "$(req $J1 POST /api/servers/$SID/triggers/dry-run '{"kind":"welcome","config":{"message":"hi {name}"}}')"
 check trigger-dryrun-risk 'Steam lookup is off' "$(req $J1 POST /api/servers/$SID/triggers/dry-run '{"kind":"risk_kick","config":{"watchlist":true}}')"
 check trigger-dryrun-broadcast '"kind":"broadcast"' "$(req $J1 POST /api/servers/$SID/triggers/dry-run '{"kind":"broadcast","config":{"messages":["a"],"everyMinutes":1}}')"
+# a dry run fills the player's name ({player} is {name}) and shows … for what it does not replay
+for i in $(seq 1 10); do R=$(req $J1 POST /api/servers/$SID/triggers/dry-run '{"kind":"welcome","config":{"message":"hi {player}: {kills} kills, {org_kills} in all, on {map}"}}'); [[ "$R" == *': … kills, … in all, on …'* ]] && break; sleep 2; done
+check trigger-dryrun-placeholders ': … kills, … in all, on …' "$R"
 R=$(req $J1 POST /api/servers/$SID/triggers '{"kind":"risk_kick","name":"Watch kick","enabled":true,"config":{"watchlist":true,"reason":"watched"}}'); TID2=$(echo "$R" | sed -E 's/.*"id":"([^"]+)".*/\1/')
 R=$(req $J1 POST /api/servers/$SID/triggers '{"kind":"welcome","name":"Hello 2","enabled":true,"config":{"message":"Welcome {name}"}}'); TID3=$(echo "$R" | sed -E 's/.*"id":"([^"]+)".*/\1/')
 check trigger-delete '"ok":true' "$(req $J1 DELETE /api/servers/$SID/triggers/$TID)"
