@@ -7,6 +7,7 @@ import { validateNameFilter, type NameFilterConfig } from './name-filter';
 import { validateKillRate, type KillRateConfig } from './kill-rate';
 import { validateKillDistance, type KillDistanceConfig } from './kill-distance';
 import { validateTwoTeams, type TwoTeamsConfig } from './two-teams';
+import { validateAfkProtection, type AfkProtectionConfig } from './afk-protection';
 import { causeTags } from './cause-tags';
 import { RESTART_AFTER_HOURS, restartWindow } from '$lib/uptime';
 import { MAX_CHAT } from '$lib/chat';
@@ -28,7 +29,8 @@ export const TRIGGER_KINDS: TriggerKind[] = [
 	'name_filter',
 	'kill_rate',
 	'two_teams',
-	'kill_distance'
+	'kill_distance',
+	'afk_protection'
 ];
 export const TRIGGER_LABELS: Record<TriggerKind, string> = {
 	welcome: 'Welcome whisper',
@@ -44,7 +46,8 @@ export const TRIGGER_LABELS: Record<TriggerKind, string> = {
 	name_filter: 'Name filter',
 	kill_rate: 'Kill rate watch',
 	two_teams: 'Team balance',
-	kill_distance: 'Kill distance watch'
+	kill_distance: 'Kill distance watch',
+	afk_protection: 'AFK protection'
 };
 
 export interface WelcomeConfig {
@@ -200,7 +203,8 @@ export type TriggerConfig =
 	| NameFilterConfig
 	| KillRateConfig
 	| TwoTeamsConfig
-	| KillDistanceConfig;
+	| KillDistanceConfig
+	| AfkProtectionConfig;
 
 /** A kick reason: not chat, so not held to the game's chat cap. */
 export const MAX_REASON = 200;
@@ -389,6 +393,8 @@ export function validateConfig(kind: TriggerKind, raw: unknown): TriggerConfig {
 			return validateTwoTeams(c);
 		case 'kill_distance':
 			return validateKillDistance(c);
+		case 'afk_protection':
+			return validateAfkProtection(c);
 	}
 }
 

@@ -8,6 +8,7 @@
 import { createHash } from 'node:crypto';
 import type { GameResponse } from './transport';
 import { rotationFromText } from '../rotation-doc';
+import { getScalar, parseIni } from '../config-doc';
 import {
 	hasReservedKey,
 	reservedFromText,
@@ -134,6 +135,21 @@ const LIVE_BUILD_MISSING = new Set([
 	'PATCH /v1/settings'
 ]);
 const liveBuild = () => /^(1|true|yes)$/i.test(process.env.MOCK_LIVE_BUILD || '');
+// With MOCK_PREMATCH=true a demo match waits at nil-all while fewer are on than the document's
+// MinimumRequiredPlayers (60), as the game's pre-match does, and a new demo server starts there:
+// AFK protection can be watched at work, and lowering the minimum starts the match.
+const prematch = () => /^(1|true|yes)$/i.test(process.env.MOCK_PREMATCH || '');
+const PREMATCH_MINIMUM = 60;
+const prematchMinimum = (text: string): number => {
+	const n = Number(
+		getScalar(
+			parseIni(text),
+			'MatchState.PreMatch.WaitingForPlayers.PlayerCount',
+			'MinimumRequiredPlayers'
+		)
+	);
+	return Number.isInteger(n) && n >= 0 ? n : PREMATCH_MINIMUM;
+};
 const servedRoutes = () =>
 	liveBuild() ? CAPABILITY_ROUTES.filter((r) => !LIVE_BUILD_MISSING.has(r)) : CAPABILITY_ROUTES;
 
@@ -507,6 +523,7 @@ function stateFor(key: string): State {
 	let s = states.get(key);
 	if (!s) {
 		s = seed(`Warcon Demo Server [${key.slice(0, 6)}]`);
+		if (prematch()) for (const f of s.factions) f.score = 0;
 		states.set(key, s);
 	}
 	return s;
@@ -516,9 +533,14 @@ function tick(s: State): void {
 	const now = Date.now();
 	const dt = (now - s.lastScoreAt) / 1000;
 	s.lastScoreAt = now;
-	for (const f of s.factions) {
-		f.score += f.rate * dt * (0.8 + Math.random() * 0.4);
-	}
+	const waiting =
+		prematch() &&
+		s.factions.every((f) => f.score === 0) &&
+		s.players.length < prematchMinimum(s.configText);
+	if (!waiting)
+		for (const f of s.factions) {
+			f.score += f.rate * dt * (0.8 + Math.random() * 0.4);
+		}
 	if (s.factions.some((f) => f.score >= s.scoreCap)) {
 		matchOver(s);
 	}

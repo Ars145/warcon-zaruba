@@ -68,4 +68,16 @@ describe.skipIf(!hasTestDb)('Two-team mode on Discord', () => {
 			.where(and(eq(auditLog.orgId, w.org.id), eq(auditLog.action, 'trigger.two_teams')));
 		expect(kept).toHaveLength(21);
 	});
+
+	test('AFK protection rounds that land stay off Discord too; one that fails is posted', async () => {
+		posts.length = 0;
+		for (let i = 0; i < 10; i++)
+			await delivery('trigger.afk_protection', 'ok', 'Killed 6 of 6 · announced.');
+		await delivery('trigger.afk_protection', 'error', 'The game refused the request.');
+		await new Promise((r) => setTimeout(r, 2000));
+		const titles = posts.flatMap((body) =>
+			(JSON.parse(body) as { embeds: { title: string }[] }).embeds.map((e) => e.title)
+		);
+		expect(titles).toEqual(['Trigger · AFK protection']);
+	});
 });

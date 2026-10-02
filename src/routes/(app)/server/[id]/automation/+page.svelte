@@ -194,6 +194,12 @@
 			blurb: 'Give players who stay while the server is quiet a reserved slot.'
 		},
 		{
+			kind: 'afk_protection',
+			group: 'Players',
+			label: 'AFK protection',
+			blurb: 'Kill everyone every few minutes while the server seeds, so the idle kick spares them.'
+		},
+		{
 			kind: 'empty_reset',
 			group: 'Server',
 			label: 'Empty-server map reset',
@@ -207,7 +213,9 @@
 			? 'flag'
 			: action === 'panel_ban'
 				? 'ban'
-				: action;
+				: action === 'afk_round'
+					? 'kill everyone'
+					: action;
 	const label = (kind: TriggerKind) => KINDS.find((k) => k.kind === kind)?.label ?? kind;
 	const blurb = (kind: TriggerKind) => KINDS.find((k) => k.kind === kind)?.blurb ?? '';
 	/** Why a kind cannot run on this server yet, or '' when it can. */
@@ -407,6 +415,8 @@
 		distanceAction: 'flag' | 'kick' | 'ban';
 		banDays: number;
 		banScope: 'server' | 'org';
+		stopAt: number;
+		doneMessage: string;
 	}
 	/** WARDOGS' factions, offered for Team balance; a name the game adds later can still be typed. */
 	const FACTIONS = ['Lonestar', 'Valkyra', 'Manticore'];
@@ -481,14 +491,16 @@
 							? 'Thanks for seeding {server}, {name}: you have a reserved slot until {until}.'
 							: kind === 'two_teams'
 								? 'You have been placed on {team}.'
-								: 'Welcome to {server}, {name}! Read the rules with /rules.'
+								: kind === 'afk_protection'
+									? 'Seeding: everyone was respawned so the idle kick spares you. {players} of {goal} on.'
+									: 'Welcome to {server}, {name}! Read the rules with /rules.'
 			),
 			onlyFirstVisit: b('onlyFirstVisit', false),
 			afterFaction: b('afterFaction', false),
 			messages: Array.isArray(c.messages)
 				? (c.messages as string[]).join('\n')
 				: 'Join our Discord for events and support.\nNo team-killing. Admins are watching.',
-			everyMinutes: n('everyMinutes', 15),
+			everyMinutes: n('everyMinutes', kind === 'afk_protection' ? 3 : 15),
 			minPlayers: n('minPlayers', 1),
 			maxPlayers: typeof c.maxPlayers === 'number' ? c.maxPlayers : null,
 			afterMinutes: n('afterMinutes', 20),
@@ -572,7 +584,9 @@
 						: 'ban',
 			banDays: n('banDays', 0),
 			// a new rule bans where its author may: this server's list first
-			banScope: c.banScope === 'org' ? 'org' : t || canBanHere || !canBanOrg ? 'server' : 'org'
+			banScope: c.banScope === 'org' ? 'org' : t || canBanHere || !canBanOrg ? 'server' : 'org',
+			stopAt: n('stopAt', 20),
+			doneMessage: s('doneMessage', 'Thanks for seeding {server}! The match is live.')
 		};
 		dry = null;
 		pendingSel =
@@ -710,6 +724,13 @@
 					clans: f.clans,
 					exempt: f.exempt.split(/[\s,]+/).filter(Boolean),
 					watchOnly: f.watchOnly
+				};
+			case 'afk_protection':
+				return {
+					everyMinutes: Number(f.everyMinutes),
+					stopAt: Number(f.stopAt),
+					message: f.message,
+					doneMessage: f.doneMessage
 				};
 			case 'seed_reward':
 				return {
@@ -919,6 +940,8 @@
 					.filter(Boolean)
 					.join(' · ');
 			}
+			case 'afk_protection':
+				return `kill everyone every ${c.everyMinutes} min while fewer than ${c.stopAt} are on and no side has scored · then off until the server empties or restarts${c.message ? ' · with a broadcast' : ''}${c.doneMessage ? ' · thanks at the start' : ''}`;
 			case 'seed_reward':
 				return `${c.minutes} min with ${c.lowAt} or fewer on${c.untilFull === false ? '' : `, staying until ${typeof c.fullAt === 'number' ? `${c.fullAt}+ on` : 'it fills'}`}, within ${c.windowDays} day${c.windowDays === 1 ? '' : 's'} · slot ${c.scope === 'server' ? 'here' : 'on every server'} for ${c.slotDays} day${c.slotDays === 1 ? '' : 's'}${c.message ? ' · with a whisper' : ''}`;
 		}
@@ -1057,6 +1080,19 @@
 					<div class="mt-0.5 line-clamp-2 text-[13px] text-mist-400">
 						{describe(t.kind, t.config)}
 					</div>
+					{#if t.kind === 'afk_protection' && t.enabled && t.phase}
+						{@const phase = t.phase}
+						<!-- Where it stands: acting while the server seeds, or off since a match went live. -->
+						<div class="mt-0.5 text-[12px] {phase.on ? 'text-mist-100' : 'text-warn'}">
+							{#if phase.on}
+								Active while fewer than {t.config.stopAt} are on
+							{:else}
+								Paused
+								{#if phase.since}<span title={fmtTime(phase.since)}>{fmtAgo(phase.since, now)}</span
+									>{/if}: {phase.why} · back on once the server empties or restarts
+							{/if}
+						</div>
+					{/if}
 					<!-- One of four shapes, most urgent first: failing, off, fired, never fired. -->
 					<div class="mt-0.5 text-[12px] {h?.failing ? 'text-mist-100' : 'text-mist-600'}">
 						{#if h?.failing}
@@ -2080,6 +2116,48 @@
 					<p class="note">
 						The distance is the kill feed's, between killer and victim. A ban goes on the ban list
 						like one added by hand, and is lifted there.
+					</p>
+				{:else if f.kind === 'afk_protection'}
+					<fieldset class="space-y-2">
+						<legend class="field-label">When</legend>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							Kill everyone every
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="2"
+								max="10"
+								bind:value={f.everyMinutes}
+								aria-label="Every, minutes"
+								required
+							/>
+							min while fewer than
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="2"
+								max="1000"
+								bind:value={f.stopAt}
+								aria-label="Fewer than, players"
+								required
+							/>
+							are on and no side has scored
+						</div>
+					</fieldset>
+					<fieldset class="space-y-2">
+						<legend class="field-label">Broadcast after each round, blank for none</legend>
+						<input class="input" type="text" bind:value={f.message} maxlength={MAX_CHAT} />
+						{@render placeholders(['players', 'goal', 'server', 'map', 'max'])}
+					</fieldset>
+					<fieldset class="space-y-2">
+						<legend class="field-label">Broadcast when the match goes live, blank for none</legend>
+						<input class="input" type="text" bind:value={f.doneMessage} maxlength={MAX_CHAT} />
+						{@render placeholders(['players', 'server', 'map', 'max'])}
+					</fieldset>
+					<p class="note">
+						Everyone on is killed, players included. Off once a side scores or the count is reached,
+						until the server has been empty for 10 minutes or restarts. Switching it off stops the
+						next round.
 					</p>
 				{:else if f.kind === 'seed_reward'}
 					<fieldset class="space-y-1.5 text-[13px]">

@@ -149,6 +149,7 @@ const ACTION_TITLES: Record<string, string> = {
 	'trigger.kill_rate': 'Trigger · kill rate watch',
 	'trigger.two_teams': 'Trigger · two-team mode',
 	'trigger.kill_distance': 'Trigger · kill distance watch',
+	'trigger.afk_protection': 'Trigger · AFK protection',
 	'player.note': 'Player note',
 	'player.watch': 'Watchlist',
 	'list.add': 'Org list · added',
@@ -462,10 +463,11 @@ export async function recordResult(env: Env, id: string, result: PostResult): Pr
 
 /**
  * Rules whose actions come by the hundred as a matter of course: a Team balance sort at every match
- * start. The audit trail keeps each one; Discord hears only of those that fail, so a sort neither
- * floods a staff channel nor pushes another rule's card out of the webhook's queue.
+ * start, an AFK protection round every few minutes while a server seeds. The audit trail keeps each
+ * one; Discord hears only of those that fail, so they neither flood a staff channel nor push another
+ * rule's card out of the webhook's queue.
  */
-const QUIET_WHEN_OK = new Set(['trigger.two_teams']);
+const QUIET_WHEN_OK = new Set(['trigger.two_teams', 'trigger.afk_protection']);
 
 /** Fans one audit row out to the org's webhooks that want its event class. Never throws. */
 export async function notifyWebhooks(env: Env, row: AuditRow): Promise<void> {
