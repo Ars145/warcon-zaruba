@@ -13,8 +13,9 @@
 //                or across the org
 //   two_teams    close one faction and move its players to the smaller of the other two
 //                (two-teams.ts)
-//   kill_distance  flag, kick or ban a player who kills with a chosen weapon from further than it
-//                reaches (kill-distance.ts, acted on in feed-events.ts)
+//   kill_distance  flag, warn, kick or ban a player who kills with a chosen weapon or vehicle, from
+//                further than it reaches or from any distance (kill-distance.ts, acted on in
+//                feed-events.ts)
 //   afk_protection  kill everyone every few minutes while the server seeds, so the game's idle kick
 //                spares the seeders (afk-protection.ts)
 // The worker evaluates them on every observation and writes the actions they want to the outbox
@@ -144,6 +145,7 @@ import {
 	messageVars,
 	NO_STATS,
 	serverVars,
+	UNKNOWN,
 	type MessageVars,
 	type PlayerStats,
 	type StatsBy
@@ -221,8 +223,8 @@ const RULE_NEEDS: Record<
 
 /**
  * What one rule needs of whoever saves it. The Seeding reward reserves slots: here, or on the
- * organisation's list. A Kill distance rule flags, kicks, or bans: here, or on the organisation's
- * ban list.
+ * organisation's list. A Kill distance rule flags, warns, kicks, or bans: here, or on the
+ * organisation's ban list.
  */
 export function ruleNeeds(kind: TriggerKind, config: unknown): [Capability, string] {
 	if (kind === 'seed_reward')
@@ -232,6 +234,7 @@ export function ruleNeeds(kind: TriggerKind, config: unknown): [Capability, stri
 	if (kind === 'kill_distance') {
 		const action = killDistanceAction(config);
 		if (action === 'ban') return banNeeds(killDistanceBanScope(config));
+		if (action === 'warn') return ['chat.send', 'whispers players'];
 		return ['players.kick', action === 'kick' ? 'kicks players' : 'flags players'];
 	}
 	return RULE_NEEDS[kind];
@@ -1644,16 +1647,18 @@ export interface CaughtKill {
 	steamId: string;
 	name: string;
 	cause: string | null;
-	distanceM: number;
+	/** null when the feed sent none */
+	distanceM: number | null;
 }
 
 /**
  * What a Kill distance rule does about a player it caught: the outbox row's action and texts, and
  * the line its dry run shows. The live rule (feed-events.ts) and the dry run both build it here,
- * the reason from the placeholders the caller has for the killer (`vars`) and the kill's own; a
- * ban's reason is kept on the ban list where staff read it, so the player's org-wide stats are no
- * placeholders in it, kick or ban (keptVars).
- * A ban stands whether or not the player is still on by the time it is delivered; a kick does not.
+ * the text the player is told from the placeholders the caller has for the killer (`vars`) and the
+ * kill's own; a ban's reason is kept on the ban list where staff read it, so the player's org-wide
+ * stats are no placeholders in it, warning, kick or ban alike (keptVars).
+ * A ban stands whether or not the player is still on by the time it is delivered; a warning or a
+ * kick does not.
  */
 export function killDistanceAct(
 	cfg: KillDistanceConfig,
@@ -1667,13 +1672,23 @@ export function killDistanceAct(
 		{
 			...keptVars(vars),
 			weapon: causeLabel(k.cause),
-			distance: Math.round(k.distanceM),
+			distance: k.distanceM === null ? UNKNOWN : Math.round(k.distanceM),
 			count
 		},
-		MAX_REASON
+		cfg.action === 'warn' ? MAX_CHAT : MAX_REASON
 	);
 	const detail = { name: k.name, verdict, cause: k.cause, distanceM: k.distanceM, count };
 	const who = `${k.name} (${k.steamId})`;
+	if (cfg.action === 'warn')
+		return {
+			action: 'whisper',
+			params: { steamId: k.steamId, message: reason },
+			okMessage: `Warned ${k.name}: ${verdict}`,
+			detail,
+			steamId: k.steamId,
+			pending: `Warning ${k.name}: ${verdict}`,
+			line: `warn ${who}: ${verdict}`
+		};
 	if (cfg.action === 'kick')
 		return {
 			action: 'kick',
@@ -2050,24 +2065,26 @@ export async function dryRun(
 				from.getTime() - 6 * 3600_000
 			)
 		);
+		// from 0 m a kill without a distance counts too
+		const far = c.minDistanceM > 0 ? sql`AND distance_m >= ${c.minDistanceM}` : sql``;
 		const rows = await env.db.execute<{
 			ts: Date;
 			steamId: string;
 			name: string | null;
 			cause: string | null;
-			distanceM: number;
+			distanceM: number | null;
 			matchRow: number | null;
 		}>(sql`
 			SELECT ts, killer_steam_id AS "steamId", killer_name AS name, cause,
 			       distance_m AS "distanceM", match_row AS "matchRow"
 			  FROM kills
 			 WHERE server_id = ${server.id} AND ts >= ${since}
-			   AND killer_steam_id IS NOT NULL AND NOT suicide AND distance_m >= ${c.minDistanceM}
+			   AND killer_steam_id IS NOT NULL AND NOT suicide ${far}
 			   AND lower(cause) IN (SELECT jsonb_array_elements_text(${JSON.stringify(c.causes.map((x) => x.toLowerCase()))}::text::jsonb))
 			 ORDER BY ts ASC, event_time ASC LIMIT ${KILL_RATE_REPLAY_MAX}`);
 		const counted: DistanceKill[] = [];
 		for (const r of rows) {
-			const distanceM = Number(r.distanceM);
+			const distanceM = r.distanceM === null ? null : Number(r.distanceM);
 			if (!countsForDistance(c, { killer: r.steamId, suicide: false, cause: r.cause, distanceM }))
 				continue;
 			const at = new Date(r.ts).getTime();
@@ -2093,7 +2110,7 @@ export async function dryRun(
 			);
 		const inWindow = counted.filter((k) => k.at >= from.getTime()).length;
 		result.notes.push(
-			`${inWindow} kill${inWindow === 1 ? '' : 's'} with ${c.causes.length === 1 ? causeLabel(c.causes[0]) : 'the chosen weapons'} from ${c.minDistanceM} m or more in the window, counted per match.`
+			`${inWindow} kill${inWindow === 1 ? '' : 's'} with ${c.causes.length === 1 ? causeLabel(c.causes[0]) : 'the chosen weapons'} ${c.minDistanceM > 0 ? `from ${c.minDistanceM} m or more` : 'at any distance'} in the window, counted per match.`
 		);
 		if (rows.length >= KILL_RATE_REPLAY_MAX)
 			result.notes.push(

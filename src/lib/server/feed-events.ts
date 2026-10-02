@@ -253,7 +253,8 @@ async function actOnKillDistance(
 			acted.push({ track: entry.tracks.get(steamId)!, before });
 			caught.push({ k, steamId, count });
 		}
-		// a flag has no reason; a ban's is kept where staff read it, so no org-wide stats either way
+		// a flag tells the player nothing; the rule's one text can be a ban reason, kept where staff
+		// read it, so it has no org-wide stats whatever the action
 		const stats = await vars.stats(
 			cfg.action === 'flag' ? [] : caught.map((c) => ({ steamId: c.steamId, text: cfg.reason })),
 			{ org: false }
@@ -262,7 +263,7 @@ async function actOnKillDistance(
 			const name = k.killer!.name || steamId;
 			const act = killDistanceAct(
 				cfg,
-				{ steamId, name, cause: k.cause, distanceM: k.distanceM! },
+				{ steamId, name, cause: k.cause, distanceM: k.distanceM },
 				count,
 				vars.of(k, stats, k.map ? { map: mapName(k.map) } : {})
 			);
