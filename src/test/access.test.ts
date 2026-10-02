@@ -966,6 +966,44 @@ describe.skipIf(!hasTestDb)('access', () => {
 			}
 		});
 
+		test('a rule that tells players their stats is saved only by those who read them: View', async () => {
+			// Stats are the leaderboard's, a View read. Every role holds View, and a key without it
+			// does not reach the server at all, so saving such a rule asks for nothing more.
+			const w = await seedWorld(env);
+			const params = { id: w.server.id };
+			const { id: keyId } = await resolveBearer(env, w.tokens.keyView);
+			/** the world with its View key holding these capabilities instead */
+			const keyWith = async (capabilities: string[]) => {
+				await env.db.update(apiKeys).set({ capabilities }).where(eq(apiKeys.id, keyId));
+				const key = keyUser(await resolveBearer(env, w.tokens.keyView));
+				return { ...w, users: { ...w.users, keyView: key } };
+			};
+			const stats = { message: 'Welcome {player}: {kills} kills here, K/D {KDR}' };
+			const save = (v: World, who: PrincipalName) =>
+				api(v, who, 'POST api/servers/[id]/triggers', {
+					params,
+					body: { kind: 'welcome', config: stats }
+				});
+			const dryRun = (v: World, who: PrincipalName) =>
+				api(v, who, 'POST api/servers/[id]/triggers/dry-run', {
+					params,
+					body: { kind: 'welcome', config: stats }
+				});
+
+			const noView = await keyWith(['automation.manage', 'chat.send']);
+			expect((await save(noView, 'keyView')).status).toBe(404);
+			expect((await dryRun(noView, 'keyView')).status).toBe(404);
+			const withView = await keyWith(['server.view', 'automation.manage', 'chat.send']);
+			expect((await dryRun(withView, 'keyView')).status).toBe(200);
+			expect((await save(withView, 'keyView')).status).toBe(201);
+			await env.db
+				.update(orgRoles)
+				.set({ capabilities: ['server.view', 'automation.manage', 'chat.send'] })
+				.where(eq(orgRoles.id, w.roles.viewer));
+			expect((await dryRun(w, 'viewer')).status).toBe(200);
+			expect((await save(w, 'viewer')).status).toBe(201);
+		});
+
 		test('two Team balance rules saved at once for one server: one of them is refused', async () => {
 			const w = await seedWorld(env);
 			const save = (closedFaction: string) =>

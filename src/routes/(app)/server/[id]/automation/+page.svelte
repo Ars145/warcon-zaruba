@@ -5,6 +5,7 @@
 	import { fmtAgo, fmtSpan, fmtTime, mapLabel } from '$lib/format';
 	import { can } from '$lib/capabilities';
 	import { causeKind, causeLabel, knownCauses, TEAM_KILL_NOT_COUNTED } from '$lib/causes';
+	import { placeholdersFor, unfilled, type PlaceholderGroupKey } from '$lib/placeholders';
 	import { isSteamId } from '$lib/steam-profiles';
 	import { toast } from '$lib/toast.svelte';
 	import { confirmDialog } from '$lib/confirm.svelte';
@@ -440,6 +441,13 @@
 	 */
 	let formEl = $state<HTMLFormElement>();
 	let lastField: HTMLInputElement | HTMLTextAreaElement | null = null;
+	const GROUP_LABELS: Record<PlaceholderGroupKey, string> = {
+		own: 'Rule',
+		player: 'Player',
+		stats: 'Here',
+		org: 'Org',
+		server: 'Server'
+	};
 	const isText = (el: unknown): el is HTMLInputElement | HTMLTextAreaElement =>
 		el instanceof HTMLTextAreaElement || (el instanceof HTMLInputElement && el.type === 'text');
 	function insert(token: string) {
@@ -447,7 +455,7 @@
 			lastField?.isConnected && !lastField.disabled
 				? lastField
 				: formEl?.querySelector<HTMLInputElement | HTMLTextAreaElement>(
-						'textarea:not([disabled]):not([data-plain]), input[type=text]:not([disabled]):not([name=name])'
+						'textarea:not([disabled]):not([data-plain]), input[type=text]:not([disabled]):not([name=name]):not([data-plain])'
 					);
 		if (!el) return;
 		const at = el.selectionStart ?? el.value.length;
@@ -1175,17 +1183,27 @@
 	{/each}
 </div>
 
-{#snippet placeholders(names: string[])}
-	<div class="flex flex-wrap items-center gap-1 text-[12px] text-mist-600">
-		<span class="mr-1">Insert</span>
-		{#each names as n (n)}
-			<button
-				type="button"
-				class="chip cursor-pointer text-mist-100 transition hover:bg-white/12"
-				title="Insert {'{' + n + '}'} at the caret"
-				onclick={() => insert(n)}>{'{' + n + '}'}</button
-			>
+{#snippet placeholders(kind: TriggerKind, texts: string[])}
+	{@const odd = unfilled(texts, kind)}
+	<div class="space-y-1 text-[12px] text-mist-600">
+		{#each placeholdersFor(kind) as g (g.key)}
+			<div class="flex items-baseline gap-1">
+				<span class="w-16 shrink-0">{GROUP_LABELS[g.key]}</span>
+				<div class="flex flex-wrap gap-1">
+					{#each g.names as n (n)}
+						<button
+							type="button"
+							class="chip cursor-pointer text-mist-100 transition hover:bg-white/12"
+							title="Insert {'{' + n + '}'} at the caret"
+							onclick={() => insert(n)}>{'{' + n + '}'}</button
+						>
+					{/each}
+				</div>
+			</div>
 		{/each}
+		{#if odd.length}
+			<p class="text-warn">Not filled here: {odd.join(' ')}</p>
+		{/if}
 	</div>
 {/snippet}
 
@@ -1282,7 +1300,7 @@
 					<fieldset class="space-y-2">
 						<legend class="field-label">Whisper</legend>
 						<input class="input" type="text" bind:value={f.message} maxlength={MAX_CHAT} required />
-						{@render placeholders(['name', 'faction', 'server', 'map', 'players', 'max'])}
+						{@render placeholders('welcome', [f.message])}
 					</fieldset>
 					<fieldset class="space-y-1.5 text-[13px]">
 						<legend class="field-label">When</legend>
@@ -1300,15 +1318,7 @@
 					<fieldset class="space-y-2">
 						<legend class="field-label">Whisper</legend>
 						<input class="input" type="text" bind:value={f.message} maxlength={MAX_CHAT} required />
-						{@render placeholders([
-							'name',
-							'faction',
-							'previous',
-							'server',
-							'map',
-							'players',
-							'max'
-						])}
+						{@render placeholders('faction_change', [f.message])}
 					</fieldset>
 					<p class="note">
 						Fires when a player moves from one faction to another, not on their first pick after
@@ -1318,7 +1328,7 @@
 					<fieldset class="space-y-2">
 						<legend class="field-label">Messages, one per line, sent in turn</legend>
 						<textarea class="min-h-[100px] input" bind:value={f.messages} required></textarea>
-						{@render placeholders(['server', 'map', 'players', 'max'])}
+						{@render placeholders('broadcast', [f.messages])}
 					</fieldset>
 					<fieldset class="space-y-2">
 						<legend class="field-label">When</legend>
@@ -1455,7 +1465,7 @@
 							players on
 						</div>
 					</fieldset>
-					{@render placeholders(['minutes', 'uptime', 'server', 'map', 'players', 'max'])}
+					{@render placeholders('restart_notice', [f.leadMessage, f.message])}
 					<p class="note">
 						The game restarts 24 hours after it started, once the round then in progress ends.
 					</p>
@@ -1470,18 +1480,6 @@
 							aria-label="Message when a match ends"
 							placeholder="Leave empty to say nothing"
 						/>
-						{@render placeholders([
-							'faction',
-							'score',
-							'scores',
-							'cap',
-							'previous',
-							'mvp',
-							'top',
-							'map',
-							'server',
-							'players'
-						])}
 					</fieldset>
 					<fieldset class="space-y-2">
 						<legend class="field-label">As the next one starts</legend>
@@ -1493,8 +1491,8 @@
 							aria-label="Message as the next match starts"
 							placeholder="Leave empty to say nothing"
 						/>
-						{@render placeholders(['map', 'previous', 'server', 'players', 'max'])}
 					</fieldset>
+					{@render placeholders('match_broadcast', [f.endMessage, f.startMessage])}
 					<fieldset class="space-y-2">
 						<legend class="field-label">Only with at least</legend>
 						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
@@ -1603,6 +1601,7 @@
 					<fieldset class="space-y-2">
 						<legend class="field-label">Kick reason, shown to the player</legend>
 						<input class="input" type="text" bind:value={f.reason} maxlength="200" />
+						{@render placeholders('risk_kick', [f.reason])}
 					</fieldset>
 					<p class="note">Kicks land in the audit trail with the rule that matched.</p>
 				{:else if f.kind === 'name_filter'}
@@ -1704,7 +1703,7 @@
 						<fieldset class="space-y-2">
 							<legend class="field-label">Kick reason, shown to the player</legend>
 							<input class="input" type="text" bind:value={f.reason} maxlength="200" />
-							{@render placeholders(['why', 'name', 'server'])}
+							{@render placeholders('name_filter', [f.reason])}
 							<p class="text-[12px] text-mist-600">
 								{'{why}'} names the kind of fault ("it uses characters outside the Latin alphabet"), never
 								the word.
@@ -1744,6 +1743,7 @@
 					<fieldset class="space-y-2">
 						<legend class="field-label">Kick reason, shown to the player</legend>
 						<input class="input" type="text" bind:value={f.reason} maxlength="200" />
+						{@render placeholders('ping_kick', [f.reason])}
 					</fieldset>
 					<p class="note">
 						The timer starts on the first high-ping sample. It resets when ping drops to the limit
@@ -1837,7 +1837,7 @@
 					<fieldset class="space-y-2">
 						<legend class="field-label">Whisper once a player is placed (optional)</legend>
 						<input class="input" type="text" bind:value={f.message} maxlength={MAX_CHAT} />
-						{@render placeholders(['team', 'name', 'server', 'map'])}
+						{@render placeholders('two_teams', [f.message])}
 						<p class="text-[12px] text-mist-600">
 							Sent once per player; they are told again only after two hours away. Empty sends
 							nothing.
@@ -1877,7 +1877,6 @@
 							aria-label="Whisper"
 							disabled={!Number(f.warnAt)}
 						/>
-						{@render placeholders(['name', 'victim', 'count', 'server', 'map'])}
 					</fieldset>
 					<fieldset class="space-y-2">
 						<legend class="field-label">Kick</legend>
@@ -1902,6 +1901,7 @@
 							disabled={!Number(f.kickAt)}
 						/>
 					</fieldset>
+					{@render placeholders('team_kill', [f.warnMessage, f.kickReason])}
 					<fieldset class="space-y-1.5 text-[13px]">
 						<legend class="field-label">Not counted</legend>
 						<div class="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-3">
@@ -2110,7 +2110,7 @@
 								>{f.distanceAction === 'ban' ? 'Ban reason' : 'Kick reason'}, shown to the player</legend
 							>
 							<input class="input" type="text" bind:value={f.reason} maxlength="200" />
-							{@render placeholders(['weapon', 'distance', 'count', 'name', 'server'])}
+							{@render placeholders('kill_distance', [f.reason])}
 						</fieldset>
 					{/if}
 					<p class="note">
@@ -2147,13 +2147,12 @@
 					<fieldset class="space-y-2">
 						<legend class="field-label">Broadcast after each round, blank for none</legend>
 						<input class="input" type="text" bind:value={f.message} maxlength={MAX_CHAT} />
-						{@render placeholders(['players', 'goal', 'server', 'map', 'max'])}
 					</fieldset>
 					<fieldset class="space-y-2">
 						<legend class="field-label">Broadcast when the match goes live, blank for none</legend>
 						<input class="input" type="text" bind:value={f.doneMessage} maxlength={MAX_CHAT} />
-						{@render placeholders(['players', 'server', 'map', 'max'])}
 					</fieldset>
+					{@render placeholders('afk_protection', [f.message, f.doneMessage])}
 					<p class="note">
 						Everyone on is killed, players included. Off once a side scores or the count is reached,
 						until the server has been empty for 10 minutes or restarts. Switching it off stops the
@@ -2248,7 +2247,7 @@
 					<fieldset class="space-y-2">
 						<legend class="field-label">Whisper on the grant, blank for none</legend>
 						<input class="input" type="text" bind:value={f.message} maxlength={MAX_CHAT} />
-						{@render placeholders(['name', 'server', 'minutes', 'until', 'days', 'players', 'max'])}
+						{@render placeholders('seed_reward', [f.message])}
 					</fieldset>
 					<p class="note">
 						With the box ticked, seed time stays pending until the server has filled with the player
