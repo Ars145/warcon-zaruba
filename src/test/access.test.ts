@@ -523,6 +523,7 @@ describe.skipIf(!hasTestDb)('access', () => {
 				['team_kill', { kickAt: 3, notCounted: ['Id.Item.Claymore'] }, 'players.kick'],
 				['kill_rate', { maxKills: 20 }, 'players.kick'],
 				['kill_distance', { causes: [DEFIB], action: 'flag' }, 'players.kick'],
+				['kill_distance', { causes: [DEFIB], action: 'warn' }, 'chat.send'],
 				['kill_distance', { causes: [DEFIB], action: 'kick' }, 'players.kick'],
 				['kill_distance', { causes: [DEFIB], action: 'ban' }, 'bans.manage'],
 				['kill_distance', { causes: [DEFIB], action: 'ban', banScope: 'org' }, 'lists.ban'],
@@ -589,6 +590,41 @@ describe.skipIf(!hasTestDb)('access', () => {
 				body: { config: { causes: [DEFIB], action: 'ban' } }
 			});
 			expect(edit.status).toBe(403);
+			// nor a flag rule into a warning by an author without Chat, nor a warning into a kick by one
+			// without Kick
+			const toWarn = await api(w, 'viewer', 'PATCH api/servers/[id]/triggers/[triggerId]', {
+				params: {
+					id: w.server.id,
+					triggerId: (made.body as { trigger: { id: string } }).trigger.id
+				},
+				body: { config: { causes: [DEFIB], action: 'warn' } }
+			});
+			expect(toWarn.status).toBe(403);
+			await holds(['chat.send']);
+			const warns = await api(w, 'viewer', 'POST api/servers/[id]/triggers', {
+				params,
+				body: { kind: 'kill_distance', config: { causes: [DEFIB], action: 'warn' } }
+			});
+			expect(warns.status).toBe(201);
+			// their own warning rule is theirs to switch off and on
+			const off = await api(w, 'viewer', 'PATCH api/servers/[id]/triggers/[triggerId]', {
+				params: {
+					id: w.server.id,
+					triggerId: (warns.body as { trigger: { id: string } }).trigger.id
+				},
+				body: { enabled: false }
+			});
+			expect(off.status).toBe(200);
+			for (const action of ['kick', 'flag']) {
+				const got = await api(w, 'viewer', 'PATCH api/servers/[id]/triggers/[triggerId]', {
+					params: {
+						id: w.server.id,
+						triggerId: (warns.body as { trigger: { id: string } }).trigger.id
+					},
+					body: { config: { causes: [DEFIB], action } }
+				});
+				expect([action, got.status]).toEqual([action, 403]);
+			}
 		});
 
 		test('a Name filter rule: who may save, dry-run and switch it on', async () => {
@@ -781,6 +817,69 @@ describe.skipIf(!hasTestDb)('access', () => {
 			}
 		});
 
+		test('a Kill distance rule that warns: who may save, dry-run and switch it on', async () => {
+			const w = await seedWorld(env);
+			// Automation and Kick, but not Chat: a rule that whispers is not theirs.
+			await env.db
+				.update(orgRoles)
+				.set({ capabilities: ['server.view', 'automation.manage', 'players.kick'] })
+				.where(eq(orgRoles.id, w.roles.viewer));
+			const expected: Record<PrincipalName, number> = {
+				anon: 401,
+				stranger: 404,
+				outsider: 404,
+				member: 404,
+				viewer: 403,
+				operator: 403,
+				admin: 200,
+				elsewhere: 404,
+				orgBans: 403,
+				orgSlots: 403,
+				owner: 200,
+				site: 200,
+				keyView: 403,
+				keyAll: 200,
+				keyElsewhere: 404,
+				keyBans: 403
+			};
+			const body = {
+				kind: 'kill_distance',
+				config: {
+					causes: ['Id.Vehicle.WeaponExtension.WHL_05.RingTurret'],
+					minDistanceM: 0,
+					action: 'warn',
+					reason: 'The {weapon} is not allowed here.'
+				}
+			};
+			const made = await api(w, 'owner', 'POST api/servers/[id]/triggers', {
+				params: { id: w.server.id },
+				body
+			});
+			expect(made.status).toBe(201);
+			const triggerId = (made.body as { trigger: { id: string } }).trigger.id;
+			for (const [who, status] of Object.entries(expected) as [PrincipalName, number][]) {
+				const got = [
+					await api(w, who, 'POST api/servers/[id]/triggers/dry-run', {
+						params: { id: w.server.id },
+						body
+					}),
+					await api(w, who, 'PATCH api/servers/[id]/triggers/[triggerId]', {
+						params: { id: w.server.id, triggerId },
+						body: { enabled: true }
+					}),
+					await api(w, who, 'POST api/servers/[id]/triggers', { params: { id: w.server.id }, body })
+				].map((r) => r.status);
+				// a create that gets through answers 201
+				expect([who, ...got]).toEqual([who, status, status, status === 200 ? 201 : status]);
+			}
+			// The rule's id under another server's path is not found, even for its org's owner.
+			const moved = await api(w, 'owner', 'PATCH api/servers/[id]/triggers/[triggerId]', {
+				params: { id: w.otherServer.id, triggerId },
+				body: { enabled: false }
+			});
+			expect(moved.status).toBe(404);
+		});
+
 		for (const [what, config] of [
 			['closing a faction', { closedFaction: 'Lonestar' }],
 			['balancing', { balance: true, gap: 2, clans: true, exempt: ['76561198000000001'] }],
@@ -964,6 +1063,44 @@ describe.skipIf(!hasTestDb)('access', () => {
 				expect((await addMessage()).status).toBe(200);
 				await env.db.delete(triggers).where(eq(triggers.serverId, w.server.id));
 			}
+		});
+
+		test('a rule that tells players their stats is saved only by those who read them: View', async () => {
+			// Stats are the leaderboard's, a View read. Every role holds View, and a key without it
+			// does not reach the server at all, so saving such a rule asks for nothing more.
+			const w = await seedWorld(env);
+			const params = { id: w.server.id };
+			const { id: keyId } = await resolveBearer(env, w.tokens.keyView);
+			/** the world with its View key holding these capabilities instead */
+			const keyWith = async (capabilities: string[]) => {
+				await env.db.update(apiKeys).set({ capabilities }).where(eq(apiKeys.id, keyId));
+				const key = keyUser(await resolveBearer(env, w.tokens.keyView));
+				return { ...w, users: { ...w.users, keyView: key } };
+			};
+			const stats = { message: 'Welcome {player}: {kills} kills here, K/D {KDR}' };
+			const save = (v: World, who: PrincipalName) =>
+				api(v, who, 'POST api/servers/[id]/triggers', {
+					params,
+					body: { kind: 'welcome', config: stats }
+				});
+			const dryRun = (v: World, who: PrincipalName) =>
+				api(v, who, 'POST api/servers/[id]/triggers/dry-run', {
+					params,
+					body: { kind: 'welcome', config: stats }
+				});
+
+			const noView = await keyWith(['automation.manage', 'chat.send']);
+			expect((await save(noView, 'keyView')).status).toBe(404);
+			expect((await dryRun(noView, 'keyView')).status).toBe(404);
+			const withView = await keyWith(['server.view', 'automation.manage', 'chat.send']);
+			expect((await dryRun(withView, 'keyView')).status).toBe(200);
+			expect((await save(withView, 'keyView')).status).toBe(201);
+			await env.db
+				.update(orgRoles)
+				.set({ capabilities: ['server.view', 'automation.manage', 'chat.send'] })
+				.where(eq(orgRoles.id, w.roles.viewer));
+			expect((await dryRun(w, 'viewer')).status).toBe(200);
+			expect((await save(w, 'viewer')).status).toBe(201);
 		});
 
 		test('two Team balance rules saved at once for one server: one of them is refused', async () => {
