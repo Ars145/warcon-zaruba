@@ -37,11 +37,22 @@ export const POST = route(async (event) => {
 	const r = await ingestBatch(env, serverId, body);
 	feedPosts.inc({ outcome: 'accepted' });
 	feedKills.inc({ result: 'accepted' }, r.accepted);
+	feedKills.inc({ result: 'other' }, r.other);
 	feedKills.inc({ result: 'skipped' }, r.skipped);
 	feedKills.inc({ result: 'duplicate' }, r.duplicates);
+	feedKills.inc({ result: 'repeat' }, r.repeats);
 	// Browsers watching the server see them at once; the worker's kill rules get their turn.
 	if (r.kills.length) gateway().killsIngested(env, serverId, r.kills);
-	return apiJson({ ok: true, accepted: r.accepted, skipped: r.skipped, duplicates: r.duplicates });
+	// The match's state for the live view, its result for the match the worker closes.
+	if (r.state || r.end) gateway().matchFeed(env, serverId, { state: r.state, end: r.end });
+	return apiJson({
+		ok: true,
+		accepted: r.accepted,
+		other: r.other,
+		skipped: r.skipped,
+		duplicates: r.duplicates,
+		repeats: r.repeats
+	});
 });
 
 function rejected(status: number, message: string): never {

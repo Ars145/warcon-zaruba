@@ -25,6 +25,7 @@ import { ApiError } from './http';
 import { writeAudit } from './audit';
 import {
 	kills,
+	matchEvents,
 	matches,
 	playerSessions,
 	serverLive,
@@ -32,10 +33,17 @@ import {
 	type KillRow,
 	type ServerRow
 } from './db/schema';
-import type { KillView } from '$lib/types';
+import type { KillView, MatchStateView } from '$lib/types';
 import { VEHICLE_TAGS, type KillFilter } from '$lib/kills';
 import type { SessionUser } from './access';
-import { FEED_TOKEN_PREFIX, isTeamKill, parseBatch, type ParsedKill } from './feed-core';
+import {
+	FEED_TOKEN_PREFIX,
+	isTeamKill,
+	parseBatch,
+	type ParsedEnd,
+	type ParsedKill,
+	type ParsedState
+} from './feed-core';
 
 const hashToken = (token: string): string =>
 	createHash('sha256').update(token, 'utf8').digest('hex');
@@ -140,12 +148,39 @@ const feedAtWritten = new Map<string, number>();
 /** Dedupe looks only this far back: retries come seconds later, and chunk exclusion keeps it cheap. */
 const DEDUPE_WINDOW_MS = 24 * 3600_000;
 
+/**
+ * The last match state this process stored for each server, as `instance|state|match`: one the
+ * same is a repeat, counted and not stored (whether the game repeats its state is not known).
+ * Another web process, or this one after a restart, stores it once more.
+ */
+const storedState = new Map<string, string>();
+const stateKey = (instanceId: string, s: ParsedState) => `${instanceId}|${s.state}|${s.matchId}`;
+
+/** The events not stored yet, each once. */
+function unseen<T extends { eventId: string }>(events: T[], seen: Set<string>): T[] {
+	const once = new Set<string>();
+	return events.filter((e) => {
+		if (seen.has(e.eventId) || once.has(e.eventId)) return false;
+		once.add(e.eventId);
+		return true;
+	});
+}
+
 export interface IngestResult {
 	accepted: number;
+	/** joins, leaves, match states and results: known events other than kills */
+	other: number;
 	skipped: number;
+	/** kills, match states and results already stored: the game sent the batch again */
 	duplicates: number;
+	/** match states the same as the last one stored for the server, not stored again */
+	repeats: number;
 	/** what was written, in feed order */
 	kills: KillView[];
+	/** the batch's last match state stored, as written to server_live; null when none was */
+	state: MatchStateView | null;
+	/** the batch's last match result stored; null when none was */
+	end: ParsedEnd | null;
 }
 
 export function killView(r: KillRow): KillView {
@@ -184,38 +219,98 @@ export async function ingestBatch(
 		throw new ApiError(400, err instanceof Error ? err.message : 'Malformed batch.');
 	}
 	let fresh: ParsedKill[] = batch.kills;
+	let states: ParsedState[] = [];
+	let ends: ParsedEnd[] = [];
 	let duplicates = 0;
+	let repeats = 0;
 	let written: KillView[] = [];
-	if (fresh.length)
-		// The table cannot hold a unique event id (a hypertable's unique indexes must include ts),
+	let lastState = storedState.get(serverId);
+	if (batch.kills.length || batch.states.length || batch.ends.length)
+		// The tables cannot hold a unique event id (a hypertable's unique indexes must include ts),
 		// so the look and the insert are one turn per server: the game sends a batch again when it
 		// did not hear back, and a copy that arrived mid-write passed the look and was written too.
 		await env.db.transaction(async (db) => {
 			await db.execute(
 				sql`SELECT pg_advisory_xact_lock(hashtextextended(${'feed:' + serverId}, 0))`
 			);
-			const ids = [...new Set(fresh.map((k) => k.eventId))];
-			const seen = new Set(
-				(
-					await db
-						.select({ eventId: kills.eventId })
-						.from(kills)
-						.where(
-							and(
-								eq(kills.serverId, serverId),
-								inArray(kills.eventId, ids),
-								gt(kills.ts, new Date(now.getTime() - DEDUPE_WINDOW_MS))
+			const since = new Date(now.getTime() - DEDUPE_WINDOW_MS);
+			const killIds = [...new Set(batch.kills.map((k) => k.eventId))];
+			const eventIds = [...new Set([...batch.states, ...batch.ends].map((e) => e.eventId))];
+			const [seenKills, seenEvents] = await Promise.all([
+				killIds.length
+					? db
+							.select({ eventId: kills.eventId })
+							.from(kills)
+							.where(
+								and(
+									eq(kills.serverId, serverId),
+									inArray(kills.eventId, killIds),
+									gt(kills.ts, since)
+								)
 							)
-						)
-				).map((r) => r.eventId)
-			);
-			const once = new Set<string>();
-			fresh = fresh.filter((k) => {
-				if (seen.has(k.eventId) || once.has(k.eventId)) return false;
-				once.add(k.eventId);
+					: [],
+				eventIds.length
+					? db
+							.select({ eventId: matchEvents.eventId })
+							.from(matchEvents)
+							.where(
+								and(
+									eq(matchEvents.serverId, serverId),
+									inArray(matchEvents.eventId, eventIds),
+									gt(matchEvents.ts, since)
+								)
+							)
+					: []
+			]);
+			fresh = unseen(batch.kills, new Set(seenKills.map((r) => r.eventId)));
+			const seen = new Set(seenEvents.map((r) => r.eventId));
+			const newStates = unseen(batch.states, seen);
+			ends = unseen(batch.ends, seen);
+			duplicates =
+				batch.kills.length -
+				fresh.length +
+				batch.states.length -
+				newStates.length +
+				batch.ends.length -
+				ends.length;
+			let key = storedState.get(serverId);
+			states = newStates.filter((st) => {
+				const k = stateKey(batch.instanceId, st);
+				if (k === key) return false;
+				key = k;
 				return true;
 			});
-			duplicates = batch.kills.length - fresh.length;
+			repeats = newStates.length - states.length;
+			lastState = key;
+			if (states.length || ends.length)
+				await db.insert(matchEvents).values([
+					...states.map((st) => ({
+						ts: now,
+						serverId,
+						eventId: st.eventId,
+						seq: st.seq,
+						instanceId: batch.instanceId,
+						type: 'match_state',
+						eventTime: st.eventTime,
+						matchId: st.matchId || null,
+						map: st.map,
+						state: st.state
+					})),
+					...ends.map((e) => ({
+						ts: now,
+						serverId,
+						eventId: e.eventId,
+						seq: e.seq,
+						instanceId: batch.instanceId,
+						type: 'match_ended',
+						eventTime: e.eventTime,
+						matchId: e.matchId || null,
+						map: e.map,
+						players: e.players,
+						winningFaction: e.winningFaction,
+						scores: e.scores
+					}))
+				]);
 			if (!fresh.length) return;
 			const steamIds = [
 				...new Set(
@@ -279,17 +374,33 @@ export async function ingestBatch(
 				.returning();
 			written = rows.map(killView);
 		});
-	// The liveness stamp, at most every ten seconds per server: the worker's upsert of the row
-	// leaves this column alone, so the two never fight.
-	const last = feedAtWritten.get(serverId) ?? 0;
-	if (now.getTime() - last >= FEED_AT_EVERY_MS) {
+	// Only once it is committed: a batch that failed is sent again, and its state is no repeat.
+	if (lastState !== undefined) storedState.set(serverId, lastState);
+	// The liveness stamp, at most every ten seconds per server, and the match state whenever it
+	// moves (a few times a match): the worker's upsert of the row leaves both columns alone, so the
+	// two never fight.
+	const last = states.at(-1);
+	const state: MatchStateView | null = last
+		? { state: last.state, map: last.map, at: now.toISOString() }
+		: null;
+	if (state || now.getTime() - (feedAtWritten.get(serverId) ?? 0) >= FEED_AT_EVERY_MS) {
 		feedAtWritten.set(serverId, now.getTime());
+		const set = state ? { feedAt: now, matchState: state } : { feedAt: now };
 		await env.db
 			.insert(serverLive)
-			.values({ serverId, feedAt: now })
-			.onConflictDoUpdate({ target: serverLive.serverId, set: { feedAt: now } });
+			.values({ serverId, ...set })
+			.onConflictDoUpdate({ target: serverLive.serverId, set });
 	}
-	return { accepted: fresh.length, skipped: batch.skipped, duplicates, kills: written };
+	return {
+		accepted: fresh.length,
+		other: batch.other,
+		skipped: batch.skipped,
+		duplicates,
+		repeats,
+		kills: written,
+		state,
+		end: ends.at(-1) ?? null
+	};
 }
 
 const STEAM_RE = /^\d{17}$/;

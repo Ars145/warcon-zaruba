@@ -61,6 +61,7 @@ import { NAME_FLAG } from './name-filter';
 import { applyTriggerUpdates, enqueueIntents, wakeDelivery } from './outbox';
 import { LostOwnership, withOwnedTransaction } from './leadership';
 import { memoryOf } from './observe';
+import { onMatchFeed } from './match-feed';
 import { publicMessage } from './http';
 import { notifyBounty, notifyTeamKills, type BountyCard } from './webhook-delivery';
 import {
@@ -977,9 +978,9 @@ async function actOnTeamKills(
 }
 
 /**
- * The demo server's kills, fed through the same path as a real server's once its feed is turned
- * on (Config tab): the mock has no process of its own to post from, so the worker drains
- * its queue after each observation.
+ * The demo server's feed (kills, and Season 2's joins, leaves, match states and results), fed
+ * through the same path as a real server's once its feed is turned on (Config tab): the mock has
+ * no process of its own to post from, so the worker drains its queue after each observation.
  */
 export async function feedDemoKills(env: Env, server: ServerRow): Promise<void> {
 	if (!isDemoServer(env, server)) return;
@@ -992,4 +993,5 @@ export async function feedDemoKills(env: Env, server: ServerRow): Promise<void> 
 	if (!row?.on) return;
 	const r = await ingestBatch(env, server.id, batch);
 	if (r.kills.length) await onKillsIngested(env, server.id, r.kills);
+	if (r.state || r.end) await onMatchFeed(env, memoryOf(server.id), { state: r.state, end: r.end });
 }
