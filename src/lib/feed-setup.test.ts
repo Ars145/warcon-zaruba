@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { eventFeedLines, usesEventFeed } from './feed-setup';
+import { eventFeedLines, eventFeedUrl, usesEventFeed } from './feed-setup';
 import { parseIni } from './config-doc';
 
 describe('kill feed setup', () => {
@@ -18,7 +18,7 @@ describe('kill feed setup', () => {
 		expect(lines).toBe(
 			[
 				'bEventFeedEnabled=True',
-				'+EventFeedEndpoints=(Url="https://console.example",Token="wkf_abc")',
+				'+EventFeedEndpoints=(Url="https://console.example/api/ingest/events",Token="wkf_abc")',
 				'EventFeedServerName="[EU] Night #1"'
 			].join('\n')
 		);
@@ -29,5 +29,13 @@ describe('kill feed setup', () => {
 			'EventFeedEndpoints',
 			'EventFeedServerName'
 		]);
+	});
+	test('the Url names the ingest route: Season 2 posts to it as written', () => {
+		expect(eventFeedUrl('https://console.example')).toBe(
+			'https://console.example/api/ingest/events'
+		);
+		expect(eventFeedUrl('https://console.example/')).toBe(
+			'https://console.example/api/ingest/events'
+		);
 	});
 });
