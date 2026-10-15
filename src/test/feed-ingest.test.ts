@@ -3,9 +3,13 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
+import type { RequestEvent } from '@sveltejs/kit';
 import type { Env } from '$lib/server/env';
-import { kills } from '$lib/server/db/schema';
-import { ingestBatch } from '$lib/server/feed';
+import { kills, serverLive, servers } from '$lib/server/db/schema';
+import { ingestBatch, mintFeedToken } from '$lib/server/feed';
+import { resetRates } from '$lib/server/ratelimit';
+import { POST as ingest } from '../routes/api/ingest/events/+server';
+import { stubGateway } from './call';
 import { hasTestDb, testEnv } from './db';
 import { seedWorld } from './world';
 
@@ -27,6 +31,40 @@ const batchOf = (eventIds: string[]) => ({
 		contextTags: []
 	}))
 });
+
+// What Season 2 sends beside kills (feed-core.test.ts has them as posted).
+const season2 = () => [
+	{
+		eventId: randomUUID(),
+		type: 'player_joined',
+		eventTime: 3157.0576,
+		matchId: '7e72e869-4460-4d27-aa4c-76a52ed20cb4',
+		mapName: 'Kavkazi',
+		playerName: 'Charlie',
+		playerId: '-0000-000000000000',
+		playerSteamId: '76561198000000003',
+		players: 42
+	},
+	{
+		eventId: randomUUID(),
+		type: 'player_left',
+		eventTime: 3164.3425,
+		matchId: '7e72e869-4460-4d27-aa4c-76a52ed20cb4',
+		mapName: 'Kavkazi',
+		playerName: 'Charlie',
+		playerId: '-0000-000000000000',
+		playerSteamId: '76561198000000003',
+		players: 41
+	},
+	{
+		eventId: randomUUID(),
+		type: 'match_state',
+		eventTime: 3185.7238,
+		matchId: '7e72e869-4460-4d27-aa4c-76a52ed20cb4',
+		mapName: 'Kavkazi',
+		state: 'MatchState.Playing.KOTH'
+	}
+];
 
 describe.skipIf(!hasTestDb)('kill feed ingest', () => {
 	let env: Env;
@@ -62,5 +100,64 @@ describe.skipIf(!hasTestDb)('kill feed ingest', () => {
 			ingestBatch(env, w.otherServer.id, batchOf([id]))
 		]);
 		expect([a.accepted, b.accepted]).toEqual([1, 1]);
+	});
+
+	test('joins, leaves and match states are counted and never written as kills', async () => {
+		const w = await seedWorld(env);
+		const id = randomUUID();
+		const body = batchOf([id]);
+		const r = await ingestBatch(env, w.server.id, {
+			...body,
+			events: [...season2(), ...body.events]
+		});
+		expect(r).toMatchObject({ accepted: 1, other: 3, skipped: 0, duplicates: 0 });
+		const rows = await env.db
+			.select({ eventId: kills.eventId })
+			.from(kills)
+			.where(eq(kills.serverId, w.server.id));
+		expect(rows).toEqual([{ eventId: id }]);
+	});
+
+	test("the route answers what it counted, and only to the server's own token", async () => {
+		stubGateway();
+		resetRates();
+		const w = await seedWorld(env);
+		const [row] = await env.db.select().from(servers).where(eq(servers.id, w.server.id));
+		const token = await mintFeedToken(env, new Request('http://localhost/'), w.users.owner!, row);
+		const id = randomUUID();
+		const body = batchOf([id]);
+		const post = (authorization?: string) =>
+			ingest({
+				request: new Request('http://localhost/api/ingest/events', {
+					method: 'POST',
+					headers: { 'content-type': 'application/json', ...(authorization && { authorization }) },
+					body: JSON.stringify({ ...body, events: [...season2(), ...body.events] })
+				})
+			} as unknown as RequestEvent);
+		expect((await post()).status).toBe(401);
+		expect((await post(`Bearer wkf_${'a'.repeat(43)}`)).status).toBe(401);
+		expect(await stored(w.server.id, id)).toBe(0);
+		const res = await post(`Bearer ${token}`);
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({
+			ok: true,
+			accepted: 1,
+			other: 3,
+			skipped: 0,
+			duplicates: 0
+		});
+		expect(await stored(w.server.id, id)).toBe(1);
+	});
+
+	test('a batch with no kill in it still shows the feed is alive', async () => {
+		const w = await seedWorld(env);
+		const at = new Date('2026-10-15T11:20:00Z');
+		const r = await ingestBatch(env, w.server.id, { ...batchOf([]), events: season2() }, at);
+		expect(r).toMatchObject({ accepted: 0, other: 3, skipped: 0, kills: [] });
+		const [live] = await env.db
+			.select({ feedAt: serverLive.feedAt })
+			.from(serverLive)
+			.where(eq(serverLive.serverId, w.server.id));
+		expect(live?.feedAt?.toISOString()).toBe(at.toISOString());
 	});
 });

@@ -37,11 +37,18 @@ export const POST = route(async (event) => {
 	const r = await ingestBatch(env, serverId, body);
 	feedPosts.inc({ outcome: 'accepted' });
 	feedKills.inc({ result: 'accepted' }, r.accepted);
+	feedKills.inc({ result: 'other' }, r.other);
 	feedKills.inc({ result: 'skipped' }, r.skipped);
 	feedKills.inc({ result: 'duplicate' }, r.duplicates);
 	// Browsers watching the server see them at once; the worker's kill rules get their turn.
 	if (r.kills.length) gateway().killsIngested(env, serverId, r.kills);
-	return apiJson({ ok: true, accepted: r.accepted, skipped: r.skipped, duplicates: r.duplicates });
+	return apiJson({
+		ok: true,
+		accepted: r.accepted,
+		other: r.other,
+		skipped: r.skipped,
+		duplicates: r.duplicates
+	});
 });
 
 function rejected(status: number, message: string): never {

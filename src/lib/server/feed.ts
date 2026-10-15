@@ -142,6 +142,8 @@ const DEDUPE_WINDOW_MS = 24 * 3600_000;
 
 export interface IngestResult {
 	accepted: number;
+	/** joins, leaves, match states and results: known events other than kills */
+	other: number;
 	skipped: number;
 	duplicates: number;
 	/** what was written, in feed order */
@@ -289,7 +291,13 @@ export async function ingestBatch(
 			.values({ serverId, feedAt: now })
 			.onConflictDoUpdate({ target: serverLive.serverId, set: { feedAt: now } });
 	}
-	return { accepted: fresh.length, skipped: batch.skipped, duplicates, kills: written };
+	return {
+		accepted: fresh.length,
+		other: batch.other,
+		skipped: batch.skipped,
+		duplicates,
+		kills: written
+	};
 }
 
 const STEAM_RE = /^\d{17}$/;

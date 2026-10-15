@@ -72,8 +72,13 @@ interface State {
 	nextJoiner: number;
 	configText: string;
 	configRevision: number;
-	/** kill events since the last drain, as the game's feed would post them (feed-events.ts) */
+	/** events since the last drain, as the game's feed would post them (feed-events.ts) */
 	feed: Record<string, unknown>[];
+	/** the match state the feed last reported (feedState); '' until the first tick, which reports
+	 *  one as a game does when it starts */
+	matchState: string;
+	/** the game's id for the match in progress, on the feed's events */
+	matchId: string;
 }
 
 const MAPS = [
@@ -146,6 +151,13 @@ const MAX_BODY_BYTES = 65536;
 // AFK protection can be watched at work, and lowering the minimum starts the match.
 const prematch = () => /^(1|true|yes)$/i.test(process.env.MOCK_PREMATCH || '');
 const PREMATCH_MINIMUM = 60;
+// The match states the demo's feed reports (match_state events): a new match starts in pre-match,
+// waits there below the minimum under MOCK_PREMATCH, plays, and ends (with match_ended first).
+// Pre-match carries no match id, as on the game: it has none until the world has loaded.
+const PRE_MATCH = 'MatchState.PreMatch';
+const WAITING = 'MatchState.PreMatch.WaitingForPlayers.PlayerCount';
+const PLAYING = 'MatchState.Playing.KOTH';
+const POST_MATCH = 'MatchState.PostMatch';
 // Where the rotation's pointer goes when the document rewrites it, which no live build has been
 // seen doing: by default it stays on the entry now playing; MOCK_ROTATION_POINTER=index keeps the
 // place it had, =top goes to the top of the list at the next map change.
@@ -444,7 +456,9 @@ function seed(name: string): State {
 		nextJoiner: 0,
 		configText: '',
 		configRevision: 1,
-		feed: []
+		feed: [],
+		matchState: '',
+		matchId: crypto.randomUUID()
 	};
 	state.configText = seedConfig(state);
 	return state;
@@ -559,6 +573,7 @@ function tick(s: State): void {
 		prematch() &&
 		s.factions.every((f) => f.score === 0) &&
 		s.players.length < prematchMinimum(s.configText);
+	feedState(s, waiting ? WAITING : PLAYING);
 	if (!waiting)
 		for (const f of s.factions) {
 			f.score += f.rate * dt * (0.8 + Math.random() * 0.4);
@@ -586,12 +601,13 @@ function tick(s: State): void {
 			const gone = drifters[Math.floor(Math.random() * drifters.length)];
 			s.players.splice(s.players.indexOf(gone), 1);
 			log(s, 'CLOSE', `${gone.name} disconnected`);
+			feedPresence(s, 'player_left', gone);
 		}
 	}
 	// Someone new drifts in now and then; quicker while the server is quiet, so joins (and the
 	// triggers that watch for them) are easy to see on the demo.
 	if (s.players.length < 16 && Math.random() < (s.players.length < 12 ? 0.2 : 0.04)) {
-		s.players.push({
+		const p: Player = {
 			name: JOINERS[s.nextJoiner % JOINERS.length],
 			steamId: String(76561198100000401n + BigInt(s.nextJoiner++)),
 			faction: s.factions[Math.floor(Math.random() * s.factions.length)].name,
@@ -599,7 +615,9 @@ function tick(s: State): void {
 			deaths: 0,
 			cash: 0,
 			pingMs: 20 + Math.floor(Math.random() * 90)
-		});
+		};
+		s.players.push(p);
+		feedPresence(s, 'player_joined', p);
 	}
 }
 
@@ -614,17 +632,25 @@ const FEED_CAUSES = [
 	'Id.Vehicle.WeaponExtension.STN_03.MainBarrel',
 	'Vehicle.Variant.Air.Rotary.Littlebird.Default'
 ];
-/** Queues the kill the way the game's feed reports one (docs/wardogs-api.md, WDServerFeed). */
+/** Queues an event with the fields the game's feed puts on every one (docs/wardogs-api.md). */
+function feedEvent(s: State, e: { type: string } & Record<string, unknown>): void {
+	s.feed.push({
+		eventId: crypto.randomUUID().toUpperCase(),
+		eventTime: (Date.now() - s.matchStart) / 1000,
+		matchId: s.matchId,
+		mapName: s.current.map,
+		...e
+	});
+	if (s.feed.length > 50) s.feed.splice(0, s.feed.length - 50);
+}
+
+/** Queues the kill the way the game's feed reports one. */
 function feedKill(s: State, killer: Player, victim: Player): void {
 	const suicide = killer === victim;
 	const cause = FEED_CAUSES[Math.floor(Math.random() * FEED_CAUSES.length)];
 	const headshot = !suicide && Math.random() < 0.25;
-	s.feed.push({
-		eventId: crypto.randomUUID().toUpperCase(),
+	feedEvent(s, {
 		type: 'killed',
-		eventTime: (Date.now() - s.matchStart) / 1000,
-		matchId: 'demo-match',
-		mapName: s.current.map,
 		killerName: killer.name,
 		killerId: '-demo',
 		killerSteamId: killer.steamId,
@@ -640,10 +666,47 @@ function feedKill(s: State, killer: Player, victim: Player): void {
 			'Meta.PlayerKillFlag.Player.Local.Death'
 		]
 	});
-	if (s.feed.length > 50) s.feed.splice(0, s.feed.length - 50);
 }
 
-/** The demo's queued kill events as one feed batch, or null when there are none. */
+/** A player joining or leaving as Season 2's feed reports it, with the count after. */
+function feedPresence(s: State, type: 'player_joined' | 'player_left', p: Player): void {
+	feedEvent(s, {
+		type,
+		playerName: p.name,
+		playerId: '-demo',
+		playerSteamId: p.steamId,
+		players: s.players.length
+	});
+}
+
+/** The match's state when it moves on, as Season 2's feed reports it. */
+function feedState(s: State, state: string): void {
+	if (s.matchState === state) return;
+	s.matchState = state;
+	feedEvent(s, {
+		type: 'match_state',
+		state,
+		...(state === PRE_MATCH ? { matchId: undefined } : {})
+	});
+}
+
+/** The match's result as Season 2's feed reports it: the leader wins, scores as the board shows them. */
+function feedResult(s: State): void {
+	const scores = s.factions.map((f) => ({
+		faction: f.name,
+		score: Math.min(s.scoreCap, Math.floor(f.score))
+	}));
+	const top = [...s.factions].sort((a, b) => b.score - a.score)[0];
+	feedEvent(s, {
+		type: 'match_ended',
+		players: s.players.length,
+		winningFaction: top && top.score > 0 ? top.name : '',
+		factionScores: scores
+	});
+	feedState(s, POST_MATCH);
+}
+
+/** The demo's queued feed events as one batch, or null when there are none. */
 export function drainMockFeed(key: string): Record<string, unknown> | null {
 	const s = states.get(key);
 	if (!s || !s.feed.length) return null;
@@ -656,12 +719,14 @@ function resetScores(s: State): void {
 		f.score = 0;
 	}
 	s.matchStart = Date.now();
+	s.matchId = crypto.randomUUID();
 	// Kills, deaths and cash start again, as on the game's scoreboard.
 	for (const p of s.players) {
 		p.kills = 0;
 		p.deaths = 0;
 		p.cash = 0;
 	}
+	feedState(s, PRE_MATCH);
 }
 
 function applyEntry(s: State, e: Entry): void {
@@ -685,6 +750,7 @@ function nextPlayable(s: State, from: number): number {
 }
 
 function matchOver(s: State): void {
+	feedResult(s);
 	const r = s.rotation;
 	if (r.enabled && r.entries.length) {
 		const now = r.nextIndex >= 0 ? r.nextIndex : nextPlayable(s, r.nowIndex);
@@ -856,6 +922,7 @@ export function mockHandle(
 		}
 		if (m === 'POST' && p[2] === 'kick') {
 			s.players = s.players.filter((x) => x !== player);
+			feedPresence(s, 'player_left', player);
 			log(s, 'COMMAND', `kick ${p[1]} ${b.reason || ''}`.trim());
 			return ok({ message: `Kicked ${player.name}.` });
 		}
@@ -894,6 +961,7 @@ export function mockHandle(
 		// The live build only bans a connected player.
 		if (!player && liveBuild()) return fail(404, `Error: no player matching '${b.steamId}'.`);
 		s.players = s.players.filter((x) => x.steamId !== b.steamId);
+		if (player) feedPresence(s, 'player_left', player);
 		s.bans = s.bans.filter((x) => x.steamId !== b.steamId);
 		s.bans.push({
 			steamId: b.steamId,
