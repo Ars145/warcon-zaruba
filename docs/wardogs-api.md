@@ -181,6 +181,61 @@ endpoint is down is not known. Warcon serves the endpoint at `POST /api/ingest/e
 was known (`Url=<origin>/api/feed/events`) needs Configure again, and Warcon keeps building the
 scoreboard's kill and cash totals as before.
 
+**Season 2 (v0.2.0, CL-516586, 2026-10-15).** The game strips `[WDServerFeed]` on any apply and
+reads its feed from the RCON block instead: `bEventFeedEnabled`, a list `EventFeedEndpoints` of
+`(Url="…",Token="…")`, and `EventFeedServerName` (the batch's `serverName`). Each is
+`writable:false` ("Set only in the server's config file; RCON cannot change it."), and validate
+and apply drop them without a word, so the host pastes them into the file (README, "Kill feed").
+A file the game wrote held `bEventFeedEnabled=True`, `!EventFeedEndpoints=ClearArray`,
+`.EventFeedEndpoints=(Url="…",Token=…)` and `EventFeedServerName=…`. `GET /v1/feed` answers
+`{enabled, endpointCount, anyUnhealthy, endpoints:[]}`; an endpoint's shape was not seen. Not
+confirmed yet: that the game still appends `/api/ingest/events` to such a `Url`.
+
+The batches also carry four new types beside `killed`, each with `eventId`, `eventTime`, `matchId`
+and `mapName` as above (posted on Discord by a host on 2026-10-15, ids blanked):
+
+```
+{ "type": "player_joined", "playerName": "…", "playerId": "-0000-000000000000",
+  "playerSteamId": "7656119…", "players": 42 }            // players: a count of who is on
+{ "type": "player_left", …the same fields }
+{ "type": "match_state", "state": "MatchState.Playing.KOTH" }   // no matchId in PreMatch and
+                                                                // PreMatch.WaitingForWorldLoad
+{ "type": "match_ended", "eventTime": 7658.5545631460845, "players": 98,
+  "winningFaction": "Lonestar",
+  "factionScores": [ { "faction": "Lonestar", "score": 100 }, { "faction": "Valkyra", "score": 0 },
+                     { "faction": "Manticore", "score": 59 } ] }
+```
+
+`playerId` has the short form of `killerId` and `victimId`. The states: `MatchState.PreMatch`,
+`.PreMatch.WaitingForWorldLoad`, `.PreMatch.WaitingForPlayers`,
+`.PreMatch.WaitingForPlayers.PlayerCount`, `.Playing`, `.Playing.KOTH` and `.PostMatch` (two
+config sections carry the same names). Since pre-match has no `matchId` until the world has
+loaded, `matchId` is presumably per match on Season 2 (it stayed the same across a map change on
+CL-501228); not confirmed. Not known either: the order of `match_ended` and `PostMatch`, how long
+post-match lasts, whether a forced end (`POST /v1/match/end`) or a restart posts a result,
+whether `winningFaction` can be empty (a tie), and whether `players` counts the player joining or
+leaving.
+
+What Warcon does with them (`src/lib/server/match-feed.ts`): the last `match_state` of a batch is
+written to `server_live.match_state` at receipt and handed to the worker, and the server's Overview
+shows it while the server answers and unless it came before the game process last started. A
+`match_ended` is the game's result of the match: its scores and winner (a winner not among the
+scores counts as none, and then the leader of the scores wins, as for a look) replace what the
+looks saw when the look that sees the match end comes within five minutes, or correct the match
+that look closed when they arrive within two minutes after it; a result naming other factions
+than the scoreboard's is not used, since every player's result would then be lost. The looks still
+decide where matches start and end. Every state and result is kept in `match_events` as it came
+(receipt time, its place in the batch, `eventTime`, `matchId` or null, map, state, and for a result
+`players`, `winningFaction` as sent and the scores), so the order and timing above can be read off
+the fleet; a resent batch is not kept twice, and a state the same as the last one kept for the
+server (same game run, state and `matchId`) is counted as `repeat` in
+`warcon_feed_kills_total{result}` and not kept, written to `server_live` or handed to the worker.
+Joins and leaves are counted (`result="other"`, with the states and results) and not used: the
+polled `/v1/players` is the record. Only kills count towards the 200 per batch; the 64 KB body limit
+bounds the rest. The demo server's feed sends joins, leaves (kicks and bans too), the states (with
+no `matchId` in pre-match, a new one each match) and a result when a side reaches the cap or the
+match is ended by hand.
+
 Only `ScorePeriod`, `bEnabled` and `RotationMode` have live routes; everything else changes via the
 config document (PUT `/v1/config`) or by editing the ini and restarting.
 
