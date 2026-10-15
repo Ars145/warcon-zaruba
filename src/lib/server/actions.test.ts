@@ -484,6 +484,27 @@ test('config hides the RCON password and the feed token from whoever reads it', 
 	expect(r.revision).toBe('r1');
 });
 
+// CL-516586 reads the kill feed from the RCON block: each endpoint carries an address and a token.
+const WITH_FEED = `${RCON}\r\nPassword=hunter2\r\nbEventFeedEnabled=True\r\n!EventFeedEndpoints=ClearArray\r\n.EventFeedEndpoints=(Url="https://feed.example",Token="wkf_live")\r\n`;
+
+test('config hides the kill feed endpoints, and apply puts them back as they were', async () => {
+	const f = reservedClient({ route: false, text: WITH_FEED });
+	const shown = ((await ACTIONS.config.run(f.client, {})) as any).text as string;
+	expect(shown).not.toContain('wkf_live');
+	expect(shown).not.toContain('feed.example');
+	expect(shown).toContain('\r\n.EventFeedEndpoints=(hidden)\r\n');
+	expect(shown).toContain('\r\n!EventFeedEndpoints=ClearArray\r\n');
+	await ACTIONS.configApply.run(f.client, { text: shown, revision: 'r1' });
+	expect(f.text()).toBe(WITH_FEED);
+	f.client.configCall = async () => ({
+		status: 200,
+		body: { ok: true, warnings: ['endpoint token wkf_live was refused'] }
+	});
+	const told = JSON.stringify(await ACTIONS.configValidate.run(f.client, { text: shown }));
+	expect(told).not.toContain('wkf_live');
+	expect(told).toContain('endpoint token (hidden) was refused');
+});
+
 test('configApply puts the live credentials back where the placeholder was left alone', async () => {
 	const f = reservedClient({ route: false, text: WITH_SECRETS });
 	const shown = ((await ACTIONS.config.run(f.client, {})) as any).text as string;
