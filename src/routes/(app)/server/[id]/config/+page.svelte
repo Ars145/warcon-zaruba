@@ -8,6 +8,7 @@
 	import { sponsor as banners, loadSponsor } from '$lib/sponsor.svelte';
 	import { getScalar, parseIni, setScalarInText } from '$lib/config-doc';
 	import { lockedKeys, S_SESSION } from '$lib/config-fields';
+	import { EVENT_FEED_SECTION, eventFeedLines, usesEventFeed } from '$lib/feed-setup';
 	import { fmtTime } from '$lib/format';
 	import type { ConfigDoc, ConfigResult, Status } from '$lib/types';
 	import type { PageProps } from './$types';
@@ -66,7 +67,16 @@
 			feedBusy = false;
 		}
 	}
-	/** One click: mint the token, write both keys into the config document, apply. */
+	// CL-516586 on: the feed is a list of endpoints in the RCON block that RCON cannot write, so
+	// the host pastes the lines into the file.
+	let eventFeed = $derived(usesEventFeed(doc?.sections));
+	let feedLines = $derived(
+		feed?.token ? eventFeedLines(feed.url, feed.token, data.server.name) : ''
+	);
+	/**
+	 * One click: mint the token; on a build that reads [WDServerFeed], write both keys into the
+	 * config document and apply.
+	 */
 	async function configureFeed() {
 		const writable = !readOnly;
 		feedBusy = true;
@@ -78,7 +88,12 @@
 			return;
 		}
 		feedBusy = false;
-		if (writable) await writeFeedConfig();
+		if (eventFeed)
+			toast(
+				'Token created. Paste the lines shown into ServerSettings.ini on the host, then restart the server.',
+				'ok'
+			);
+		else if (writable) await writeFeedConfig();
 		else
 			toast(
 				'Token created. The config document cannot be written from here, so set [WDServerFeed] Url and Token on the host by hand.',
@@ -89,12 +104,17 @@
 	async function rotateFeed() {
 		if (
 			!(await confirmDialog(
-				'Replace the token? The game keeps posting with the old one until the config is rewritten and the server restarts, and those posts will be refused.',
+				`Replace the token? The game keeps posting with the old one until ${eventFeed ? 'the new lines are in its file' : 'the config is rewritten'} and the server restarts, and those posts will be refused.`,
 				{ okLabel: 'Replace', danger: true }
 			))
 		)
 			return;
-		await feedAction(() => api('POST', feedPath), 'Token replaced. Write it to the config again.');
+		await feedAction(
+			() => api('POST', feedPath),
+			eventFeed
+				? 'Token replaced. Paste the new lines on the host and restart the server.'
+				: 'Token replaced. Write it to the config again.'
+		);
 	}
 	async function disableFeed() {
 		if (
@@ -394,7 +414,18 @@
 			</span>
 		{/if}
 	</div>
-	{#if feed?.configured && feed.token}
+	{#if feed?.configured && feed.token && eventFeed}
+		<div class="flex items-start gap-2">
+			<pre
+				class="min-w-0 grow overflow-x-auto rounded-ctl border border-black bg-ink-950 px-2.5 py-1.5 font-mono text-[12.5px]">{feedLines}</pre>
+			<button class="btn btn-sm" onclick={() => copyFeed(feedLines, 'Lines')}>Copy</button>
+		</div>
+		<p class="mt-2 text-[12.5px] text-mist-600">
+			Add these lines under <span class="chip">[{EVENT_FEED_SECTION}]</span> in the server's ServerSettings.ini
+			on the host, in place of any earlier EventFeedEndpoints line for this panel, then restart the server.
+			RCON cannot write them: the game reads its feed endpoints from the file only.
+		</p>
+	{:else if feed?.configured && feed.token}
 		<div class="grid grid-cols-1 gap-3 md:grid-cols-[auto_1fr]">
 			<span class="text-[13px] text-mist-400 md:pt-1.5">Url</span>
 			<div class="flex items-center gap-2">
@@ -425,11 +456,15 @@
 		</div>
 	{/if}
 	<p class="note">
-		With <span class="chip">[WDServerFeed]</span> set, the game posts every kill (killer, victim,
-		weapon, distance, headshot) to Warcon a second or two after it happens: the kill feed on the
-		Overview tab, combat stats on Analytics and player dossiers, and the team-kill trigger.
-		{#if feed && !feed.configured}Configure writes the endpoint and a token into the config
-			document; the game reads them at its next restart (its scheduled one, or a manual restart).{:else if feed && !data.server.manager}An
+		{#if eventFeed}With <span class="chip">bEventFeedEnabled</span> on and an
+			<span class="chip">EventFeedEndpoints</span> entry for this panel in the server's file, the game{:else}With
+			<span class="chip">[WDServerFeed]</span> set, the game{/if} posts every kill (killer, victim, weapon,
+		distance, headshot) to Warcon a second or two after it happens: the kill feed on the Overview tab,
+		combat stats on Analytics and player dossiers, and the team-kill trigger.
+		{#if feed && !feed.configured && eventFeed}Configure creates the token and shows the lines to
+			paste into the file on the host; the game reads them when it starts.{:else if feed && !feed.configured}Configure
+			writes the endpoint and a token into the config document; the game reads them at its next
+			restart (its scheduled one, or a manual restart).{:else if feed && !data.server.manager}An
 			owner of the organisation holds the token.{/if}
 	</p>
 </div>

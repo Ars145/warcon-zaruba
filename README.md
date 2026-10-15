@@ -344,10 +344,12 @@ them, in the panel and for API keys alike; where the server listens (its RCON ho
 the notes on the Servers page are shown to the organisation's owners only.
 
 No role reads the server's credentials. The config document leaves the panel with the RCON
-`Password`, its `PasswordHash` and the kill feed `Token` shown as `(hidden)`, for every role, org
-owners and API keys included. Leave `(hidden)` as it is and validate and apply put the server's
-current value back; type over it to change the value. A copied or downloaded document carries the
-placeholder too, so it is not a backup of those three lines. Raw RCON does not serve `/v1/config`;
+`Password`, its `PasswordHash`, the kill feed `Token` and each of the game's kill feed endpoints
+(`EventFeedEndpoints`, address and token together) shown as `(hidden)`, for every role, org owners
+and API keys included; so is any other `(…)` value with a password or token among its fields.
+Leave `(hidden)` as it is and validate and apply put the server's current value back; type over it
+to change the value. A copied or downloaded document carries the placeholder too, so it is not a
+backup of those lines. Raw RCON does not serve `/v1/config`;
 the `config`, `configValidate` and `configApply` actions are the way to the document. Nor does it
 serve `/v1/audit`: the `serverLog` action does, with the peers' addresses blank for everyone but
 the site owner, API keys included.
@@ -722,6 +724,20 @@ writes both keys into the config document and applies; the game reads them at it
 (its scheduled one, see [game restart](#game-restart), or a manual restart). `Url` is the
 panel's origin alone: the game appends `/api/ingest/events` to it by itself. The card shows when
 the last batch arrived, so a config that did not take is visible.
+
+Since Season 2 (build CL-516586) the game ignores `[WDServerFeed]` and drops it on any apply. It
+reads its feed from the RCON block instead, as a switch and a list of endpoints, keys RCON cannot
+write: they must be in the file on the host. On those servers **Configure** mints the token and
+shows the lines to paste under `[/Script/WDRCON.WDRCONSettings]` in `ServerSettings.ini`, then
+restart the server:
+
+```ini
+bEventFeedEnabled=True
++EventFeedEndpoints=(Url="https://your-panel.example",Token="wkf_…")
+```
+
+The list can hold other endpoints beside Warcon's. After **Replace token**, paste the new line in
+place of the old one.
 
 What the feed adds: a live kill feed on the server's Overview tab, a **Kills** tab with the whole
 history (filter by killer, victim, either side, weapon or vehicle, kind of kill and minimum
