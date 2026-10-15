@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { scoreCapOf } from '$lib/match';
+	import { currentState, stateLabel } from '$lib/match-state';
 	import { ApiError, rconGet, rconPost, errorMessage } from '$lib/api';
 	import { MAX_CHAT } from '$lib/chat';
 	import { poll } from '$lib/poll';
@@ -197,6 +198,8 @@
 	});
 
 	let scoreScale = $derived(scoreCapOf(status));
+	// Season 2 builds report the match's state on their feed; the status has none.
+	let phase = $derived(currentState(live));
 	let next = $derived(
 		rotation && rotation.enabled && rotation.nextIndex >= 0
 			? rotation.entries[rotation.nextIndex]
@@ -292,6 +295,15 @@
 					</div>
 				{/each}
 			</div>
+			{#if phase}
+				<div class="kv">
+					<span class="text-mist-400">Match</span><span
+						>{stateLabel(phase.state)}<span class="text-mist-400"
+							>&nbsp;· since {clock(phase.at)}</span
+						></span
+					>
+				</div>
+			{/if}
 			<div class="kv">
 				<span class="text-mist-400">Server</span><span class="truncate"
 					>{status.serverName || '—'}</span
