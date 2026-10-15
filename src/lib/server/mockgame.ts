@@ -101,7 +101,8 @@ const LIGHTINGS = [
 	'DayLateClear',
 	'DayLateGray',
 	'DayLateGrayFog',
-	'DayEndClear'
+	'DayEndClear',
+	'DayLateRain'
 ].map((id) => ({ id, displayName: id.replace(/([a-z])([A-Z])/g, '$1 $2') }));
 const ALTERNATORS_BY_MAP: Record<string, { tag: string; displayName: string }[]> = {
 	Kavkazi: [
