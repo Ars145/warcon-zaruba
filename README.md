@@ -734,10 +734,12 @@ restart the server:
 ```ini
 bEventFeedEnabled=True
 +EventFeedEndpoints=(Url="https://your-panel.example",Token="wkf_…")
+EventFeedServerName="Your server"
 ```
 
 The list can hold other endpoints beside Warcon's. After **Replace token**, paste the new line in
-place of the old one.
+place of the old one. `EventFeedServerName` is the name the game sends with each batch; Warcon
+goes by the token, so keep one such line if the file already has it.
 
 What the feed adds: a live kill feed on the server's Overview tab, a **Kills** tab with the whole
 history (filter by killer, victim, either side, weapon or vehicle, kind of kill and minimum
