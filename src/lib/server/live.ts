@@ -7,6 +7,7 @@ import { serverLive, type ServerLiveRow } from './db/schema';
 import type { ServerMemory } from './observe';
 import type { LiveView, Player, Status } from '$lib/types';
 import { saneScores } from '$lib/format';
+import { matchStateOf } from '$lib/match-state';
 
 const iso = (ms: number): string | null => (ms > 0 ? new Date(ms).toISOString() : null);
 
@@ -30,6 +31,7 @@ export function liveView(m: ServerMemory): LiveView {
 		reservedSlots: m.identity.reservedSlots,
 		restartTimeUtc: m.identity.restartTimeUtc,
 		restartTimeUtcFile: m.identity.restartTimeUtcFile,
+		matchState: m.matchState,
 		throttledUntil: m.holdUntil > Date.now() ? iso(m.holdUntil) : null,
 		status: m.status,
 		players: m.players,
@@ -54,6 +56,7 @@ export function liveViewFromRow(r: ServerLiveRow): LiveView {
 		reservedSlots: r.reservedSlots ?? null,
 		restartTimeUtc: r.restartTimeUtc ?? null,
 		restartTimeUtcFile: r.restartTimeUtcFile ?? null,
+		matchState: matchStateOf(r.matchState),
 		// A hold lasts seconds; a row read cold from the database is not inside one.
 		throttledUntil: null,
 		status: saneStatus(r.status),

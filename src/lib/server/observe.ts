@@ -30,6 +30,7 @@ import {
 	riskSparesReserved,
 	riskInputs,
 	matchBoundary,
+	resultOf,
 	seedRule,
 	type MatchEnd,
 	type MatchLook,
@@ -77,7 +78,9 @@ import { nextDue, withHold } from './poller-schedule';
 import { cashByFaction } from '$lib/cash';
 import { keepName } from './live-name-write';
 import type { NameMemory } from './live-name';
-import type { Features, LiveView, Player, Status } from '$lib/types';
+import { takeFeedEnd, withFeedEnd, type ClosedMatch, type FeedEnd } from './match-feed';
+import { matchStateOf } from '$lib/match-state';
+import type { Features, LiveView, MatchStateView, Player, Status } from '$lib/types';
 
 export type Tier = LiveView['tier'];
 
@@ -120,6 +123,12 @@ export interface ServerMemory {
 	riskWaitNoted: boolean;
 	/** the previous look at the match (map, scores, clock); null until one is remembered */
 	lastMatch: MatchLook | null;
+	/** the last match state the feed reported (match-feed.ts), seeded from server_live */
+	matchState: MatchStateView | null;
+	/** the feed's result of the match in progress, held for the look that sees the match end */
+	feedEnd: FeedEnd | null;
+	/** the match the last boundary closed and when, for a result the feed delivers after it */
+	closed: ClosedMatch | null;
 	/** each player's line of the match in progress, from the scoreboard (match-players.ts) */
 	tallies: Tallies;
 	reserved: Set<string>;
@@ -204,6 +213,9 @@ export function memoryFor(server: ServerRow, org: OrgRow): ServerMemory {
 			riskKickedAt: new Map(),
 			riskWaitNoted: false,
 			lastMatch: null,
+			matchState: null,
+			feedEnd: null,
+			closed: null,
 			tallies: new Map(),
 			reserved: new Set(),
 			reservedAt: 0,
@@ -261,12 +273,15 @@ async function hydrateIdentity(env: Env, m: ServerMemory): Promise<void> {
 				reservedSlots: serverLive.reservedSlots,
 				restartTimeUtc: serverLive.restartTimeUtc,
 				restartTimeUtcFile: serverLive.restartTimeUtcFile,
-				startedAt: serverLive.startedAt
+				startedAt: serverLive.startedAt,
+				matchState: serverLive.matchState
 			})
 			.from(serverLive)
 			.where(eq(serverLive.serverId, m.server.id))
 			.limit(1);
 		if (row) {
+			// a state the feed handed over since this process started is newer than the row's
+			if (!m.matchState) m.matchState = matchStateOf(row.matchState);
 			if (!m.identity.build) m.identity.build = row.build;
 			if (!m.identity.gameServerId) m.identity.gameServerId = row.gameServerId;
 			if (m.identity.reservedSlots === null) m.identity.reservedSlots = row.reservedSlots;
@@ -391,6 +406,11 @@ export function forgetRemembered(): void {
 	for (const m of registry.values()) {
 		m.presence = newPresence();
 		m.lastMatch = null;
+		m.feedEnd = null;
+		m.closed = null;
+		// the feed's last state, read again from what the web wrote meanwhile
+		m.matchState = null;
+		m.identity.hydrated = false;
 		m.liveKey = '';
 		m.sampleKey = '';
 		m.listsAt = 0;
@@ -560,7 +580,11 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 				matchSeconds: status.matchSeconds ?? null
 			}
 		: null;
-	const matchEnd = look && !wasOffline ? matchBoundary(m.lastMatch, look) : null;
+	const boundary = look && !wasOffline ? matchBoundary(m.lastMatch, look) : null;
+	// The game's own result, when its feed reported one, in place of what the last look saw.
+	const matchEnd = boundary
+		? withFeedEnd(boundary, takeFeedEnd(m, boundary.scores, started))
+		: null;
 	if (look) m.lastMatch = look;
 	if (hadFailed || started - m.identity.checkedAt >= IDENTITY_TTL_MS)
 		await refreshIdentity(client, m, started);
@@ -1001,6 +1025,18 @@ async function keepLists(
 	}
 }
 
+/** What a match closed by a look leaves for a result the feed delivers after it (match-feed.ts). */
+const closedMatch = (
+	id: number,
+	ts: Date,
+	end: { scores: { name: string }[]; byFeed?: boolean }
+): ClosedMatch => ({
+	id,
+	at: ts.getTime(),
+	factions: end.scores.map((f) => ({ name: f.name })),
+	byFeed: !!end.byFeed
+});
+
 /**
  * The match bookkeeping of one status look: a boundary seen in memory closes the open row with
  * its result and writes every player's line of it (then the feed's columns, on servers with a
@@ -1041,11 +1077,27 @@ async function reconcileMatch(
 				.update(matches)
 				.set({ endedAt: ts, finalScores: ended.scores, winner: ended.winner })
 				.where(eq(matches.id, current.id));
+			m.closed = closedMatch(current.id, ts, ended);
 		}
 		m.tallies = closed.carried;
 	} else if (current && stale) {
-		// Abandoned: no scores, no winner. What the tallies hold belongs to the map now on.
-		await db.update(matches).set({ endedAt: ts }).where(eq(matches.id, current.id));
+		// Abandoned: no boundary was seen, so no scores and no winner unless the feed reported its
+		// result meanwhile. What the tallies hold belongs to the map now on.
+		const fed = takeFeedEnd(m, m.status!.scores, ts.getTime());
+		const result = fed && resultOf(current.map ?? '', fed.scores, fed.winner);
+		await db
+			.update(matches)
+			.set(
+				result
+					? { endedAt: ts, finalScores: result.scores, winner: result.winner }
+					: { endedAt: ts }
+			)
+			.where(eq(matches.id, current.id));
+		m.closed = closedMatch(
+			current.id,
+			ts,
+			result ? { ...result, byFeed: true } : { scores: m.status!.scores }
+		);
 	} else if (current) {
 		const due = [...m.tallies.values()].filter((t) => t.dirty);
 		if (due.length) {

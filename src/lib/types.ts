@@ -155,6 +155,11 @@ export interface LiveView {
 	 */
 	restartTimeUtc?: string | null;
 	restartTimeUtcFile?: string | null;
+	/**
+	 * The last match state the kill feed reported (Season 2 builds; $lib/match-state), null when
+	 * none has; read it through currentState
+	 */
+	matchState?: MatchStateView | null;
 	/** set while the listener has asked the panel to slow down (429 with Retry-After) */
 	throttledUntil: string | null;
 	status: Status | null;
@@ -162,6 +167,15 @@ export interface LiveView {
 	statusAt: string | null;
 	playersAt: string | null;
 	observedAt: string | null;
+}
+/** The last match state the kill feed reported ($lib/match-state names them). */
+export interface MatchStateView {
+	/** the game's name, e.g. MatchState.PreMatch.WaitingForPlayers.PlayerCount */
+	state: string;
+	/** the map's catalog id as the event named it */
+	map: string;
+	/** when Warcon received it */
+	at: string;
 }
 /** One kill as the game's feed reported it and Warcon stored it (kills table). */
 export interface KillView {

@@ -175,6 +175,8 @@ export interface ProcessSnapshot {
 		other: number;
 		skipped: number;
 		duplicates: number;
+		/** match states the same as the last one stored for the server (feed.ts) */
+		repeats: number;
 	};
 	rateLimited: { total: number; feed: number };
 	rssBytes: number;
@@ -220,7 +222,8 @@ export async function snapshot(): Promise<ProcessSnapshot> {
 			kills: await total(feedKills, (l) => l.result === 'accepted'),
 			other: await total(feedKills, (l) => l.result === 'other'),
 			skipped: await total(feedKills, (l) => l.result === 'skipped'),
-			duplicates: await total(feedKills, (l) => l.result === 'duplicate')
+			duplicates: await total(feedKills, (l) => l.result === 'duplicate'),
+			repeats: await total(feedKills, (l) => l.result === 'repeat')
 		},
 		rateLimited: {
 			total: await total(rateLimited),

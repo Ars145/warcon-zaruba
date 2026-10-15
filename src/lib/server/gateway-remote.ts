@@ -11,6 +11,7 @@ import type { Priority } from './dispatcher';
 import type { KillView, LiveView, ListSyncSummary } from '$lib/types';
 import type { SyncResult } from './lists-sync';
 import type { PollerStats } from './poller';
+import type { MatchFeed } from './match-feed';
 import { RELAY_PREFIX, type RelayError } from './relay';
 
 const TIMEOUT_MS = 30_000;
@@ -183,6 +184,9 @@ export function connectRemoteGateway(env: Env): Gateway {
 		},
 		killsIngested(env, serverId, kills: KillView[]) {
 			void call(env, '/kills', { serverId, kills }).catch(() => {});
+		},
+		matchFeed(env, serverId, feed: MatchFeed) {
+			void call(env, '/match-feed', { serverId, feed }).catch(() => {});
 		},
 		subscribe,
 		health(env) {

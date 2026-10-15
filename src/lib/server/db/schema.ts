@@ -8,6 +8,7 @@ import {
 	check,
 	customType,
 	date,
+	doublePrecision,
 	index,
 	integer,
 	numeric,
@@ -589,6 +590,49 @@ export const kills = pgTable(
 	]
 );
 export type KillRow = typeof kills.$inferSelect;
+
+/**
+ * Every match state and result a server's feed reported (Season 2's `match_state` and
+ * `match_ended`, see docs/wardogs-api.md), as it arrived: the game's own record of its matches and
+ * the only account of its order and timing. A copy of a batch the game sends again is not stored
+ * twice, nor a state the same as the last one stored for the server (feed.ts counts it as a
+ * repeat). No player in it. History: never pruned, gone only with the server's stats purge; a
+ * TimescaleDB hypertable with compression where the extension exists (migration 0049).
+ */
+export const matchEvents = pgTable(
+	'match_events',
+	{
+		/** when Warcon received it */
+		ts: ts('ts').notNull(),
+		serverId: text('server_id').notNull(),
+		eventId: text('event_id').notNull(),
+		/** its place among its batch's events, which share `ts` */
+		seq: integer('seq').notNull(),
+		/** the game's serverId: a per-boot instance id */
+		instanceId: text('instance_id').notNull(),
+		/** match_state | match_ended */
+		type: text('type').notNull(),
+		/** the match clock, as sent */
+		eventTime: doublePrecision('event_time'),
+		/** null when the event named none (pre-match) */
+		matchId: text('match_id'),
+		/** the map's catalog id */
+		map: text('map').notNull(),
+		/** match_state: e.g. MatchState.PreMatch.WaitingForPlayers.PlayerCount */
+		state: text('state'),
+		/** match_ended: who was on */
+		players: integer('players'),
+		/** match_ended: `winningFaction` as the game sent it ('' when absent) */
+		winningFaction: text('winning_faction'),
+		/** match_ended: [{ name, score }], highest first */
+		scores: jsonb('scores')
+	},
+	(t) => [
+		// Not unique, as on kills: a hypertable's unique indexes must include ts.
+		index('match_events_event_idx').on(t.eventId),
+		index('match_events_server_ts_idx').on(t.serverId, t.ts.desc())
+	]
+);
 
 /**
  * The names the kill feed showed for a player that were not the one the server's player list held
@@ -1204,6 +1248,11 @@ export const serverLive = pgTable('server_live', {
 	observedAt: ts('observed_at'),
 	/** when the last kill feed batch arrived (written by the web process that took it) */
 	feedAt: ts('feed_at'),
+	/**
+	 * the last match state the feed reported, MatchStateView ({ state, map, at }); written by the
+	 * web process that took it, like feedAt, and left alone by the worker's upsert
+	 */
+	matchState: jsonb('match_state'),
 	updatedAt: ts('updated_at').notNull().defaultNow()
 });
 

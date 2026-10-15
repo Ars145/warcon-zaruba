@@ -660,7 +660,34 @@ export interface MatchEnd {
 	winner: string | null;
 	/** the leader, or every faction tied at the top; empty when nobody scored */
 	leaders: string[];
+	/** the result is the game's own (the feed's `match_ended`), not the last look's */
+	byFeed?: boolean;
 }
+
+/**
+ * A match's result from its final scores: the winner the game named, else the faction alone at
+ * the top when it scored (a tie at the top, or nobody scoring, has no winner).
+ */
+export function resultOf(
+	map: string,
+	final: { name: string; score: number }[],
+	named: string | null = null
+): MatchEnd {
+	const scores = [...final].sort((a, b) => b.score - a.score);
+	const top = scores[0]?.score ?? 0;
+	const leaders = named
+		? [named]
+		: top > 0
+			? scores.filter((f) => f.score === top).map((f) => f.name)
+			: [];
+	return { map, scores, winner: leaders.length === 1 ? leaders[0] : null, leaders };
+}
+
+/** Both name the same factions, in any order. */
+export const sameFactions = (
+	a: readonly { name: string }[],
+	b: readonly { name: string }[]
+): boolean => a.length === b.length && a.every((f) => b.some((g) => g.name === f.name));
 
 /**
  * The match that ended between two looks, or null while it is the same match. A boundary is a
@@ -677,15 +704,7 @@ export function matchBoundary(prev: MatchLook | null, next: MatchLook): MatchEnd
 		next.matchSeconds !== null &&
 		next.matchSeconds < prev.matchSeconds - 30;
 	if (prev.map === next.map && !clockBack && total(next) >= total(prev)) return null;
-	const scores = [...prev.scores].sort((a, b) => b.score - a.score);
-	const top = scores[0]?.score ?? 0;
-	const leaders = top > 0 ? scores.filter((f) => f.score === top).map((f) => f.name) : [];
-	return {
-		map: prev.map,
-		scores,
-		winner: leaders.length === 1 ? leaders[0] : null,
-		leaders
-	};
+	return resultOf(prev.map, prev.scores);
 }
 
 /** A player's line of the match that ended, as far as the placeholders need it. */

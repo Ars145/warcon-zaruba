@@ -75,6 +75,7 @@
 	const otherPerSec = $derived(webRate((p) => p.feed.other));
 	const skippedPerSec = $derived(webRate((p) => p.feed.skipped));
 	const dupesPerSec = $derived(webRate((p) => p.feed.duplicates));
+	const repeatsPerSec = $derived(webRate((p) => p.feed.repeats));
 	const reqPerSec = $derived(webRate((p) => p.requests.total));
 	const publicPerSec = $derived(webRate((p) => p.requests.public));
 	const reqMean = $derived(
@@ -232,8 +233,8 @@
 			>
 		</div>
 		<div class="kv">
-			<span class="text-mist-400">Joins, leaves, match states, results</span><span
-				>{fmtRate(otherPerSec)}</span
+			<span class="text-mist-400">Joins, leaves, match states, results · states repeated</span><span
+				>{fmtRate(otherPerSec)} · {fmtRate(repeatsPerSec)}</span
 			>
 		</div>
 		<div class="kv">
