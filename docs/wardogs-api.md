@@ -188,8 +188,10 @@ reads its feed from the RCON block instead: `bEventFeedEnabled`, a list `EventFe
 and apply drop them without a word, so the host pastes them into the file (README, "Kill feed").
 A file the game wrote held `bEventFeedEnabled=True`, `!EventFeedEndpoints=ClearArray`,
 `.EventFeedEndpoints=(Url="…",Token=…)` and `EventFeedServerName=…`. `GET /v1/feed` answers
-`{enabled, endpointCount, anyUnhealthy, endpoints:[]}`; an endpoint's shape was not seen. Not
-confirmed yet: that the game still appends `/api/ingest/events` to such a `Url`.
+`{enabled, endpointCount, anyUnhealthy, endpoints:[]}`; an endpoint's shape was not seen. Unlike
+`[WDServerFeed]`, the game posts to such a `Url` exactly as written (the console's
+`ServerSettings.ini` says so, and on 2026-10-15 lines naming the panel's origin alone did not
+reach it), so the line names `/api/ingest/events` in full.
 
 The batches also carry four new types beside `killed`, each with `eventId`, `eventTime`, `matchId`
 and `mapName` as above (posted on Discord by a host on 2026-10-15, ids blanked):

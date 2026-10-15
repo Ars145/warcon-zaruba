@@ -733,11 +733,13 @@ restart the server:
 
 ```ini
 bEventFeedEnabled=True
-+EventFeedEndpoints=(Url="https://your-panel.example",Token="wkf_…")
++EventFeedEndpoints=(Url="https://your-panel.example/api/ingest/events",Token="wkf_…")
 EventFeedServerName="Your server"
 ```
 
-The list can hold other endpoints beside Warcon's. After **Replace token**, paste the new line in
+Unlike `[WDServerFeed]`, the game posts to this `Url` exactly as written, so it carries the path.
+Lines copied from the card before 15 October 2026 named the origin alone and never arrive: copy
+the line again and restart the server. The list can hold other endpoints beside Warcon's. After **Replace token**, paste the new line in
 place of the old one. `EventFeedServerName` is the name the game sends with each batch; Warcon
 goes by the token, so keep one such line if the file already has it.
 
