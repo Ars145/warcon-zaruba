@@ -49,8 +49,9 @@ const hashToken = (token: string): string =>
 	createHash('sha256').update(token, 'utf8').digest('hex');
 
 /**
- * What goes in [WDServerFeed] Url: the panel's origin alone. The game appends /api/ingest/events
- * to whatever Url holds (CL-501228), so the route lives at that path.
+ * What goes in [WDServerFeed] Url: the panel's origin alone. Builds up to CL-509546 append
+ * /api/ingest/events to whatever Url holds (CL-501228), so the route lives at that path. Season 2's
+ * EventFeedEndpoints Url is posted to as written and carries the path ($lib/feed-setup).
  */
 export const feedUrl = (env: Pick<Env, 'ORIGIN'>): string => env.ORIGIN;
 
