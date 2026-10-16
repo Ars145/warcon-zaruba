@@ -118,6 +118,12 @@ export const RULE_KINDS: { kind: TriggerKind; group: RuleGroup; label: string; b
 		blurb: 'Put an empty server back on a chosen map after a while.'
 	},
 	{
+		kind: 'restart_skip',
+		group: 'Server',
+		label: 'Skip map after restart',
+		blurb: 'After a restart, skip the map the game starts on when the rotation does not have it.'
+	},
+	{
 		kind: 'rotation_shuffle',
 		group: 'Server',
 		label: 'Rotation shuffle',
@@ -137,7 +143,8 @@ export const RULE_KINDS: { kind: TriggerKind; group: RuleGroup; label: string; b
  * server, two Team balance rules would move players back and forth, two AFK protection rules would
  * kill everyone twice a round, two Bounty rules would mark two players at once, two Rotation shuffle
  * rules would each undo the other's order, two Live server name rules would each write their own
- * name over the other's. The picker opens the one a server has.
+ * name over the other's, two Skip map after restart rules would end the match twice. The picker
+ * opens the one a server has.
  */
 export const ONE_PER_SERVER: TriggerKind[] = [
 	'seed_reward',
@@ -145,7 +152,8 @@ export const ONE_PER_SERVER: TriggerKind[] = [
 	'afk_protection',
 	'bounty',
 	'rotation_shuffle',
-	'live_name'
+	'live_name',
+	'restart_skip'
 ];
 
 /**

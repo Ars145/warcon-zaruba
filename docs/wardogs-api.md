@@ -238,6 +238,15 @@ bounds the rest. The demo server's feed sends joins, leaves (kicks and bans too)
 no `matchId` in pre-match, a new one each match) and a result when a side reaches the cap or the
 match is ended by hand.
 
+**The start-up map.** Hosts report (2026-10-16) that a Season 2 server comes up after a restart on
+standard Bakurani, not on its rotation, and moves on to the rotation only once that match ends: an
+infantry-only rotation opens every day on a standard match. Ending that match (`POST /v1/match/end`,
+the console's force end) moves the server on to its rotation, which is how hosts skip it by hand
+and what the Skip map after restart rule sends. Not seen yet: what `rotation.nowIndex` says on the
+start-up map, and whether an end during its pre-match goes straight to the rotation's next entry.
+`MOCK_STARTUP_MAP=true` makes the demo servers come up that way (standard Bakurani at a time of day
+their rotation does not have, `nowIndex` -1, the top of the rotation next).
+
 Only `ScorePeriod`, `bEnabled` and `RotationMode` have live routes; everything else changes via the
 config document (PUT `/v1/config`) or by editing the ini and restarting.
 

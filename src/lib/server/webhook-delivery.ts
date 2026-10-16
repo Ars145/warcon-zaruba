@@ -148,6 +148,7 @@ const ACTION_TITLES: Record<string, string> = {
 	'trigger.faction_change': 'Trigger · faction change whisper',
 	'trigger.broadcast': 'Trigger · scheduled broadcast',
 	'trigger.empty_reset': 'Trigger · empty-server map reset',
+	'trigger.restart_skip': 'Trigger · skip map after restart',
 	'trigger.risk_kick': 'Trigger · kick on connect risk',
 	'trigger.ping_kick': 'Trigger · high ping kick',
 	'trigger.restart_notice': 'Trigger · restart notice',

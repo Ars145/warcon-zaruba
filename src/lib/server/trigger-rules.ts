@@ -12,6 +12,7 @@ import { validateNameChange, type NameChangeConfig } from './name-change';
 import { validateBounty, type BountyConfig } from './bounty';
 import { validateRotationShuffle, type RotationShuffleConfig } from './rotation-shuffle';
 import { validateLiveName } from './live-name';
+import { validateRestartSkip, type RestartSkipConfig } from './restart-skip';
 import type { LiveNameConfig } from '$lib/live-name';
 import { causeTags } from './cause-tags';
 import { MAX_RESTART_LEAD_MINUTES, restartWindow, type RestartSchedule } from '$lib/uptime';
@@ -41,7 +42,8 @@ export const TRIGGER_KINDS: TriggerKind[] = [
 	'name_change',
 	'bounty',
 	'rotation_shuffle',
-	'live_name'
+	'live_name',
+	'restart_skip'
 ];
 export const TRIGGER_LABELS: Record<TriggerKind, string> = {
 	welcome: 'Welcome whisper',
@@ -62,7 +64,8 @@ export const TRIGGER_LABELS: Record<TriggerKind, string> = {
 	name_change: 'Name change watch',
 	bounty: 'Bounty',
 	rotation_shuffle: 'Rotation shuffle',
-	live_name: 'Live server name'
+	live_name: 'Live server name',
+	restart_skip: 'Skip map after restart'
 };
 
 export interface WelcomeConfig {
@@ -226,7 +229,8 @@ export type TriggerConfig =
 	| NameChangeConfig
 	| BountyConfig
 	| RotationShuffleConfig
-	| LiveNameConfig;
+	| LiveNameConfig
+	| RestartSkipConfig;
 
 /** A kick reason: not chat, so not held to the game's chat cap. */
 export const MAX_REASON = 200;
@@ -426,6 +430,8 @@ export function validateConfig(kind: TriggerKind, raw: unknown): TriggerConfig {
 			return validateRotationShuffle(c);
 		case 'live_name':
 			return validateLiveName(c);
+		case 'restart_skip':
+			return validateRestartSkip();
 	}
 }
 
