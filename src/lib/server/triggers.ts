@@ -586,7 +586,8 @@ export interface TickContext {
 	factioned: FactionPick<Player>[];
 	/** joiners and factioned players never seen on this server before */
 	firstVisit: Set<string>;
-	/** SteamIDs with a reserved slot */
+	/** SteamIDs with a reserved slot: on the server's list as the panel keeps it (its config
+	 *  document), whether or not a live build has taken the change up yet */
 	reserved: Set<string>;
 	/** false until the worker has read the server's reserved list since it started */
 	reservedLoaded: boolean;
