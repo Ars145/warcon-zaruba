@@ -79,6 +79,8 @@ interface State {
 	matchState: string;
 	/** the game's id for the match in progress, on the feed's events */
 	matchId: string;
+	/** when the game process started (ms): what GET /v1/health counts its uptime from */
+	startedAt: number;
 }
 
 const MAPS = [
@@ -151,6 +153,11 @@ const MAX_BODY_BYTES = 65536;
 // AFK protection can be watched at work, and lowering the minimum starts the match.
 const prematch = () => /^(1|true|yes)$/i.test(process.env.MOCK_PREMATCH || '');
 const PREMATCH_MINIMUM = 60;
+// With MOCK_STARTUP_MAP=true a demo server comes up on standard Bakurani at a time of day its
+// rotation does not have, and goes to the top of the rotation only once that match ends, as hosts
+// report live servers doing since Season 2 (the Skip map after restart rule ends that match).
+const startupMap = () => /^(1|true|yes)$/i.test(process.env.MOCK_STARTUP_MAP || '');
+const STARTUP_MAP = { map: 'Kavkazi', experiences: ['Bakurani_KOTH_01'], lighting: 'DayClear' };
 // The match states the demo's feed reports (match_state events): a new match starts in pre-match,
 // waits there below the minimum under MOCK_PREMATCH, plays, and ends (with match_ended first).
 // Pre-match carries no match id, as on the game: it has none until the world has loaded.
@@ -458,7 +465,8 @@ function seed(name: string): State {
 		configRevision: 1,
 		feed: [],
 		matchState: '',
-		matchId: crypto.randomUUID()
+		matchId: crypto.randomUUID(),
+		startedAt: STARTED
 	};
 	state.configText = seedConfig(state);
 	return state;
@@ -547,18 +555,30 @@ function demoServerId(key: string): string {
 }
 
 /**
- * The game process restarting (not a match restart): under MOCK_LIVE_BUILD the running reserved
- * list is read again from the document, as a live server does at start. For tests.
+ * The game process restarting (not a match restart), at `at` (now by default): its uptime counts
+ * from then, the running reserved list is read again from the document, as a live server does at
+ * start, and under MOCK_STARTUP_MAP it comes up on the start-up map. For tests.
  */
-export function restartMock(key: string): void {
+export function restartMock(key: string, at = Date.now()): void {
 	const s = stateFor(key);
+	s.startedAt = at;
 	s.reserved = reservedFromText(s.configText).filter((id) => /^\d{17}$/.test(id));
+	if (startupMap()) comeUp(s);
+}
+
+/** A new match on the start-up map, off the rotation, with the top of the rotation next. */
+function comeUp(s: State): void {
+	s.current = { ...STARTUP_MAP, experiences: [...STARTUP_MAP.experiences], alternator: '' };
+	s.rotation.nowIndex = -1;
+	s.rotation.nextIndex = s.rotation.entries.length ? nextPlayable(s, -1) : -1;
+	resetScores(s);
 }
 
 function stateFor(key: string): State {
 	let s = states.get(key);
 	if (!s) {
 		s = seed(`Warcon Demo Server [${key.slice(0, 6)}]`);
+		if (startupMap()) comeUp(s);
 		if (prematch()) for (const f of s.factions) f.score = 0;
 		states.set(key, s);
 	}
@@ -878,7 +898,7 @@ export function mockHandle(
 	if (route === 'GET health') {
 		return ok({
 			status: 'ok',
-			uptimeSeconds: Math.floor((Date.now() - STARTED) / 1000),
+			uptimeSeconds: Math.floor((Date.now() - s.startedAt) / 1000),
 			connections: { active: 1 },
 			gameThreadQueue: { inFlight: 0, depth: 32, rejectedTotal: 0 }
 		});

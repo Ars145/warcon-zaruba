@@ -583,7 +583,8 @@ export type TriggerKind =
 	| 'name_change'
 	| 'bounty'
 	| 'rotation_shuffle'
-	| 'live_name';
+	| 'live_name'
+	| 'restart_skip';
 
 export interface TriggerView {
 	id: string;

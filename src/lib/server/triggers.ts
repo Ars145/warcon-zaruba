@@ -4,6 +4,8 @@
 //   faction_change  whisper a message to players who switch from one faction to another
 //   broadcast    rotate through messages every N minutes while the player count is in its band
 //   empty_reset  send an empty server back to a chosen map after N minutes
+//   restart_skip  end the match a restart brings the server up on when its rotation does not have
+//                that map (restart-skip.ts)
 //   risk_kick    kick joiners who match Steam / ban-list rules (see risk.ts)
 //   ping_kick    kick players whose ping stays above a limit
 //   team_kill    whisper or kick a player over team kills the kill feed reports (feed-events.ts)
@@ -195,6 +197,15 @@ import {
 import { DEFAULT_SCORE_CAP } from '$lib/match';
 import { liveName, type LiveNameConfig } from '$lib/live-name';
 import { liveNameState } from './live-name';
+import {
+	onNow,
+	RESTART_SKIP,
+	RESTART_SKIP_KEY,
+	restartSkipState,
+	restartSkipStep,
+	selectionName,
+	underWay
+} from './restart-skip';
 import { mapName } from '$lib/format';
 import { statsIn, usesStats } from '$lib/placeholders';
 import { settings } from './settings';
@@ -296,6 +307,7 @@ const RULE_NEEDS: Record<
 	restart_notice: ['chat.send', 'messages players'],
 	match_broadcast: ['chat.send', 'messages players'],
 	empty_reset: ['match.control', 'changes the map'],
+	restart_skip: ['match.control', 'ends the match'],
 	risk_kick: ['players.kick', 'kicks players'],
 	name_filter: ['players.kick', 'kicks players'],
 	ping_kick: ['players.kick', 'kicks players'],
@@ -459,10 +471,13 @@ export async function updateTrigger(
 	// Switched on again, an AFK protection rule starts from what the server shows then: whether it
 	// emptied or restarted while the rule was off is unknown. An edit keeps where it stands, so
 	// changing a message while a match is on cannot turn it on.
+	// Switched on again, a Skip map after restart rule acts from the next restart, taking the time
+	// of this save as its start (restart-skip.ts).
 	const switchOn =
 		row.kind === 'two_teams' && set.enabled === true
 			? sql`CASE WHEN ${triggers.enabled} THEN ${triggers.state} ELSE (${JSON.stringify({ enabledAt: Date.now() })}::text)::jsonb END`
 			: (row.kind === 'afk_protection' ||
+						row.kind === 'restart_skip' ||
 						(row.kind === 'rotation_shuffle' && set.state === undefined)) &&
 				  set.enabled === true
 				? sql`CASE WHEN ${triggers.enabled} THEN ${triggers.state} ELSE NULL END`
@@ -535,13 +550,15 @@ export async function deleteTrigger(
  * delivery): a Team balance move decided under the old closed faction or gap could take a player
  * to the wrong side, and a Kill distance kick or ban decided under settings an admin has just corrected, or by
  * a rule just switched off, is not to be sent; nor is an AFK protection round once the rule is off,
- * which is how it is stopped in a hurry, nor a Name change flag or kick.
+ * which is how it is stopped in a hurry, nor a Name change flag or kick, nor a skip of the map a
+ * server came up on (it has no settings: only being switched off or deleted stops it).
  */
 export const SETTINGS_KEYS: Partial<Record<string, (config: unknown) => string>> = {
 	two_teams: (c) => twoTeamsSettingsKey(c as TwoTeamsConfig),
 	kill_distance: (c) => killDistanceSettingsKey(c as KillDistanceConfig),
 	afk_protection: (c) => afkSettingsKey(c as AfkProtectionConfig),
-	name_change: (c) => nameChangeSettingsKey(c as NameChangeConfig)
+	name_change: (c) => nameChangeSettingsKey(c as NameChangeConfig),
+	restart_skip: () => RESTART_SKIP_KEY
 };
 
 /**
@@ -816,6 +833,9 @@ export async function evaluateTriggers(
 				case 'empty_reset':
 					await evalEmptyReset(env, ctx, row, row.config as EmptyResetConfig, out);
 					break;
+				case 'restart_skip':
+					evalRestartSkip(ctx, row, out);
+					break;
 				case 'risk_kick':
 					await evalRiskKick(env, ctx, row, row.config as RiskKickConfig, out, read);
 					break;
@@ -1031,6 +1051,55 @@ async function evalEmptyReset(
 	});
 	row.lastFiredAt = ctx.ts;
 	out.updates.push({ id: row.id, lastFiredAt: ctx.ts, lastResult: `Resetting to ${cfg.map}` });
+}
+
+/**
+ * At the first look of a run that started while the rule was on, one skip of the map the server
+ * came up on, which delivery sends only if the rotation does not have that map (restart-skip.ts).
+ * A first match already under way when the worker first sees the run is left to play: the row is
+ * kept, skipped, saying so.
+ */
+function evalRestartSkip(ctx: TickContext, row: TriggerRow, out: Evaluation) {
+	if (!ctx.status.map) return;
+	const step = restartSkipStep(restartSkipState(row.state), {
+		startedAt: ctx.startedAt,
+		armedAt: row.updatedAt.getTime()
+	});
+	if (!step) return;
+	row.state = step.state;
+	if (!step.act) {
+		out.updates.push({ id: row.id, state: step.state });
+		return;
+	}
+	const on = onNow(ctx.status);
+	const name = selectionName(on);
+	const late = underWay(ctx.status.scores, ctx.startedAt, ctx.ts.getTime());
+	out.intents.push({
+		trigger: row,
+		action: RESTART_SKIP,
+		params: { rule: RESTART_SKIP_KEY, startedAt: ctx.startedAt, ...on },
+		target: name,
+		okMessage: `Skipped ${name}.`,
+		detail: { startedAt: new Date(ctx.startedAt).toISOString(), ...on },
+		steamId: null,
+		dedupeKey: key(row, 'boot', ctx.startedAt),
+		...(late
+			? {
+					watchOnly: `Came up on ${name} with the match under way when first seen, so it plays on.`
+				}
+			: {})
+	});
+	if (late) {
+		out.updates.push({ id: row.id, lastResult: `Left ${name} to play.`, state: step.state });
+		return;
+	}
+	row.lastFiredAt = ctx.ts;
+	out.updates.push({
+		id: row.id,
+		lastFiredAt: ctx.ts,
+		lastResult: `Checking ${name}, the map the server came up on.`,
+		state: step.state
+	});
 }
 
 async function evalRiskKick(
@@ -2729,6 +2798,45 @@ export async function dryRun(
 			result.notes.push('The worker has not seen this server yet, so there is no score to show.');
 		result.notes.push(
 			'Nothing to replay: the rule writes the name from what the server shows at each look, whenever it changes and at most once a minute. Switched off, it puts the name back without the appended part.'
+		);
+		return result;
+	}
+	if (kind === 'restart_skip') {
+		const [live] = await env.db
+			.select({ startedAt: serverLive.startedAt, restartTimeUtc: serverLive.restartTimeUtc })
+			.from(serverLive)
+			.where(eq(serverLive.serverId, server.id))
+			.limit(1);
+		if (!live?.startedAt) {
+			result.notes.push(
+				'The worker has not read this server’s uptime yet (GET /v1/health), so it cannot see a restart.'
+			);
+			return result;
+		}
+		const schedule = restartScheduleOf(server.restartSchedule, live.restartTimeUtc);
+		const w = restartWindow(live.startedAt.toISOString(), schedule, to.getTime());
+		if (w) push(w.due ? to : new Date(w.dueAt), 'after the restart: skip the map it comes up on');
+		// What the server came up on this time: the first look of the run.
+		const [first] = await env.db
+			.select({ map: samples.map, experiences: samples.experiences, lighting: samples.lighting })
+			.from(samples)
+			.where(
+				and(eq(samples.serverId, server.id), eq(samples.ok, true), gte(samples.ts, live.startedAt))
+			)
+			.orderBy(asc(samples.ts))
+			.limit(1);
+		const cameUp = first?.map
+			? `; it came up on ${selectionName({
+					map: first.map,
+					experiences: first.experiences ? first.experiences.split('+') : [],
+					lighting: first.lighting ?? ''
+				})}`
+			: '';
+		result.notes.push(
+			`${restartsNote(schedule)}Up ${fmtUptime(w?.upMs ?? 0)}${cameUp}. Times shown are the coming restart, not a replay.`
+		);
+		result.notes.push(
+			'At the first look after each restart the rule reads the rotation from the server and ends the match only if the map and modes it came up on are not in it. It acts from the next restart after it is switched on.'
 		);
 		return result;
 	}
