@@ -72,7 +72,7 @@ export interface SyncResult extends ListSyncServer {
 	/** why nothing ran, when nothing ran */
 	skipped?: 'busy' | 'suspended';
 	/** the server's lists after the run; the poller keeps its in-memory copy from this */
-	observed?: { bans: string[]; reserved: string[] };
+	observed?: { bans: string[]; reserved: string[]; configured: string[] };
 	/** the bans the lists put on this server; the worker removes these players on sight */
 	bans?: PanelBan[];
 }
@@ -634,7 +634,11 @@ async function run(
 }
 
 const refOf = (r: { kind: Kind; steamId: string }) => `${r.kind}:${r.steamId}`;
-const flat = (o: Observed) => ({ bans: o.bans.map((b) => b.steamId), reserved: o.reserved });
+const flat = (o: Observed) => ({
+	bans: o.bans.map((b) => b.steamId),
+	reserved: o.reserved,
+	configured: o.configured
+});
 
 interface Failed {
 	kind: Kind;
