@@ -11,6 +11,7 @@
 	import BanDialog from '$lib/components/BanDialog.svelte';
 	import CareerPanel from '$lib/components/CareerPanel.svelte';
 	import CombatSummary from '$lib/components/CombatSummary.svelte';
+	import SavedMessages from '$lib/components/SavedMessages.svelte';
 	import { describeSync, STATE_TONE } from '$lib/lists';
 	import { RULE_KINDS } from '$lib/rule-kinds';
 	import SortHeader from '$lib/components/SortHeader.svelte';
@@ -602,23 +603,35 @@
 						>{/if}
 				</div>
 				{#if onThisServer}
-					<div class="join w-full">
-						<input
-							class="input"
-							type="text"
-							placeholder="Private message…"
-							maxlength={MAX_CHAT}
-							bind:value={whisper}
-						/>
-						<button
-							class="btn btn-primary"
-							disabled={busy || !chat || !whisper.trim()}
-							onclick={async () => {
-								await act('whisper', { steamId: d.steamId, message: whisper.trim() });
-								whisper = '';
-							}}>Whisper</button
-						>
-					</div>
+					<SavedMessages
+						server={data.server}
+						label="Whisper"
+						labelFor="dossier-whisper"
+						inputId="dossier-whisper"
+						value={whisper}
+						onpick={(text) => (whisper = text)}
+						send="Whisper"
+						enabled={chat}
+					>
+						<div class="join w-full">
+							<input
+								id="dossier-whisper"
+								class="input"
+								type="text"
+								placeholder="Private message…"
+								maxlength={MAX_CHAT}
+								bind:value={whisper}
+							/>
+							<button
+								class="btn btn-primary"
+								disabled={busy || !chat || !whisper.trim()}
+								onclick={async () => {
+									await act('whisper', { steamId: d.steamId, message: whisper.trim() });
+									whisper = '';
+								}}>Whisper</button
+							>
+						</div>
+					</SavedMessages>
 					<div class="join join-wrap mt-2 w-full">
 						<input
 							class="input"
