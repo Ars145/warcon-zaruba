@@ -125,6 +125,7 @@ describe('validateConfig', () => {
 		expect(validateConfig('ping_kick', {})).toEqual({
 			maxPingMs: 200,
 			durationSeconds: 60,
+			spareReserved: false,
 			reason: 'Ping too high for too long.'
 		});
 		expect(() => validateConfig('ping_kick', { maxPingMs: 0 })).toThrow('ping limit');
@@ -132,6 +133,14 @@ describe('validateConfig', () => {
 		expect(validateConfig('ping_kick', { maxPingMs: 250, durationSeconds: 30 })).toMatchObject({
 			maxPingMs: 250,
 			durationSeconds: 30
+		});
+	});
+	test('ping_kick spares reserved slots only when told to', () => {
+		expect(validateConfig('ping_kick', { spareReserved: true })).toMatchObject({
+			spareReserved: true
+		});
+		expect(validateConfig('ping_kick', { spareReserved: false })).toMatchObject({
+			spareReserved: false
 		});
 	});
 	test('seed_reward needs a seed time that fits its window, and fills in the rest', () => {

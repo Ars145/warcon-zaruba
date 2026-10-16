@@ -108,6 +108,9 @@ export interface RiskKickConfig {
 export interface PingKickConfig {
 	maxPingMs: number;
 	durationSeconds: number;
+	/** never kick a player with a reserved slot; rules saved before it existed have none and spare
+	 *  nobody */
+	spareReserved?: boolean;
 	reason: string;
 }
 
@@ -329,6 +332,7 @@ export function validateConfig(kind: TriggerKind, raw: unknown): TriggerConfig {
 			return {
 				maxPingMs,
 				durationSeconds,
+				spareReserved: !!c.spareReserved,
 				reason: str(c.reason, MAX_REASON) || 'Ping too high for too long.'
 			};
 		}

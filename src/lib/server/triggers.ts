@@ -1153,13 +1153,19 @@ async function evalPingKick(
 ) {
 	if (!ctx.playersObserved) return;
 	const previous = row.state as PingKickState | null;
-	const { state, kicks } = pingKickStep(
+	// A rule that spares reserved slots leaves their holders out, as if they were not on, so a
+	// streak they had ends. Until the worker has read the reserved list it cannot tell who they
+	// are and kicks nobody: a kick that falls due meanwhile waits for the read, its streak going on.
+	const waits = !!cfg.spareReserved && !ctx.reservedLoaded;
+	const { state, kicks: due } = pingKickStep(
 		cfg,
 		previous,
-		ctx.players,
+		cfg.spareReserved ? ctx.players.filter((p) => !ctx.reserved.has(p.steamId)) : ctx.players,
 		ctx.ts.getTime(),
 		2 * Math.max(ctx.playersIntervalMs, 1000) + 1000
 	);
+	if (waits) for (const steamId of due) state.players[steamId].fired = false;
+	const kicks = waits ? [] : due;
 	// The state is written with any intents, and kept in the cached row for the next poll.
 	row.state = state;
 	if (
@@ -1198,6 +1204,14 @@ async function evalPingKick(
 				kicks.length === 1
 					? `Kicking ${ctx.players.find((p) => p.steamId === kicks[0])?.name}: high ping`
 					: `Kicking ${kicks.length} players: high ping`
+		};
+	// Said on the rule while a kick waits, so a server whose reserved slots cannot be read is not
+	// silently idle; it rides on the state write the streak makes anyway.
+	else if (waits && due.length)
+		out.updates[out.updates.length - 1] = {
+			id: row.id,
+			state,
+			lastResult: 'Waiting for the reserved slots to be read'
 		};
 }
 
