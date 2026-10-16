@@ -19,6 +19,8 @@ export interface CallInput {
 	params?: Record<string, string>;
 	query?: string;
 	body?: unknown;
+	/** the body's text as sent, for one JSON.stringify cannot build (nested past its stack) */
+	raw?: string;
 }
 
 function eventFor(user: SessionUser | null, input: CallInput): RequestEvent {
@@ -27,7 +29,7 @@ function eventFor(user: SessionUser | null, input: CallInput): RequestEvent {
 	const request = new Request(url, {
 		method,
 		headers: { 'content-type': 'application/json', 'x-requested-with': 'warcon' },
-		body: method === 'GET' ? undefined : JSON.stringify(input.body ?? {})
+		body: method === 'GET' ? undefined : (input.raw ?? JSON.stringify(input.body ?? {}))
 	});
 	return {
 		locals: { user, session: null, apiKey: user?.apiKey ?? null },
