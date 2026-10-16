@@ -248,6 +248,22 @@ export const orgBanReasons = pgTable('org_ban_reasons', {
 });
 
 /**
+ * An org's saved messages ($lib/saved-messages): ready-made chat lines for its staff, written by
+ * its owners. No row means none. A row of its own, like the quick reasons, so the worker's roster
+ * read and every org access check, which select the whole organisations row, never carry them.
+ */
+export const orgSavedMessages = pgTable('org_saved_messages', {
+	orgId: text('org_id')
+		.primaryKey()
+		.references(() => organizations.id, { onDelete: 'cascade' }),
+	/** SavedMessage[], in the order the pickers list them */
+	messages: jsonb('messages').notNull(),
+	updatedAt: ts('updated_at').notNull().defaultNow(),
+	/** who saved them last; null once that account is deleted */
+	updatedBy: text('updated_by').references(() => user.id, { onDelete: 'set null' })
+});
+
+/**
  * An org's server roles: a name and the capabilities it carries (see $lib/capabilities). Every org
  * starts with the three built-ins, which owners may edit but not delete; custom roles are more rows.
  */

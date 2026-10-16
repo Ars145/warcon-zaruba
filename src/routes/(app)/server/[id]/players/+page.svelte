@@ -12,6 +12,7 @@
 	import Badge from '$lib/components/Badge.svelte';
 	import BanDialog from '$lib/components/BanDialog.svelte';
 	import Modal from '$lib/components/Modal.svelte';
+	import SavedMessages from '$lib/components/SavedMessages.svelte';
 	import SortHeader from '$lib/components/SortHeader.svelte';
 	import { TableSort, matches } from '$lib/table.svelte';
 	import type { LiveView, Player, PlayerMark, ServerListsState, Status } from '$lib/types';
@@ -490,15 +491,26 @@
 				{#if !live}<Badge tone="err">left the server</Badge>{/if}
 			</div>
 			{#if kind === 'whisper'}
-				<label class="sr-only" for="dialog-text">Message</label>
-				<input
-					id="dialog-text"
-					class="input"
-					type="text"
-					placeholder="Private message…"
-					maxlength={MAX_CHAT}
-					bind:value={text}
-				/>
+				<div>
+					<SavedMessages
+						server={data.server}
+						label="Message"
+						labelFor="dialog-text"
+						inputId="dialog-text"
+						value={text}
+						onpick={(t) => (text = t)}
+						enabled={chat}
+					>
+						<input
+							id="dialog-text"
+							class="input"
+							type="text"
+							placeholder="Private message…"
+							maxlength={MAX_CHAT}
+							bind:value={text}
+						/>
+					</SavedMessages>
+				</div>
 			{:else if kind === 'kick'}
 				<label class="sr-only" for="dialog-text">Reason</label>
 				<input
@@ -547,15 +559,26 @@
 			<p class="max-h-24 overflow-y-auto text-[12.5px] text-mist-400">
 				{pickedOn.map((p) => p.name).join(', ') || 'No one ticked is on the server.'}
 			</p>
-			<label class="sr-only" for="group-text">Message</label>
-			<input
-				id="group-text"
-				class="input"
-				type="text"
-				placeholder="Private message…"
-				maxlength={MAX_CHAT}
-				bind:value={text}
-			/>
+			<div>
+				<SavedMessages
+					server={data.server}
+					label="Message"
+					labelFor="group-text"
+					inputId="group-text"
+					value={text}
+					onpick={(t) => (text = t)}
+					enabled={chat}
+				>
+					<input
+						id="group-text"
+						class="input"
+						type="text"
+						placeholder="Private message…"
+						maxlength={MAX_CHAT}
+						bind:value={text}
+					/>
+				</SavedMessages>
+			</div>
 			<div class="flex justify-end gap-2">
 				<button type="button" class="btn btn-ghost" data-close onclick={() => (grouping = false)}
 					>Cancel</button

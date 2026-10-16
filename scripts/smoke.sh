@@ -135,6 +135,11 @@ check bob-org-member '"username":"bob"' "$(req $J1 GET /api/orgs/$ORG/members)"
 check bob-status-ok '"scores"' "$(req $J3 GET /api/servers/$SID/rcon/status)"
 check bob-kick-denied "your role 'viewer' does not include it" "$(req $J3 POST /api/servers/$SID/rcon/kick '{"steamId":"76561198100000103"}')"
 check bob-group-whisper-denied "your role 'viewer' does not include it" "$(req $J3 POST /api/servers/$SID/rcon/whisperMany '{"faction":"Valkyra","message":"hi"}')"
+# saved messages: the org's owners write them, whoever may chat on a server reads them
+check saved-messages-save '"savedMessages":[{"name":"Restart soon"' "$(req $J1 PATCH /api/orgs/$ORG '{"savedMessages":[{"name":"Restart soon","text":"Restart in 5 minutes"}]}')"
+check saved-messages-owner '"name":"Restart soon"' "$(req $J1 GET /api/servers/$SID/saved-messages)"
+check messages-page '200' "$(pagecode $J1 /orgs/$ORG/messages)"
+check bob-saved-messages-denied "your role 'viewer' does not include it" "$(req $J3 GET /api/servers/$SID/saved-messages)"
 # Move alone: no kick, no kill, and no move to the side a player is on, which would only kill them
 check role-mover '"name":"Mover"' "$(req $J1 POST /api/orgs/$ORG/roles '{"name":"Mover","capabilities":["server.view","players.move"]}')"
 ROLES=$(req $J1 GET /api/orgs/$ORG/roles); RID_MOVER=$(roleid Mover)
@@ -149,6 +154,9 @@ check server-grants-put '"roleName":"operator"' "$(req $J1 PUT /api/servers/$SID
 check server-grants-get '"username":"bob"' "$(req $J1 GET /api/servers/$SID/grants)"
 check bob-kick-ok 'Kicked' "$(req $J3 POST /api/servers/$SID/rcon/kick '{"steamId":"76561198100000103"}')"
 check bob-group-whisper-ok '"sent":["76561198100000105"]' "$(req $J3 POST /api/servers/$SID/rcon/whisperMany '{"steamIds":["76561198100000105"],"message":"hi"}')"
+check bob-saved-messages-ok '"text":"Restart in 5 minutes"' "$(req $J3 GET /api/servers/$SID/saved-messages)"
+check bob-saved-messages-save-denied 'Only an owner' "$(req $J3 PATCH /api/orgs/$ORG '{"savedMessages":[]}')"
+check bob-messages-page-404 '404' "$(pagecode $J3 /orgs/$ORG/messages)"
 check bob-ban-denied "your role 'operator' does not include it" "$(req $J3 POST /api/servers/$SID/rcon/ban '{"steamId":"76561198100000106"}')"
 check bob-server-page '200' "$(pagecode $J3 /server/$SID)"
 check nav-orgs-no-list 'href="/orgs"' "$(navorgs $J3)"

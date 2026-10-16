@@ -13,6 +13,7 @@
 	import { setHealth } from '$lib/health.svelte';
 	import MapPicker from '$lib/components/MapPicker.svelte';
 	import MapArt from '$lib/components/MapArt.svelte';
+	import SavedMessages from '$lib/components/SavedMessages.svelte';
 	import { sponsor, loadSponsor } from '$lib/sponsor.svelte';
 	import FactionChip from '$lib/components/FactionChip.svelte';
 	import CashChart from '$lib/components/CashChart.svelte';
@@ -431,32 +432,42 @@
 				void sendBroadcast();
 			}}
 		>
-			<label class="field-label" for="broadcast-to">Message to</label>
-			<div class="join w-full">
-				<select
-					id="broadcast-to"
-					class="input w-auto flex-none! pr-[30px]"
-					bind:value={to}
-					disabled={!chat}
-				>
-					<option value="">Everyone</option>
-					{#each factions as f (f)}<option value={f}>{f}</option>{/each}
-				</select>
-				<input
-					class="input"
-					type="text"
-					maxlength={MAX_CHAT}
-					aria-label="Message"
-					placeholder={to
-						? `Whispered to everyone on ${to}…`
-						: 'Message shown to everyone on the server…'}
-					bind:value={broadcast}
-					disabled={!chat}
-				/>
-				<button class="btn btn-primary" type="submit" disabled={!chat || sending}
-					>{resend ? `Send to the rest · ${resend.steamIds.length}` : 'Send'}</button
-				>
-			</div>
+			<SavedMessages
+				server={data.server}
+				label="Message to"
+				labelFor="broadcast-to"
+				inputId="broadcast-text"
+				value={broadcast}
+				onpick={(text) => (broadcast = text)}
+				enabled={chat}
+			>
+				<div class="join w-full">
+					<select
+						id="broadcast-to"
+						class="input w-auto flex-none! pr-[30px]"
+						bind:value={to}
+						disabled={!chat}
+					>
+						<option value="">Everyone</option>
+						{#each factions as f (f)}<option value={f}>{f}</option>{/each}
+					</select>
+					<input
+						id="broadcast-text"
+						class="input"
+						type="text"
+						maxlength={MAX_CHAT}
+						aria-label="Message"
+						placeholder={to
+							? `Whispered to everyone on ${to}…`
+							: 'Message shown to everyone on the server…'}
+						bind:value={broadcast}
+						disabled={!chat}
+					/>
+					<button class="btn btn-primary" type="submit" disabled={!chat || sending}
+						>{resend ? `Send to the rest · ${resend.steamIds.length}` : 'Send'}</button
+					>
+				</div>
+			</SavedMessages>
 		</form>
 		{#if banner}
 			<div class="mt-4">

@@ -320,7 +320,7 @@ site owner hold every capability on every server in scope.
 | Capability         | Unlocks                                                                                                                                                                                                    | viewer | operator | admin |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | -------- | ----- |
 | View               | what is happening on the server: status, players, kills, rotation, who is banned and who holds a reserved slot, analytics, leaderboards, player stats. Every role has it.                                  | ✓      | ✓        | ✓     |
-| Chat               | broadcast; whisper one player, several, or everyone on a faction                                                                                                                                           |        | ✓        | ✓     |
+| Chat               | broadcast; whisper one player, several, or everyone on a faction; pick from the organisation's saved messages                                                                                              |        | ✓        | ✓     |
 | Kick               | kick a player; the rules that kick or flag players                                                                                                                                                         |        | ✓        | ✓     |
 | Kill               | kill a player's character; AFK protection, and a Kill distance watch that kills                                                                                                                            |        | ✓        | ✓     |
 | Move               | move a player to another team, which kills them so they respawn on it (a move to the side they are on is refused); arrange the teams on the Players tab, which moves without the kill; a Team balance rule |        | ✓        | ✓     |
@@ -355,7 +355,8 @@ serve `/v1/audit`: the `serverLog` action does, with the peers' addresses blank 
 the site owner, API keys included.
 
 Beyond server roles, an **org owner** adds, edits and removes the org's servers, manages members,
-roles, per-server grants and invite links and Discord webhooks, and sees the org's audit trail. The
+roles, per-server grants and invite links and Discord webhooks, writes the
+[saved messages](#saved-messages), and sees the org's audit trail. The
 **site owner** creates and deletes organisations, manages every account, and sees the whole trail.
 
 Members see the audit trail for their own actions plus everything on servers where their role
@@ -420,6 +421,23 @@ party id is its hostname); `http://localhost` works for development. Steam sign-
 OpenID and needs no key; `STEAM_API_KEY` only improves the username and avatar of accounts it
 creates. Better Auth's own `/api/auth/*` routes stay closed to browsers: passkey ceremonies go
 through `/api/passkeys/*`, and codes, recovery keys and Steam through the panel's own pages.
+
+### Saved messages
+
+Each organisation keeps a list of **saved messages**: ready-made lines its staff send often, such
+as a rules reminder, a restart warning or where to find the community's Discord. Wherever a chat
+line is typed (the Overview's _Message to_, a whisper from the Players tab, to one player or to
+those ticked, and the whisper on a player's page), **Saved messages** beside the box opens the list,
+with a search from six messages on. Picking one puts its text in the box, where it can still be
+changed; nothing goes out until it is sent. A saved message is sent as written: placeholders such as
+`{name}` belong to [automation rules](#placeholders) and are not filled in here.
+
+The organisation's owners write them on its **Messages** tab: a name and a text for each, up to 50,
+each text at most 256 characters (the most the game takes in one line), in the order the lists show
+them. **Save** keeps the whole list, and the tab says when it was last saved and by whom. Everyone
+who can chat on a server (_Chat_) sees the list there, API keys with _Chat_ included; only an owner
+changes it, never a key, and every save is in the organisation's audit trail with the list it
+saved.
 
 ### Player dossiers, risk and the watchlist
 
@@ -1335,6 +1353,12 @@ gone before their turn) and `unsent`. A refusal from the game ends the run, as d
 is sent once, so sending to `unsent` again reaches the rest. With no one to whisper it answers 404
 `no_recipients`, and past 300 players a minute on one server 429 `rate_limited`.
 
+The organisation's [saved messages](#saved-messages) are not an action:
+`GET /api/servers/:id/saved-messages` answers them, in their order, to a key holding _Chat_ on the
+server (`{"ok": true, "messages": [{"name": "Restart soon", "text": "Restart in 5 minutes."}]}`).
+Send one as the `message` of `broadcast`, `whisper` or `whisperMany`. Only the organisation's owners
+change them, never a key.
+
 The reads answer:
 
 - `status`: the `status` object of the live view, read fresh; `players`: `{"players": […]}` as in
@@ -1699,7 +1723,7 @@ which call Better Auth server-side behind the login lockout and the audit trail.
 own `/api/auth/*` routes only the OAuth callback is reachable over HTTP; everything else answers 404.
 
 ```
-GET/POST /api/orgs  PATCH/DELETE /api/orgs/:id   PATCH {name} | {discordInviteUrl} | {boardOpens: official|custom|30d|all} | {boardHidden: [column]} | {membersReserved} | {banMessage} | {banReasons: [{label,reason,days}] | null} | site owner: {serverLimit, suspended, reason, allowPublicStatus, allowPublicLeaderboards}
+GET/POST /api/orgs  PATCH/DELETE /api/orgs/:id   PATCH {name} | {discordInviteUrl} | {boardOpens: official|custom|30d|all} | {boardHidden: [column]} | {membersReserved} | {banMessage} | {banReasons: [{label,reason,days}] | null} | {savedMessages: [{name,text}]} | site owner: {serverLimit, suspended, reason, allowPublicStatus, allowPublicLeaderboards}
 GET/POST /api/orgs/:id/seasons {name,startsAt}  PATCH/DELETE .../:seasonId {name?,startsAt?}   the official seasons and the organisation's own, what its boards open on and the columns its public boards leave out (`hidden`) (owners; a start is still to come, and a started season's stays put)
 GET  /api/orgs/:id/members  PATCH/DELETE /api/orgs/:id/members/:userId {role}  PUT .../:userId/grants {grants:[{serverId,roleId}]}
 GET/POST /api/orgs/:id/roles {name,capabilities[]}  PATCH/DELETE .../:roleId {name?,capabilities?}  POST .../:roleId/reset  PUT .../order {ids[]} (every role once, else 409 stale)
@@ -1709,6 +1733,7 @@ GET/POST /api/orgs/:id/invites {label,orgRole,serverRoleId,expiresDays,maxUses} 
 GET/POST /api/users  PATCH/DELETE /api/users/:id  PUT /api/users/:id/grants {grants:[{serverId,roleId}]}
 GET/POST /api/servers {orgId,...}  PATCH/DELETE /api/servers/:id  POST /api/servers/:id/test   (PATCH also {publicStatus, publicLeaderboards, publicKills}, org owners, within the site owner's allowance; a PATCH that changes host, port or scheme must carry password, or it is 400 password_required)
 GET/PUT /api/servers/:id/grants {grants:[{userId,roleId}]}   GET /api/servers/:id/summary
+GET  /api/servers/:id/saved-messages                    the organisation's saved messages, in order (Chat; its owners change them with PATCH /api/orgs/:id)
 GET|POST /api/servers/:id/rcon/:action   (GET for reads with query params, POST JSON for mutations)
 GET  /api/servers/:id/analytics?range=24h|7d|30d       includes `combat` from the kill feed when the server has one
 GET  /api/servers/:id/analytics/periods?range=7d&tz=Europe/Berlin   players, new players and session lengths per hour (24h) or per day in that zone
