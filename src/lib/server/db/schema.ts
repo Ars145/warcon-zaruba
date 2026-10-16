@@ -19,6 +19,7 @@ import {
 	timestamp,
 	uniqueIndex
 } from 'drizzle-orm/pg-core';
+import { storable } from './storable';
 
 const ts = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });
 
@@ -26,11 +27,12 @@ const ts = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' 
  * jsonb that hands the value to Bun's SQL driver as is. Drizzle's own jsonb() stringifies first
  * and Bun then JSON-encodes that string again, so arrays and objects landed in Postgres as JSON
  * *strings* (jsonb_typeof = 'string'): fine to read back through Drizzle, unusable inside SQL.
- * Migration 0008 repairs rows written that way. Reads still accept the old shape.
+ * Migration 0008 repairs rows written that way. Reads still accept the old shape. Strings Postgres
+ * refuses in jsonb (NUL, half a surrogate pair) are made storable first (./storable).
  */
 const jsonb = customType<{ data: unknown; driverData: unknown }>({
 	dataType: () => 'jsonb',
-	toDriver: (value) => value,
+	toDriver: (value) => storable(value),
 	fromDriver: (value) => {
 		if (typeof value !== 'string') return value;
 		try {
