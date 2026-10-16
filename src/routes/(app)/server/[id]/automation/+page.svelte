@@ -639,7 +639,8 @@
 			bannedElsewhere: b('bannedElsewhere', true),
 			watchlist: b('watchlist', false),
 			kickAtScore: kickAtScoreOf(c),
-			spareReserved: b('spareReserved', true),
+			// a High ping kick saved before it could spare reserved slots spares nobody
+			spareReserved: b('spareReserved', kind !== 'ping_kick' || !t),
 			reason: s(
 				'reason',
 				kind === 'name_filter'
@@ -815,6 +816,7 @@
 				return {
 					maxPingMs: Number(f.maxPingMs),
 					durationSeconds: Number(f.durationSeconds),
+					spareReserved: f.spareReserved,
 					reason: f.reason
 				};
 			case 'restart_notice':
@@ -1042,7 +1044,7 @@
 					.filter(Boolean)
 					.join(' · ');
 			case 'ping_kick':
-				return `ping over ${c.maxPingMs} ms for ${c.durationSeconds} s`;
+				return `ping over ${c.maxPingMs} ms for ${c.durationSeconds} s${c.spareReserved ? ' · spares reserved slots' : ''}`;
 			case 'restart_notice':
 				return `"${c.message}"${c.leadMinutes ? ` · heads-up ${c.leadMinutes} min before` : ''}${c.repeatMinutes ? ` · again every ${c.repeatMinutes} min` : ''} · at least ${c.minPlayers} on`;
 			case 'match_broadcast':
@@ -2141,6 +2143,12 @@
 							/>
 							seconds
 						</div>
+					</fieldset>
+					<fieldset class="space-y-1.5 text-[13px]">
+						<legend class="field-label">Never kick</legend>
+						<label class="flex items-center gap-2"
+							><input type="checkbox" bind:checked={f.spareReserved} /> players with a reserved slot</label
+						>
 					</fieldset>
 					<fieldset class="space-y-2">
 						<legend class="field-label">Kick reason, shown to the player</legend>
