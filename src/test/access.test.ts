@@ -520,6 +520,7 @@ describe.skipIf(!hasTestDb)('access', () => {
 				['risk_kick', { vacBans: true }, 'players.kick'],
 				['name_filter', { characters: 'ascii' }, 'players.kick'],
 				['name_filter', { characters: 'ascii', action: 'alert' }, 'players.kick'],
+				['ping_kick', { maxPingMs: 250, spareReserved: true }, 'players.kick'],
 				['team_kill', { kickAt: 3 }, 'players.kick'],
 				[
 					'team_kill',
