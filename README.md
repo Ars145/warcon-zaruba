@@ -607,7 +607,10 @@ someone else saves the document meanwhile the panel reads it again and makes its
 Those builds read the list at start, so a slot taken out stays until the server's next restart
 (the Reserved slots tab badges it _leaves at restart_); a slot given back before then is written
 back and stays. The panel plans against the document, not the running list, and counts a slot as
-applied once the document holds it. The listener takes a request of 64 KB at most, roughly a
+applied once the document holds it. The rules that spare reserved slots (Kick on connect risk, Name
+filter, Name change watch, High ping kick) and the Seeding reward's check for a slot already held go
+by the document too: a slot given in the panel counts at once, and one withdrawn stops counting,
+without waiting for the restart. The listener takes a request of 64 KB at most, roughly a
 thousand reserved players on top of a typical file: a slot that would not fit waits, marked
 failed with "The server's config document is full", and goes in when there is room. Removals
 always go in; a server's own slots go in before the organisation's, then its groups', and members'
