@@ -31,6 +31,14 @@ describe('causeLabel', () => {
 		expect(causeLabel('Id.Item.WEPN_032')).toBe('GGX 18');
 		expect(causeLabel('Id.Item.WEPN_027')).toBe('Deagle');
 		expect(causeLabel('Id.Item.M4')).toBe('M4');
+		expect(causeLabel('Id.Item.WEPN_037')).toBe('TCX');
+		expect(causeLabel('Id.Item.WEPN_031')).toBe('PP-Bizon');
+		expect(causeLabel('Id.Item.WEPN_034')).toBe('M14');
+		expect(causeLabel('Id.Item.WEPN_036')).toBe('EVO-3 Ultra');
+		expect(causeLabel('Id.Item.Molotov')).toBe('Molotov');
+		expect(causeLabel('Id.Item.IED.Explosive')).toBe('Improvised explosive device');
+		expect(causeLabel('ID.Item.SmokeGrenade.Black')).toBe('M18 smoke grenade (black)');
+		expect(causeLabel('ID.Item.SmokeGrenade.White')).toBe('M18 smoke grenade (white)');
 		expect(causeLabel('Id.Item.M67Grenade')).toBe('M67 frag grenade');
 		expect(causeLabel('Id.Item.Crowbar')).toBe('Halligan bar');
 		expect(causeLabel('ID.Item.BuildTool.Hammer.Large')).toBe('Large hammer');
