@@ -391,6 +391,11 @@ export const servers = pgTable('servers', {
 	feedTokenEnc: text('feed_token_enc'),
 	/** sha256 of the token: how a feed batch finds its server */
 	feedTokenHash: text('feed_token_hash').unique(),
+	/**
+	 * When the token was made or last replaced; null for one made before this was kept. The game
+	 * reads its feed at its start, so a token newer than the start cannot be in use yet.
+	 */
+	feedTokenAt: ts('feed_token_at'),
 	/** the org owner's switches for the public pages; effective only with the org's allowance ($lib/features) */
 	publicStatus: boolean('public_status').notNull().default(false),
 	publicLeaderboards: boolean('public_leaderboards').notNull().default(false),
