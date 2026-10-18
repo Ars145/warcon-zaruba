@@ -151,6 +151,7 @@ check bob-saved-messages-denied "your role 'viewer' does not include it" "$(req 
 check map-set-save '"name":"Infantry"' "$(req $J1 POST /api/orgs/$ORG/map-sets '{"name":"Infantry","entries":[{"map":"Kavkazi","experiences":["Bakurani_KOTH_01","KOTH_InfantryOnly"],"lighting":"DayClear"}]}')"
 check map-set-bad-id 'is not a time of day id' "$(req $J1 POST /api/orgs/$ORG/map-sets '{"name":"Bad","entries":[{"map":"Kavkazi","lighting":"Day Clear"}]}')"
 check map-sets-owner '"experiences":["Bakurani_KOTH_01","KOTH_InfantryOnly"]' "$(req $J1 GET /api/servers/$SID/map-sets)"
+check map-sets-page '200' "$(pagecode $J1 /orgs/$ORG/map-sets)"
 check bob-map-sets-denied "your role 'viewer' does not include it" "$(req $J3 GET /api/servers/$SID/map-sets)"
 # Move alone: no kick, no kill, and no move to the side a player is on, which would only kill them
 check role-mover '"name":"Mover"' "$(req $J1 POST /api/orgs/$ORG/roles '{"name":"Mover","capabilities":["server.view","players.move"]}')"
@@ -175,6 +176,7 @@ check bob-saved-messages-save-denied 'Only an owner' "$(req $J3 PATCH /api/orgs/
 check bob-messages-page-404 '404' "$(pagecode $J3 /orgs/$ORG/messages)"
 check bob-map-sets-operator-denied "your role 'operator' does not include it" "$(req $J3 GET /api/servers/$SID/map-sets)"
 check bob-map-set-save-denied 'Only an owner' "$(req $J3 POST /api/orgs/$ORG/map-sets '{"name":"Mine","entries":[{"map":"Kavkazi"}]}')"
+check bob-map-sets-page-404 '404' "$(pagecode $J3 /orgs/$ORG/map-sets)"
 check bob-ban-denied "your role 'operator' does not include it" "$(req $J3 POST /api/servers/$SID/rcon/ban '{"steamId":"76561198100000106"}')"
 check bob-server-page '200' "$(pagecode $J3 /server/$SID)"
 check nav-orgs-no-list 'href="/orgs"' "$(navorgs $J3)"

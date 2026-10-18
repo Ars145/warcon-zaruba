@@ -22,6 +22,7 @@
 		['/roles', 'Roles', 'owner'],
 		['/seasons', 'Seasons', 'owner'],
 		['/messages', 'Messages', 'owner'],
+		['/map-sets', 'Map sets', 'owner'],
 		['/players', 'Players', 'any'],
 		['/bans', 'Ban list', 'ban'],
 		['/reserved', 'Reserved slots', 'reserve']
