@@ -1,12 +1,13 @@
 <script lang="ts">
 	import { scoreCapOf } from '$lib/match';
 	import { currentState, stateLabel } from '$lib/match-state';
+	import { feedHealth } from '$lib/feed-health';
 	import { ApiError, rconGet, rconPost, errorMessage } from '$lib/api';
 	import { MAX_CHAT } from '$lib/chat';
 	import { poll } from '$lib/poll';
 	import { watchLive, type KillsNotice } from '$lib/live';
 	import { causeLabel } from '$lib/causes';
-	import { expSetLabel, fmtNum, lightingLabel, mapLabel, zoneLabel } from '$lib/format';
+	import { expSetLabel, fmtAgo, fmtNum, lightingLabel, mapLabel, zoneLabel } from '$lib/format';
 	import { can } from '$lib/capabilities';
 	import { toast } from '$lib/toast.svelte';
 	import { confirmDialog } from '$lib/confirm.svelte';
@@ -174,7 +175,19 @@
 	let feedAgeS = $derived(
 		feedAt ? Math.max(0, Math.round((now - Date.parse(feedAt)) / 1000)) : null
 	);
-	const clock = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour12: false });
+	// Nothing since the game started, a few minutes on: the feed does not reach the panel. Read from
+	// the live view, without the token's time (that goes with the token, on the Config tab).
+	let feedState = $derived(feedHealth({ configured: !!feedConfigured, feedAt, live }, now));
+	/** changes at midnight only, so the rows' times are not worked out again every second */
+	let today = $derived(new Date(now).toDateString());
+	/** A kill's time, with its day when it is not today's: a silent feed leaves old kills on top. */
+	const clock = (iso: string) => {
+		const d = new Date(iso);
+		const time = d.toLocaleTimeString(undefined, { hour12: false });
+		return d.toDateString() === today
+			? time
+			: `${d.toLocaleDateString(undefined, { day: '2-digit', month: 'short' })} ${time}`;
+	};
 	async function refreshRotation() {
 		try {
 			rotation = await rconGet<Rotation>(id, 'rotation');
@@ -602,15 +615,28 @@
 				href="/server/{encodeURIComponent(id)}/kills"
 				class="text-[12.5px] text-accent hover:underline">All kills, with filters →</a
 			>
-			<span
-				class="ml-auto text-[12.5px] {feedAgeS !== null && feedAgeS > 900 && players.length
-					? 'text-warn'
-					: 'text-mist-600'}"
-			>
-				{#if feedAgeS === null}no batch received yet{:else if feedAgeS > 900 && players.length}no
-					events for {Math.round(feedAgeS / 60)} min with players on{:else}last event {feedAgeS}s
-					ago{/if}
-			</span>
+			{#if feedState === 'silent' && live?.startedAt}
+				<span class="ml-auto inline-flex flex-wrap items-center gap-2 text-[12.5px]">
+					<span class="badge bg-warn/15 text-warn">silent</span>
+					<span class="text-mist-400"
+						>nothing since the server started {fmtAgo(live.startedAt, now)}</span
+					>
+					{#if can(data.server.caps, 'config.apply')}<a
+							href="/server/{encodeURIComponent(id)}/config"
+							class="text-accent hover:underline">Config →</a
+						>{/if}
+				</span>
+			{:else}
+				<span
+					class="ml-auto text-[12.5px] {feedAgeS !== null && feedAgeS > 900 && players.length
+						? 'text-warn'
+						: 'text-mist-600'}"
+				>
+					{#if feedAgeS === null}no batch received yet{:else if feedAgeS > 900 && players.length}no
+						events for {Math.round(feedAgeS / 60)} min with players on{:else}last event {feedAgeS}s
+						ago{/if}
+				</span>
+			{/if}
 		</div>
 		<div class="max-h-[420px] table-wrap">
 			<table>
@@ -621,6 +647,13 @@
 					>
 				</thead>
 				<tbody>
+					{#if feedState === 'silent' && live?.startedAt && kills.length}
+						<tr
+							><td colspan="6" class="text-center text-[12px] text-mist-400"
+								>The server started at {clock(live.startedAt)} · nothing has come since</td
+							></tr
+						>
+					{/if}
 					{#each kills as k (k.eventId)}
 						<tr class={k.teamKill ? 'text-warn' : ''}>
 							<td class="font-mono text-[12px] whitespace-nowrap text-mist-400">{clock(k.ts)}</td>

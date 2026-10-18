@@ -19,7 +19,7 @@ import {
 } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { createHash, randomBytes } from 'node:crypto';
-import type { Env } from './env';
+import { isDemoServer, type Env } from './env';
 import { decryptSecret, encryptSecret } from './crypto';
 import { ApiError } from './http';
 import { writeAudit } from './audit';
@@ -34,6 +34,7 @@ import {
 	type ServerRow
 } from './db/schema';
 import type { KillView, MatchStateView } from '$lib/types';
+import { feedHealth, type FeedState } from '$lib/feed-health';
 import { VEHICLE_TAGS, type KillFilter } from '$lib/kills';
 import type { SessionUser } from './access';
 import {
@@ -55,24 +56,66 @@ const hashToken = (token: string): string =>
  */
 export const feedUrl = (env: Pick<Env, 'ORIGIN'>): string => env.ORIGIN;
 
-export interface FeedSetup {
+/** Whether the server's kill feed reaches the panel, with what the verdict was drawn from. */
+export interface FeedStatus {
 	configured: boolean;
+	/** when the last batch arrived */
+	feedAt: string | null;
+	/** when the game process last started, as the worker last read it */
+	startedAt: string | null;
+	/** when the token was made, beside the token itself (org owners); null otherwise */
+	tokenAt: string | null;
+	/** $lib/feed-health; 'waiting' only where the token's time is known */
+	state: FeedState;
+}
+
+export interface FeedSetup extends FeedStatus {
 	url: string;
 	/** the token, for org owners only; '' otherwise */
 	token: string;
-	feedAt: string | null;
+}
+
+const iso = (d: Date | null | undefined): string | null => (d ? d.toISOString() : null);
+
+/**
+ * The feed's verdict from the server's live row. `withTokenTime` is for those who may see the token:
+ * when it was replaced is part of how the server is run, so only they are told it is waiting for
+ * the game's restart (everyone else reads it as silent, which it is).
+ */
+export async function feedStatus(
+	env: Env,
+	server: ServerRow,
+	withTokenTime: boolean
+): Promise<FeedStatus> {
+	const [live] = await env.db
+		.select({
+			feedAt: serverLive.feedAt,
+			ok: serverLive.ok,
+			startedAt: serverLive.startedAt,
+			observedAt: serverLive.observedAt
+		})
+		.from(serverLive)
+		.where(eq(serverLive.serverId, server.id));
+	const configured = !!server.feedTokenHash;
+	const feedAt = iso(live?.feedAt);
+	const startedAt = iso(live?.startedAt);
+	// The demo game takes its token at once (feedDemoKills), with no restart to wait for.
+	const tokenAt =
+		withTokenTime && configured && !isDemoServer(env, server) ? iso(server.feedTokenAt) : null;
+	const state = feedHealth({
+		configured,
+		feedAt,
+		tokenAt,
+		live: live ? { ok: live.ok, startedAt, observedAt: iso(live.observedAt) } : null
+	});
+	return { configured, feedAt, startedAt, tokenAt, state };
 }
 
 export async function feedSetup(env: Env, server: ServerRow, reveal: boolean): Promise<FeedSetup> {
-	const [live] = await env.db
-		.select({ feedAt: serverLive.feedAt })
-		.from(serverLive)
-		.where(eq(serverLive.serverId, server.id));
 	return {
-		configured: !!server.feedTokenHash,
+		...(await feedStatus(env, server, reveal)),
 		url: feedUrl(env),
-		token: reveal && server.feedTokenEnc ? decryptSecret(env, server.feedTokenEnc) : '',
-		feedAt: live?.feedAt ? live.feedAt.toISOString() : null
+		token: reveal && server.feedTokenEnc ? decryptSecret(env, server.feedTokenEnc) : ''
 	};
 }
 
@@ -86,7 +129,11 @@ export async function mintFeedToken(
 	const token = FEED_TOKEN_PREFIX + randomBytes(32).toString('base64url');
 	await env.db
 		.update(servers)
-		.set({ feedTokenEnc: encryptSecret(env, token), feedTokenHash: hashToken(token) })
+		.set({
+			feedTokenEnc: encryptSecret(env, token),
+			feedTokenHash: hashToken(token),
+			feedTokenAt: new Date()
+		})
 		.where(eq(servers.id, server.id));
 	tokenCache.clear();
 	await writeAudit(env, req, {
@@ -109,7 +156,7 @@ export async function removeFeedToken(
 	if (!server.feedTokenHash) throw new ApiError(400, 'This server has no kill feed token.');
 	await env.db
 		.update(servers)
-		.set({ feedTokenEnc: null, feedTokenHash: null })
+		.set({ feedTokenEnc: null, feedTokenHash: null, feedTokenAt: null })
 		.where(eq(servers.id, server.id));
 	tokenCache.clear();
 	await writeAudit(env, req, {

@@ -11,6 +11,7 @@ import { reservedFromText, reservedIntoText } from '../reserved-doc';
 import { saneScores } from '../format';
 import { MAX_CHAT } from '../chat';
 import { hideSecretValues, redactSecrets, restoreSecrets, SECRET_PLACEHOLDER } from '../config-doc';
+import { feedReportOf } from '../feed-report';
 
 export interface ActionDef {
 	cap: Capability;
@@ -599,6 +600,20 @@ export const ACTIONS: Record<string, ActionDef> = {
 		run: async (c) => {
 			const doc = await readConfig(c);
 			return hideSecretValues({ ...doc, text: redactSecrets(doc.text) }, doc.text);
+		}
+	},
+	// Season 2's report on its kill feed (CL-516586 on; $lib/feed-report): on or not, and per
+	// endpoint the scheme and host it posts to, its health and the last answer it had. It names
+	// every service the server posts to, so it is for those who may apply the config, as the
+	// document is. Kept to the known fields; a build without the route answers no_route.
+	feed: {
+		cap: 'config.apply',
+		mutating: false,
+		run: async (c) => {
+			const report = feedReportOf(await c.json('GET', '/v1/feed'));
+			if (!report)
+				throw new GameError(502, 'The server did not return a feed report.', 'bad_response');
+			return report;
 		}
 	},
 

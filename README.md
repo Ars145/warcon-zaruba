@@ -769,6 +769,32 @@ the line again and restart the server. The list can hold other endpoints beside 
 place of the old one. `EventFeedServerName` is the name the game sends with each batch; Warcon
 goes by the token, so keep one such line if the file already has it.
 
+A token is not a working feed, so the panel checks what actually arrives. A Season 2 server posts
+its match state within a minute or two of starting, with nobody on, and reads its feed lines only
+at that start. So when a server with a token has sent nothing in the five minutes after its game
+last started, the feed is **silent**: the Config card says so in amber, with what to check on the
+host (the section, the Url's path, a restart since the lines went in, the new line after
+**Replace token**); the Automation tab names the kill feed rules that are on (Team kill limit,
+Kill rate, Kill distance, Name change watch, Bounty) in a notice above the list and on each of
+their rows, since none of them can act; and the Overview's kill feed panel marks where the game
+started, with older kills dated. For the org's owners, a token made or replaced after the game
+started shows as **waiting** instead: the game cannot have it until it restarts. While a server is
+down, or before the panel has read when it started, nothing is judged. A feed that stops in the
+middle of a run is still shown on the Overview as no events for so many minutes with players on.
+
+Season 2 also reports on its own feed, and those who may apply the config see that report on the
+card under **What the game reports**, read when the card opens and on **Read again**: whether the
+feed was switched on when the server started and, for each endpoint it posts to, the scheme and
+host (never the full Url or the token), whether it is healthy, the last answer it had, how many
+batches went or were dropped and when the last one went through. It names every service the
+server posts to, which is why it stays with the config. The host is all the game gives, so the
+card reads the fault from what this panel answered: 405 is a page of the panel (a Url that names
+the site alone), 404 a wrong path under `/api/ingest/`, 403 a wrong path elsewhere under `/api`,
+401 a token the panel does not know (a line from before **Replace token**). A silent feed's
+warning then names that fault instead of the general checks, as it does when the feed is off in
+the file, lists no endpoint, lists only other services, gets no answer at all, or is taken in under
+another server's token (the panel accepts the posts while nothing comes in for this server).
+
 Season 2 also posts the match's state as it changes, the match's result when it ends, and players
 joining and leaving. The state shows on the server's Overview as **Match** (loading the map,
 waiting for players, playing, match over), which the status alone cannot tell; a state from before
@@ -1346,6 +1372,7 @@ game's (a 401 or a 5xx from it becomes a 502), and `error` carries the game's `c
 | `rotationSettings`                  | Save rotation     | `rotationEnabled`, `rotationMode` (`ordered` or `random`)                                                          |
 | `settings`                          | Config & settings | `scoreTick` (1 to 600), `rotationEnabled`, `rotationMode`                                                          |
 | `config`                            | Config & settings | none (the config document, credentials as `(hidden)`)                                                              |
+| `feed`                              | Config & settings | none (the game's report on its kill feed, Season 2 builds; see [Kill feed](#kill-feed))                            |
 | `configValidate`, `configApply`     | Config & settings | `text`; apply also `revision`, `force`, `fullApply`                                                                |
 | `serverLog`                         | Audit trail       | `limit` (1 to 500, default 50)                                                                                     |
 | `raw`                               | Raw RCON          | `method`, `path` (a `/v1` route), `body`                                                                           |
@@ -1749,7 +1776,7 @@ GET  /api/servers/:id/kills?before=<iso>&beforeTime=<s>&limit=50&count=1&match=<
 GET  /api/servers/:id/matches?page=1                    match history, newest first, fifty a page   GET /api/servers/:id/matches/:matchId   a match that ended: lines, score timeline, awards
 POST /api/servers/:id/stats/purge {name}                 deletes the server's kills, matches and match rows (org owners; the name must be the server's; sessions stay)
      &killer=&victim=&player=&cause=&kind=&minM=            filters: a SteamID exactly, else part of a name; the raw cause tag; kind headshot|teamKill|suicide|vehicle|environment; metres at least
-GET/POST/DELETE /api/servers/:id/feed                   the kill feed setup: token and URL (POST mints or replaces, owners only)
+GET/POST/DELETE /api/servers/:id/feed                   the kill feed setup: token and URL (POST mints or replaces, owners only), and whether it arrives (state)
 POST /api/ingest/events                                 where the game posts: [WDServerFeed] Url is the origin, the game adds this path (Authorization: Bearer wkf_…); not a panel route
 GET  /api/servers/:id/cash?since=<iso>                  cash-in-play samples since a moment (24 h at most), seeds the dashboard chart
 GET  /api/servers/:id/players/marks?ids=a,b&names=…     watchlist / first-visit / risk / record here per connected player
@@ -1782,7 +1809,7 @@ experiences alternators catalog rotation bans reserved sponsor` (View) ·
 `broadcast whisper whisperMany` (Chat) · `kick` (Kick) · `kill` (Kill) · `changeTeam` (Move) · `endMatch restartMatch
 changeMap setWeather setNextMap` (Match control) · `rotationAdd rotationRemove rotationMove
 rotationReorder` (Live rotation) · `ban unban` (Bans) · `reservedAdd reservedRemove` (Reserved
-slots) · `rotationSave rotationSettings` (Save rotation) · `config settings configValidate configApply` (Config &
+slots) · `rotationSave rotationSettings` (Save rotation) · `config feed settings configValidate configApply` (Config &
 settings) · `serverLog` (Audit trail) · `raw` (Raw RCON).
 
 ## Notes and limits
