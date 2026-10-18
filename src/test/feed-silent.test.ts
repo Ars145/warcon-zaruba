@@ -3,11 +3,16 @@
 // part of how the server is run and goes where the token goes (org owners and the site owner), so
 // only they are told the feed waits for the game's restart; everyone else reads it as silent.
 import { beforeAll, describe, expect, test } from 'bun:test';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
+import type { RequestEvent } from '@sveltejs/kit';
 import type { Env } from '$lib/server/env';
 import { serverLive, servers } from '$lib/server/db/schema';
 import { feedStatus } from '$lib/server/feed';
+import { feedDiagnosis, feedReportOf } from '$lib/feed-report';
+import { resetRates } from '$lib/server/ratelimit';
+import { POST as ingest } from '../routes/api/ingest/events/+server';
 import { hasTestDb, testEnv } from './db';
 import { callApi, callLoad, stubGateway } from './call';
 import { expected } from './policy';
@@ -119,6 +124,77 @@ describe.skipIf(!hasTestDb)("the kill feed's verdict", () => {
 		// without the demo switched on, a host named demo is any other server
 		expect((await feedStatus({ ...env, ALLOW_DEMO_SERVER: 'false' }, row, true)).state).toBe(
 			'waiting'
+		);
+	});
+
+	test('a batch the game counts as sent is in every verdict read after it', async () => {
+		// TLR #1, 2026-10-18: the Config card read the verdict, the server restarted with a working
+		// line, then Read again read the report alone. Its batches against the verdict from before
+		// said "not as this server" although the token was this server's.
+		resetRates();
+		const w = await seedWorld(env);
+		await arrange(w, 7 * 60, 3 * 24 * 60);
+		const made = await callApi(await feedRoute('POST'), w.users.owner, {
+			method: 'POST',
+			params: { id: w.server.id }
+		});
+		const token = (made.body as { token: string }).token;
+		await env.db
+			.update(servers)
+			.set({ feedTokenAt: new Date(Date.now() - 7 * 60 * MIN) })
+			.where(eq(servers.id, w.server.id));
+		const row = async () =>
+			(await env.db.select().from(servers).where(eq(servers.id, w.server.id)))[0];
+		const before = await feedStatus(env, await row(), false);
+		expect(before.state).toBe('silent');
+
+		// what an empty Season 2 server posts: a join, no kill and no match state
+		const res = await ingest({
+			request: new Request('http://localhost/api/ingest/events', {
+				method: 'POST',
+				headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+				body: JSON.stringify({
+					serverId: 'e9cf2544-b21e-4b80-9f12-8ec95ff58964',
+					serverName: 'Test',
+					events: [
+						{
+							eventId: randomUUID(),
+							type: 'player_joined',
+							eventTime: 12.5,
+							matchId: '7e72e869-4460-4d27-aa4c-76a52ed20cb4',
+							mapName: 'Kavkazi',
+							playerName: 'Charlie',
+							playerId: '-0000-000000000000',
+							playerSteamId: '76561198000000003',
+							players: 1
+						}
+					]
+				})
+			})
+		} as unknown as RequestEvent);
+		// the game counts it as sent once it has this answer
+		expect(res.status).toBe(200);
+		const after = await feedStatus(env, await row(), false);
+		expect(after.state).toBe('live');
+
+		const report = feedReportOf({
+			enabled: true,
+			endpointCount: 1,
+			endpoints: [
+				{
+					index: 0,
+					scheme: 'https',
+					host: 'console.warcon.app',
+					healthy: true,
+					sentTotal: 1,
+					lastHttpStatus: 200
+				}
+			]
+		})!;
+		expect(feedDiagnosis(report, 'https://console.warcon.app', after.state).fault).toBeNull();
+		// against the verdict from before the batch: what the card said
+		expect(feedDiagnosis(report, 'https://console.warcon.app', before.state).fault).toBe(
+			'otherToken'
 		);
 	});
 
