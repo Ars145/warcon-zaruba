@@ -110,6 +110,8 @@ const MATRIX: Record<string, Policy | typeof PER_LIST> = {
 	'POST api/orgs/[id]/lists/import': 'listsOwner',
 	'POST api/orgs/[id]/lists/sync': 'lists',
 	'GET api/orgs/[id]/players': 'lists',
+	// an announcement: Chat on each server it names, so Chat somewhere in the org to ask at all
+	'POST api/orgs/[id]/broadcast': 'anyCap:chat.send',
 	// its reserved-slot groups: whoever edits its reserved slots. "Group not found." is not one of
 	// the hidden answers, so a group looked up before the role check fails these lines.
 	'GET api/orgs/[id]/slot-groups': 'lists:reserve',
