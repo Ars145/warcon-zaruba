@@ -831,6 +831,7 @@
 					allowed: lines(f.allowed),
 					action: f.nameAction,
 					spareReserved: f.spareReserved,
+					exempt: f.exempt.split(/[\s,]+/).filter(Boolean),
 					reason: f.reason
 				};
 			case 'name_change':
@@ -1044,9 +1045,14 @@
 				);
 				const blocked = ((c.blocked as string[] | undefined) ?? []).length;
 				const allowed = ((c.allowed as string[] | undefined) ?? []).length;
+				const exempt = ((c.exempt as string[] | undefined) ?? []).length;
 				const lists = [
 					c.builtinWords && 'built-in list',
 					blocked && `${blocked} word${blocked === 1 ? '' : 's'}`
+				].filter(Boolean);
+				const spares = [
+					c.spareReserved && 'reserved slots',
+					exempt && `${exempt} player${exempt === 1 ? '' : 's'}`
 				].filter(Boolean);
 				return [
 					c.characters === 'ascii'
@@ -1060,7 +1066,7 @@
 						? `${lists.join(' and ')}${allowed ? `, ${allowed} exception${allowed === 1 ? '' : 's'}` : ''}`
 						: '',
 					c.action === 'alert' ? 'alert only' : 'kick',
-					c.spareReserved ? 'spares reserved slots' : ''
+					spares.length ? `spares ${spares.join(' and ')}` : ''
 				]
 					.filter(Boolean)
 					.join(' · ');
@@ -2089,6 +2095,20 @@
 									><input type="checkbox" bind:checked={f.spareReserved} /> Never players with a reserved
 									slot</label
 								>
+							</fieldset>
+							<fieldset class="space-y-2 text-[13px]">
+								<legend class="field-label">Never these players (optional)</legend>
+								<textarea
+									class="input font-mono text-[12.5px]"
+									rows="3"
+									data-plain
+									bind:value={f.exempt}
+									aria-label="SteamIDs the rule never acts on, one per line"
+									placeholder="SteamID64, one per line"></textarea>
+								<p class="text-[12px] text-mist-600">
+									To keep your clan tag to your staff, block it as a word (abc for [ABC]) and list
+									them here.
+								</p>
 							</fieldset>
 						</div>
 						<div class="space-y-3 sm:border-l sm:border-black sm:pl-6">
