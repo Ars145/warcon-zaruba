@@ -769,6 +769,19 @@ the line again and restart the server. The list can hold other endpoints beside 
 place of the old one. `EventFeedServerName` is the name the game sends with each batch; Warcon
 goes by the token, so keep one such line if the file already has it.
 
+A token is not a working feed, so the panel checks what actually arrives. A Season 2 server posts
+its match state within a minute or two of starting, with nobody on, and reads its feed lines only
+at that start. So when a server with a token has sent nothing in the five minutes after its game
+last started, the feed is **silent**: the Config card says so in amber, with what to check on the
+host (the section, the Url's path, a restart since the lines went in, the new line after
+**Replace token**); the Automation tab names the kill feed rules that are on (Team kill limit,
+Kill rate, Kill distance, Name change watch, Bounty) in a notice above the list and on each of
+their rows, since none of them can act; and the Overview's kill feed panel marks where the game
+started, with older kills dated. For the org's owners, a token made or replaced after the game
+started shows as **waiting** instead: the game cannot have it until it restarts. While a server is
+down, or before the panel has read when it started, nothing is judged. A feed that stops in the
+middle of a run is still shown on the Overview as no events for so many minutes with players on.
+
 Season 2 also posts the match's state as it changes, the match's result when it ends, and players
 joining and leaving. The state shows on the server's Overview as **Match** (loading the map,
 waiting for players, playing, match over), which the status alone cannot tell; a state from before
@@ -1749,7 +1762,7 @@ GET  /api/servers/:id/kills?before=<iso>&beforeTime=<s>&limit=50&count=1&match=<
 GET  /api/servers/:id/matches?page=1                    match history, newest first, fifty a page   GET /api/servers/:id/matches/:matchId   a match that ended: lines, score timeline, awards
 POST /api/servers/:id/stats/purge {name}                 deletes the server's kills, matches and match rows (org owners; the name must be the server's; sessions stay)
      &killer=&victim=&player=&cause=&kind=&minM=            filters: a SteamID exactly, else part of a name; the raw cause tag; kind headshot|teamKill|suicide|vehicle|environment; metres at least
-GET/POST/DELETE /api/servers/:id/feed                   the kill feed setup: token and URL (POST mints or replaces, owners only)
+GET/POST/DELETE /api/servers/:id/feed                   the kill feed setup: token and URL (POST mints or replaces, owners only), and whether it arrives (state)
 POST /api/ingest/events                                 where the game posts: [WDServerFeed] Url is the origin, the game adds this path (Authorization: Bearer wkf_…); not a panel route
 GET  /api/servers/:id/cash?since=<iso>                  cash-in-play samples since a moment (24 h at most), seeds the dashboard chart
 GET  /api/servers/:id/players/marks?ids=a,b&names=…     watchlist / first-visit / risk / record here per connected player
