@@ -94,6 +94,10 @@ What is in the box:
 - **A modifier on every map**: the Map rotation tab adds Infantry Only or Hardcore to every rotation
   entry whose map offers it, or takes it off them all, in one apply. It is there where the rotation
   is edited through the config document (every live build so far), so it needs Config & settings.
+- **Map sets**: an organisation keeps whole rotations under a name, say an infantry set and a
+  standard one, and the Map rotation tab loads one in place of the server's rotation in one apply,
+  then switches back the same way. Owners save a server's rotation as a set, or paste one in from
+  a text file. See [Map sets](#map-sets).
 - **A new rotation order every day**: the Map rotation tab's **Shuffle** deals the entries out with
   the maps in turn, so no map plays twice in a row, and each map's control zones in turn too; a
   [Rotation shuffle](#automation-triggers) rule does it once a day, so a server does not start on
@@ -365,7 +369,7 @@ the site owner, API keys included.
 
 Beyond server roles, an **org owner** adds, edits and removes the org's servers, manages members,
 roles, per-server grants and invite links and Discord webhooks, writes the
-[saved messages](#saved-messages), and sees the org's audit trail. The
+[saved messages](#saved-messages) and the [map sets](#map-sets), and sees the org's audit trail. The
 **site owner** creates and deletes organisations, manages every account, and sees the whole trail.
 
 Members see the audit trail for their own actions plus everything on servers where their role
@@ -448,6 +452,37 @@ them. **Save** keeps the whole list, and the tab says when it was last saved and
 who can chat on a server (_Chat_) sees the list there, API keys with _Chat_ included; only an owner
 changes it, never a key, and every save is in the organisation's audit trail with the list it
 saved.
+
+### Map sets
+
+A **map set** is a whole rotation kept under a name, such as an infantry set and a standard King of
+the Hill one, for any of the organisation's servers. On a server's **Map rotation** tab, pick one
+under _Map set_ and **Load** it: its entries take the place of the rotation in the table, and
+**Apply to server** writes them to the server's config document like any other rotation edit, so
+nothing changes until then and **Discard** goes back. To switch back, load the other set. The note
+under the table names the set a server's rotation is, also after a Shuffle has put it in another
+order. A set is its entries only: whether the rotation is on, and Ordered or Random, stay as each
+server has them.
+
+The organisation's owners keep the sets. **Save as…** on the Map rotation tab keeps the entries in
+the table (unapplied edits included) as a new set, or, given the name of one that exists, in place
+of its entries. The organisation's **Map sets** tab lists them, with how many entries each has on
+each map and its modifiers, and makes or changes one from its lines as `ServerSettings.ini` has
+them, one entry a line (`.RotationEntries=(Map="Kavkazi",Experiences="Bakurani_KOTH_02+KOTH_InfantryOnly",…)`),
+so a rotation kept in a text file, or the output of the community rotation builder, can be pasted
+in as it is; headings, comments and the section's other keys are passed over, and a line that sets
+an entry the panel cannot read is named, with the reason, before anything is saved. The lines are
+read as the server reads its file, so the set plays what they would: `!RotationEntries=ClearArray`
+starts the list again, `+` adds an entry only once, and `-` takes one out. **Copy lines**
+gives a set's lines back. An organisation keeps up to 20 sets of up to 300 entries each, names
+unique ignoring case. Each map, game mode, time of day and control zone is one of the game's ids
+(letters, digits, `_`, `.` and `-`), as the game's own pickers name them.
+
+Loading a set is a config apply, so it needs _Config & settings_ on the server, as the rest of the
+tab's document editing does, and it is there on builds that edit the rotation through the config
+document (every live build so far). Whoever holds _Config & settings_ on a server sees the sets
+there, API keys with it included; only an owner saves, renames or deletes one, never a key, and
+each change is in the organisation's audit trail with the set's name and size.
 
 ### Announcements
 
@@ -1431,6 +1466,13 @@ server (`{"ok": true, "messages": [{"name": "Restart soon", "text": "Restart in 
 Send one as the `message` of `broadcast`, `whisper` or `whisperMany`. Only the organisation's owners
 change them, never a key.
 
+The organisation's [map sets](#map-sets) are not an action either:
+`GET /api/servers/:id/map-sets` answers them, by name, to a key holding _Config & settings_ on the
+server (`{"ok": true, "mapSets": [{"id": "…", "name": "Infantry", "entries": [{"map": "Kavkazi",
+"experiences": ["Bakurani_KOTH_02", "KOTH_InfantryOnly"], "lighting": "DayClear", "zoneAlternator":
+""}]}]}`). Loading one is a `configApply` of the document with its entries as the rotation's. Only
+the organisation's owners change them, never a key.
+
 An announcement is a `broadcast` on several servers of one organisation at once, and not an action
 either:
 
@@ -1838,6 +1880,7 @@ own `/api/auth/*` routes only the OAuth callback is reachable over HTTP; everyth
 ```
 GET/POST /api/orgs  PATCH/DELETE /api/orgs/:id   PATCH {name} | {discordInviteUrl} | {boardOpens: official|custom|30d|all} | {boardHidden: [column]} | {membersReserved} | {banMessage} | {banReasons: [{label,reason,days}] | null} | {savedMessages: [{name,text}]} | site owner: {serverLimit, suspended, reason, allowPublicStatus, allowPublicLeaderboards}
 GET/POST /api/orgs/:id/seasons {name,startsAt}  PATCH/DELETE .../:seasonId {name?,startsAt?}   the official seasons and the organisation's own, what its boards open on and the columns its public boards leave out (`hidden`) (owners; a start is still to come, and a started season's stays put)
+POST /api/orgs/:id/map-sets {name,entries[]}  PATCH/DELETE .../:setId {name?,entries?}   the organisation's map sets: whole rotations for its servers' Map rotation tabs (owners; 409 name_taken on a name in use, ignoring case)
 GET  /api/orgs/:id/members  PATCH/DELETE /api/orgs/:id/members/:userId {role}  PUT .../:userId/grants {grants:[{serverId,roleId}]}
 GET/POST /api/orgs/:id/roles {name,capabilities[]}  PATCH/DELETE .../:roleId {name?,capabilities?}  POST .../:roleId/reset  PUT .../order {ids[]} (every role once, else 409 stale)
 GET/POST /api/orgs/:id/keys {label,capabilities[],serverIds[]|null,expiresDays}  DELETE .../:keyId   (POST returns the token once)
@@ -1847,6 +1890,7 @@ GET/POST /api/users  PATCH/DELETE /api/users/:id  PUT /api/users/:id/grants {gra
 GET/POST /api/servers {orgId,...}  PATCH/DELETE /api/servers/:id  POST /api/servers/:id/test   (PATCH also {publicStatus, publicLeaderboards, publicKills}, org owners, within the site owner's allowance; a PATCH that changes host, port or scheme must carry password, or it is 400 password_required)
 GET/PUT /api/servers/:id/grants {grants:[{userId,roleId}]}   GET /api/servers/:id/summary
 GET  /api/servers/:id/saved-messages                    the organisation's saved messages, in order (Chat; its owners change them with PATCH /api/orgs/:id)
+GET  /api/servers/:id/map-sets                          the organisation's map sets, by name, with their entries (Config & settings; its owners change them under /api/orgs/:id/map-sets)
 POST /api/orgs/:id/broadcast {message,serverIds[]|null}  an announcement: a broadcast on each server named, or (null) on every server of the org the caller may chat on (Chat on each)
 GET|POST /api/servers/:id/rcon/:action   (GET for reads with query params, POST JSON for mutations)
 GET  /api/servers/:id/analytics?range=24h|7d|30d       includes `combat` from the kill feed when the server has one
