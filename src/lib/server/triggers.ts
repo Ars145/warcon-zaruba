@@ -3054,17 +3054,24 @@ export async function dryRun(
 				result.notes.push('Could not read the reserved slots; nobody was spared for one.');
 			}
 		}
+		const exempt = new Set(c.exempt ?? []);
 		let spared = 0;
+		let listed = 0;
 		for (const r of rows) {
 			const v = nameVerdict(c, r.name);
 			if (!v) continue;
-			if (reserved.has(r.steamId)) spared++;
+			if (exempt.has(r.steamId)) listed++;
+			else if (reserved.has(r.steamId)) spared++;
 			else push(new Date(r.joinedAt), `${c.action} ${r.name} (${r.steamId}): ${v.verdict}`);
 		}
 		if (rows.length) result.from = new Date(rows[rows.length - 1].joinedAt).toISOString();
 		result.notes.push(
 			`${rows.length} name${rows.length === 1 ? '' : 's'} checked: everyone who has played here${rows.length === NAME_REPLAY_MAX ? `, the latest ${NAME_REPLAY_MAX}` : ''}, under each name they used.`
 		);
+		if (listed)
+			result.notes.push(
+				`${listed} more would match but ${listed === 1 ? 'is a player' : 'are players'} it never acts on.`
+			);
 		if (spared)
 			result.notes.push(
 				`${spared} more would match but hold${spared === 1 ? 's' : ''} a reserved slot.`

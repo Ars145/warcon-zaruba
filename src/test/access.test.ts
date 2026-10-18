@@ -743,9 +743,10 @@ describe.skipIf(!hasTestDb)('access', () => {
 			expect(second.status).toBe(409);
 		});
 
-		test('a Name filter rule: who may save, dry-run and switch it on', async () => {
+		test('a Name filter rule: who may save, dry-run, switch it on and say whom it leaves alone', async () => {
 			const w = await seedWorld(env);
-			const body = { kind: 'name_filter', config: { characters: 'ascii', action: 'alert' } };
+			const config = { characters: 'ascii', action: 'alert', exempt: ['76561198000000801'] };
+			const body = { kind: 'name_filter', config };
 			const made = await api(w, 'owner', 'POST api/servers/[id]/triggers', {
 				params: { id: w.server.id },
 				body
@@ -775,7 +776,10 @@ describe.skipIf(!hasTestDb)('access', () => {
 				keyElsewhere: 404,
 				keyBans: 403
 			};
-			for (const [who, status] of Object.entries(expected) as [PrincipalName, number][]) {
+			const principals = Object.entries(expected) as [PrincipalName, number][];
+			for (const [i, [who, status]] of principals.entries()) {
+				// each names a player of their own for the rule to leave alone
+				const own = String(76561198000000810n + BigInt(i));
 				const got = [
 					await api(w, who, 'POST api/servers/[id]/triggers/dry-run', {
 						params: { id: w.server.id },
@@ -785,10 +789,24 @@ describe.skipIf(!hasTestDb)('access', () => {
 						params: { id: w.server.id, triggerId },
 						body: { enabled: true }
 					}),
-					await api(w, who, 'POST api/servers/[id]/triggers', { params: { id: w.server.id }, body })
+					await api(w, who, 'POST api/servers/[id]/triggers', {
+						params: { id: w.server.id },
+						body
+					}),
+					await api(w, who, 'PATCH api/servers/[id]/triggers/[triggerId]', {
+						params: { id: w.server.id, triggerId },
+						body: { config: { ...config, exempt: [own] } }
+					})
 				].map((r) => r.status);
 				// a create that gets through answers 201
-				expect([who, ...got]).toEqual([who, status, status, status === 200 ? 201 : status]);
+				expect([who, ...got]).toEqual([who, status, status, status === 200 ? 201 : status, status]);
+				// a change let through is saved; a refused one leaves the list as it was
+				const [saved] = await env.db
+					.select({ config: triggers.config })
+					.from(triggers)
+					.where(eq(triggers.id, triggerId));
+				const kept = (saved.config as { exempt: string[] }).exempt;
+				expect([who, kept.includes(own)]).toEqual([who, status === 200]);
 			}
 			// The rule's id under another server's path is not found, even for its org's owner.
 			const moved = await api(w, 'owner', 'PATCH api/servers/[id]/triggers/[triggerId]', {

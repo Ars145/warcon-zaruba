@@ -72,6 +72,23 @@ describe('the name filter rule', () => {
 		);
 		expect(ev).toEqual({ intents: [], updates: [] });
 	});
+	test('a player on its own list is left alone however the name arrives, kick or alert', async () => {
+		const [joiner, renamer, back] = ['76561198000000001', '76561198000000002', '76561198000000003'];
+		for (const action of ['kick', 'alert']) {
+			const ev = await run(
+				{ blocked: ['nobs'], spareReserved: false, exempt: [joiner, renamer, back], action },
+				tick(
+					[player(joiner, '[NoBS] Ramon'), player('4', '[NoBS] Fake')],
+					[player(renamer, '[N0BS] Staff')],
+					[],
+					[player(back, '[NoBS] Again')]
+				)
+			);
+			expect(ev.intents.map((i) => [i.action, i.target])).toEqual([
+				[action === 'kick' ? 'kick' : 'name_flag', '4']
+			]);
+		}
+	});
 	test('a look with no joiner and no new name does nothing', async () => {
 		const ev = await run({ blocked: ['tag'] }, tick([], []));
 		expect(ev).toEqual({ intents: [], updates: [] });
