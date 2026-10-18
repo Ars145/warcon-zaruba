@@ -10,6 +10,7 @@
 // outbox.
 import { settingsFingerprint } from './fingerprint';
 import { ApiError, str } from './http';
+import { steamIdList } from './steam';
 import { MAX_CHAT } from '$lib/chat';
 import { clanTag } from '$lib/clan';
 
@@ -94,16 +95,7 @@ export function validateTwoTeams(c: Record<string, unknown>): TwoTeamsConfig {
 	if (!valid && balance)
 		throw new ApiError(400, `The sides may differ by 1 to ${TWO_TEAMS_MAX_GAP} players.`);
 	const gap = valid ? (asked as number) : TWO_TEAMS_DEFAULT_GAP;
-	if (c.exempt !== undefined && !Array.isArray(c.exempt))
-		throw new ApiError(400, 'exempt must be a list of SteamID64s.');
-	const exempt = [...new Set(((c.exempt as unknown[]) ?? []).map((v) => str(v, 32)))].filter(
-		Boolean
-	);
-	const bad = exempt.find((id) => !/^\d{17}$/.test(id));
-	if (bad !== undefined)
-		throw new ApiError(400, `"${bad.slice(0, 20)}" is not a SteamID64 (17 digits).`);
-	if (exempt.length > TWO_TEAMS_MAX_EXEMPT)
-		throw new ApiError(400, `At most ${TWO_TEAMS_MAX_EXEMPT} players can be left alone.`);
+	const exempt = steamIdList(c.exempt, TWO_TEAMS_MAX_EXEMPT);
 	return {
 		closedFaction,
 		names,
