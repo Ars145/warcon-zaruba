@@ -144,7 +144,7 @@ describe('isPanel', () => {
 
 describe('feedDiagnosis', () => {
 	const diagnose = (r: ReturnType<typeof feedReportOf>, state = 'silent' as const) =>
-		feedDiagnosis(r!, ORIGIN, state, started);
+		feedDiagnosis(r!, ORIGIN, state);
 
 	test("TLR #1: Warcon's line names the site alone", () => {
 		const d = diagnose(feedReportOf(TLR));
@@ -173,22 +173,25 @@ describe('feedDiagnosis', () => {
 		expect([elsewhere.fault, elsewhere.others]).toEqual(['elsewhere', 1]);
 	});
 
-	test("taken in since the start while nothing came for this server: another server's token", () => {
-		const healthy = ours({
-			healthy: true,
-			lastHttpStatus: 200,
-			consecutiveFailures: 0,
-			lastSuccessUnixSeconds: Date.parse(started) / 1000 + 60
-		});
-		expect(diagnose(healthy).fault).toBe('otherToken');
-		expect(diagnose(healthy, 'live' as never).fault).toBeNull();
-		// the last success was before this start: the posts stopped, they did not go elsewhere
-		const before = ours({
-			healthy: true,
-			lastHttpStatus: 200,
-			lastSuccessUnixSeconds: Date.parse(started) / 1000 - 60
-		});
-		expect(diagnose(before).fault).toBeNull();
+	test("sent here since the start while nothing came for this server: another server's token", () => {
+		// the game's counters start again at its start; sent counts batches the panel took
+		const sent = (sentTotal: number, lastSuccessUnixSeconds: number | null) =>
+			ours({
+				healthy: true,
+				lastHttpStatus: 200,
+				consecutiveFailures: 0,
+				sentTotal,
+				lastSuccessUnixSeconds
+			});
+		expect(diagnose(sent(2, null)).fault).toBe('otherToken');
+		expect(diagnose(sent(2, null), 'live' as never).fault).toBeNull();
+		expect(diagnose(sent(0, null)).fault).toBeNull();
+		// the game's clock is never set against the panel's: a last success it dates a week ago
+		// (or a week ahead) changes nothing
+		expect(diagnose(sent(2, Date.parse(started) / 1000 - 7 * 86400)).fault).toBe('otherToken');
+		expect(
+			diagnose(sent(2, Date.parse(started) / 1000 + 7 * 86400), 'live' as never).fault
+		).toBeNull();
 	});
 
 	test('of two lines for this panel, the failing one is told', () => {

@@ -128,16 +128,15 @@ export interface FeedDiagnosis {
 
 /**
  * What the game's report says is wrong with the feed to this panel; fault null when nothing is.
- * `state` and `startedAt` are the panel's own verdict ($lib/feed-health): a healthy endpoint here
- * while nothing has come in for this server since its start means the posts go in under another
- * server's token.
+ * `state` is the panel's own verdict ($lib/feed-health), and must be read after the report: the
+ * game counts a batch as sent only once the panel has answered it, and the panel stamps the
+ * server's last batch before it answers, so a verdict read after the report has seen every batch
+ * the report counts (one read before it has not: after a restart the report would show batches
+ * the verdict never heard of). The game's counters start again at its start, so batches sent
+ * here while nothing came in for this server since its start went in under another server's
+ * token. No clock of the game's is compared with the panel's.
  */
-export function feedDiagnosis(
-	report: FeedReport,
-	origin: string,
-	state: FeedState,
-	startedAt: string | null
-): FeedDiagnosis {
+export function feedDiagnosis(report: FeedReport, origin: string, state: FeedState): FeedDiagnosis {
 	const none = { endpoint: null, others: report.endpointCount };
 	if (!report.enabled) return { fault: 'off', ...none };
 	if (!report.endpointCount) return { fault: 'empty', ...none };
@@ -147,9 +146,7 @@ export function feedDiagnosis(
 	const at = { endpoint: e, others: report.endpointCount - ours.length };
 	const code = e.lastHttpStatus;
 	if (code !== null && code >= 200 && code < 300) {
-		const since = startedAt ? Date.parse(startedAt) : NaN;
-		const success = e.lastSuccessAt ? Date.parse(e.lastSuccessAt) : NaN;
-		return state === 'silent' && success >= since
+		return state === 'silent' && e.sentTotal > 0
 			? { fault: 'otherToken', ...at }
 			: { fault: null, ...at };
 	}

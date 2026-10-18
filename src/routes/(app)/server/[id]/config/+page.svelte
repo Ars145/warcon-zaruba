@@ -180,7 +180,12 @@
 	async function readReport() {
 		reportBusy = true;
 		try {
-			report = await rconGet<FeedReport>(id, 'feed');
+			const next = await rconGet<FeedReport>(id, 'feed');
+			// The panel's verdict, read after the report and before it is shown: one read earlier
+			// (the page's first, or one from before the game restarted) has not seen the batches the
+			// report counts, and would make them look taken in under another server's token.
+			await loadFeed();
+			report = next;
 			reportAt = new Date().toISOString();
 			reportError = '';
 		} catch (err) {
@@ -196,9 +201,7 @@
 			void readReport();
 		}
 	});
-	let diagnosis = $derived(
-		report && feed ? feedDiagnosis(report, feed.url, feed.state, feed.startedAt) : null
-	);
+	let diagnosis = $derived(report && feed ? feedDiagnosis(report, feed.url, feed.state) : null);
 	/** The fault in two lines: what is wrong, and what to do on the host. */
 	const FAULTS: Record<FeedFault, (d: FeedDiagnosis) => [string, string]> = {
 		off: () => [
