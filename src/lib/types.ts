@@ -727,6 +727,23 @@ export interface ListSyncSummary {
 	servers: ListSyncServer[];
 }
 
+/** How one server took an announcement (POST /api/orgs/:id/broadcast). */
+export interface AnnounceResult {
+	serverId: string;
+	serverName: string;
+	ok: boolean;
+	/** the game's answer when it was sent, else why it was not */
+	message: string;
+	/** the refusal's code ('unreachable', 'rate_limited', …) when it was not sent */
+	code?: string;
+}
+
+export interface AnnounceAnswer {
+	sent: number;
+	failed: number;
+	results: AnnounceResult[];
+}
+
 export interface OrgListsView {
 	role: 'owner' | 'editor';
 	/** the lists the reader edits; `lists` holds only these */

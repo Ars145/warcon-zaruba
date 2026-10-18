@@ -108,6 +108,12 @@ What is in the box:
 - **Group whispers**: one message to everyone on a faction, from the Overview's message box, or to
   the players ticked on the Players tab. The game has no route for it, so Warcon whispers each of
   them in turn and says who got it.
+- **Announcements**: one message on every server of the organisation at once, or on the ones
+  ticked, from the Dashboard, the Players page or the organisation's Servers tab. Each server gets it
+  as a broadcast, with its own row in the audit trail, and the panel says which servers took it.
+- **Everyone online on one page**: the Players page lists the players of all the organisation's
+  servers in one table, the way each server's Players tab does, with the server beside each of
+  them; whisper, move, kill, kick and ban act on that player's server.
 - **Demo mode**: a built-in mock game server so you can try everything before pointing it at a real one.
 
 The protocol was reverse-engineered from `rcon.wardogs.com`; see [docs/wardogs-api.md](docs/wardogs-api.md).
@@ -430,7 +436,8 @@ through `/api/passkeys/*`, and codes, recovery keys and Steam through the panel'
 Each organisation keeps a list of **saved messages**: ready-made lines its staff send often, such
 as a rules reminder, a restart warning or where to find the community's Discord. Wherever a chat
 line is typed (the Overview's _Message to_, a whisper from the Players tab, to one player or to
-those ticked, and the whisper on a player's page), **Saved messages** beside the box opens the list,
+those ticked, the whisper on a player's page, and an announcement), **Saved messages** beside the
+box opens the list,
 with a search from six messages on. Picking one puts its text in the box, where it can still be
 changed; nothing goes out until it is sent. A saved message is sent as written: placeholders such as
 `{name}` belong to [automation rules](#placeholders) and are not filled in here.
@@ -441,6 +448,36 @@ them. **Save** keeps the whole list, and the tab says when it was last saved and
 who can chat on a server (_Chat_) sees the list there, API keys with _Chat_ included; only an owner
 changes it, never a key, and every save is in the organisation's audit trail with the list it
 saved.
+
+### Announcements
+
+**Announce**, on the Dashboard, the Players page and an organisation's Servers tab, sends one
+message to several of the organisation's servers at once: a broadcast on each, the same as one sent
+from a server's Overview. It lists the organisation's servers on which you hold _Chat_, all ticked,
+with how many are on each; untick those that should not get it. A server where your role does not
+include Chat is not offered (the dialog says how many there are), and an announcement goes to one
+organisation's servers, so someone who can see several picks one. The organisation's
+[saved messages](#saved-messages) are there to pick from.
+
+Each server answers for itself. The dialog marks each one sent or not sent, with the reason (a
+server that cannot be reached, say), and those that did not take it stay ticked, so **Send again**
+goes to them alone. Every server keeps its broadcast in its own audit trail, and in its Discord
+channels, as one sent from its Overview would be. The rows of one announcement carry the same id in
+their detail, which tells them from another sending of the same text, and a search of the trail for
+the message finds them. Each server counts as one of the 120 game actions a minute a person or key
+may send.
+
+### Players online
+
+The **Players** page in the header lists everyone on the organisation's servers in one table: each
+server's Online now table, with a Server column and a filter by server, and the same flags
+(watched, risk, new), reserved slots, faction and score. Each row acts on its own server with what
+you may do there: whisper, move, kill, kick and ban show where your role includes them, and players
+ticked on several servers get one group whisper per server. The page follows the header's
+organisation scope and shows one organisation at a time, with a picker when you can see several.
+A server whose last look failed is named above the table, and its players are left out until it
+answers again. Anyone who can open a server sees its players here, as on its own Players tab, and
+nothing its own tab would not show them.
 
 ### Player dossiers, risk and the watchlist
 
@@ -1394,6 +1431,46 @@ server (`{"ok": true, "messages": [{"name": "Restart soon", "text": "Restart in 
 Send one as the `message` of `broadcast`, `whisper` or `whisperMany`. Only the organisation's owners
 change them, never a key.
 
+An announcement is a `broadcast` on several servers of one organisation at once, and not an action
+either:
+
+```sh
+curl -s -X POST "$ORIGIN/api/orgs/$ORG_ID/broadcast" \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"message":"Restart in 5 minutes","serverIds":null}'
+```
+
+```json
+{
+	"ok": true,
+	"sent": 1,
+	"failed": 1,
+	"results": [
+		{
+			"serverId": "…",
+			"serverName": "Demo One",
+			"ok": true,
+			"message": "Announcement sent to 15 player(s)."
+		},
+		{
+			"serverId": "…",
+			"serverName": "Demo Two",
+			"ok": false,
+			"message": "Could not reach the game server (connection refused).",
+			"code": "unreachable"
+		}
+	]
+}
+```
+
+`serverIds` lists the servers, or is `null` for every server of the organisation on which the key
+holds _Chat_; anything else is a 400 `bad_scope`. A server the key cannot see is a 404 and one it
+may not chat on a 403, and either sends nothing, as does a 429 when the servers do not fit in what
+is left of the key's game actions this minute (each server named is one, sent or refused; at most
+120 at once).
+Otherwise every server is tried at the same time: `results` says how each took it, `ok` is true
+when at least one did, and when none did the answer is a 502 `not_sent` with the same `results`.
+
 The reads answer:
 
 - `status`: the `status` object of the live view, read fresh; `players`: `{"players": […]}` as in
@@ -1526,7 +1603,7 @@ valid one is to make the rule in the panel and read it back.
 
 | Calls                                                                        | Limit                                                                                        |
 | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| game actions                                                                 | 120 a minute per key, `raw` at most 30 of them                                               |
+| game actions                                                                 | 120 a minute per key, `raw` at most 30 of them; an announcement counts one per server        |
 | `GET /api/servers/:id/players/seen`                                          | 60 a minute per key                                                                          |
 | `GET /api/servers/:id/analytics/periods`                                     | 30 a minute per key                                                                          |
 | `GET /api/steam/profiles` and `POST /api/servers/:id/players/:steamId/steam` | 60 and 20 a minute per key, counted together                                                 |
@@ -1711,6 +1788,7 @@ src/lib/server/lists.ts        organisation ban and reserved-slot lists and each
 src/lib/server/lists-plan.ts / lists-sync.ts   what to add or remove on a server (pure) / the per-server sync run and API fan-out
 src/lib/server/actions.ts      every panel action -> capability + /v1 call(s)
 src/lib/server/rcon-run.ts     /api/servers/:id/rcon/:action dispatcher with audit rows
+src/lib/server/announce.ts     an announcement: one broadcast on several of an org's servers, each checked and audited
 src/lib/server/rcon.ts         WardogsClient (Bearer auth, JSON/text calls, demo routing)
 src/lib/server/transport.ts    fetch to the game server
 src/lib/server/poller.ts       the worker's scheduler: tiers, phases, concurrency budget, roster, housekeeping, stats
@@ -1742,7 +1820,7 @@ src/lib/config-doc.ts / config-fields.ts   ServerSettings.ini parser and line-le
 src/lib/components/            Modal, MapPicker, PopulationChart, CashChart, ConfigForm, Toasts, badges…
 src/routes/(auth)/             /sign-in (+ /verify), /setup, /join/[token], /recover (form actions)     src/routes/sign-out
 src/routes/api/passkeys/       WebAuthn ceremonies relayed to Better Auth; src/routes/auth/steam/ the Steam callback
-src/routes/(app)/              dashboard, /server/[id]/{,players,players/[steamId],bans,rotation,config,automation,analytics,leaderboard,log,settings}, /audit, /orgs, /orgs/[id]/{,bans,reserved,seasons}, /admin/{,users,settings}, /servers, /account
+src/routes/(app)/              dashboard, /players, /server/[id]/{,players,players/[steamId],bans,rotation,config,automation,analytics,leaderboard,log,settings}, /audit, /orgs, /orgs/[id]/{,bans,reserved,seasons}, /admin/{,users,settings}, /servers, /account
 src/routes/(public)/           /s/[id]{,/leaderboard,/players/[steamId]}: the public pages, no session
 src/routes/api/                JSON API (below)
 docs/wardogs-api.md            the reverse-engineered game-server API
@@ -1769,6 +1847,7 @@ GET/POST /api/users  PATCH/DELETE /api/users/:id  PUT /api/users/:id/grants {gra
 GET/POST /api/servers {orgId,...}  PATCH/DELETE /api/servers/:id  POST /api/servers/:id/test   (PATCH also {publicStatus, publicLeaderboards, publicKills}, org owners, within the site owner's allowance; a PATCH that changes host, port or scheme must carry password, or it is 400 password_required)
 GET/PUT /api/servers/:id/grants {grants:[{userId,roleId}]}   GET /api/servers/:id/summary
 GET  /api/servers/:id/saved-messages                    the organisation's saved messages, in order (Chat; its owners change them with PATCH /api/orgs/:id)
+POST /api/orgs/:id/broadcast {message,serverIds[]|null}  an announcement: a broadcast on each server named, or (null) on every server of the org the caller may chat on (Chat on each)
 GET|POST /api/servers/:id/rcon/:action   (GET for reads with query params, POST JSON for mutations)
 GET  /api/servers/:id/analytics?range=24h|7d|30d       includes `combat` from the kill feed when the server has one
 GET  /api/servers/:id/analytics/periods?range=7d&tz=Europe/Berlin   players, new players and session lengths per hour (24h) or per day in that zone
