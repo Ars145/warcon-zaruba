@@ -782,6 +782,19 @@ started shows as **waiting** instead: the game cannot have it until it restarts.
 down, or before the panel has read when it started, nothing is judged. A feed that stops in the
 middle of a run is still shown on the Overview as no events for so many minutes with players on.
 
+Season 2 also reports on its own feed, and those who may apply the config see that report on the
+card under **What the game reports**, read when the card opens and on **Read again**: whether the
+feed was switched on when the server started and, for each endpoint it posts to, the scheme and
+host (never the full Url or the token), whether it is healthy, the last answer it had, how many
+batches went or were dropped and when the last one went through. It names every service the
+server posts to, which is why it stays with the config. The host is all the game gives, so the
+card reads the fault from what this panel answered: 405 is a page of the panel (a Url that names
+the site alone), 404 a wrong path under `/api/ingest/`, 403 a wrong path elsewhere under `/api`,
+401 a token the panel does not know (a line from before **Replace token**). A silent feed's
+warning then names that fault instead of the general checks, as it does when the feed is off in
+the file, lists no endpoint, lists only other services, gets no answer at all, or is taken in under
+another server's token (the panel accepts the posts while nothing comes in for this server).
+
 Season 2 also posts the match's state as it changes, the match's result when it ends, and players
 joining and leaving. The state shows on the server's Overview as **Match** (loading the map,
 waiting for players, playing, match over), which the status alone cannot tell; a state from before
@@ -1359,6 +1372,7 @@ game's (a 401 or a 5xx from it becomes a 502), and `error` carries the game's `c
 | `rotationSettings`                  | Save rotation     | `rotationEnabled`, `rotationMode` (`ordered` or `random`)                                                          |
 | `settings`                          | Config & settings | `scoreTick` (1 to 600), `rotationEnabled`, `rotationMode`                                                          |
 | `config`                            | Config & settings | none (the config document, credentials as `(hidden)`)                                                              |
+| `feed`                              | Config & settings | none (the game's report on its kill feed, Season 2 builds; see [Kill feed](#kill-feed))                            |
 | `configValidate`, `configApply`     | Config & settings | `text`; apply also `revision`, `force`, `fullApply`                                                                |
 | `serverLog`                         | Audit trail       | `limit` (1 to 500, default 50)                                                                                     |
 | `raw`                               | Raw RCON          | `method`, `path` (a `/v1` route), `body`                                                                           |
@@ -1795,7 +1809,7 @@ experiences alternators catalog rotation bans reserved sponsor` (View) ·
 `broadcast whisper whisperMany` (Chat) · `kick` (Kick) · `kill` (Kill) · `changeTeam` (Move) · `endMatch restartMatch
 changeMap setWeather setNextMap` (Match control) · `rotationAdd rotationRemove rotationMove
 rotationReorder` (Live rotation) · `ban unban` (Bans) · `reservedAdd reservedRemove` (Reserved
-slots) · `rotationSave rotationSettings` (Save rotation) · `config settings configValidate configApply` (Config &
+slots) · `rotationSave rotationSettings` (Save rotation) · `config feed settings configValidate configApply` (Config &
 settings) · `serverLog` (Audit trail) · `raw` (Raw RCON).
 
 ## Notes and limits
