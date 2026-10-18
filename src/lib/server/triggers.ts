@@ -1170,6 +1170,13 @@ async function evalNameFilter(
 	// A flag rule does not (the whole server is back after every map change: no new alerts).
 	const back = cfg.action === 'kick' ? ctx.returned : [];
 	if (!ctx.joined.length && !ctx.renamed.length && !back.length) return;
+	// A rule that spares reserved slots acts on nobody until the worker has read who holds one (the
+	// first look after a start reads the list only after the rules): a wrong kick is worse than a
+	// name let by. Said on the rule, so a server whose list cannot be read is not silently idle.
+	if (cfg.spareReserved && !ctx.reservedLoaded) {
+		out.updates.push({ id: row.id, lastResult: 'Waiting for the reserved slots to be read' });
+		return;
+	}
 	const named = [
 		...new Map([...ctx.joined, ...ctx.renamed, ...back].map((p) => [p.steamId, p])).values()
 	];

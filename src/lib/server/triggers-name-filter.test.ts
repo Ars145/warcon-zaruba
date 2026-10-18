@@ -37,6 +37,7 @@ const tick = (
 		factioned: [],
 		firstVisit: new Set(),
 		reserved: new Set(reserved),
+		reservedLoaded: true,
 		ts: new Date(0)
 	}) as unknown as TickContext;
 const run = (config: Record<string, unknown>, ctx: TickContext) =>
@@ -88,6 +89,20 @@ describe('the name filter rule', () => {
 				[action === 'kick' ? 'kick' : 'name_flag', '4']
 			]);
 		}
+	});
+	test('sparing reserved slots, it acts on nobody until the list is read, and says so', async () => {
+		const unread = {
+			...tick([player('1', '[TAG] Joiner')], [player('2', '[TAG] Slot')]),
+			reservedLoaded: false
+		};
+		const ev = await run({ blocked: ['tag'] }, unread);
+		expect(ev).toEqual({
+			intents: [],
+			updates: [{ id: 'rule', lastResult: 'Waiting for the reserved slots to be read' }]
+		});
+		// a rule that spares none needs no list
+		const all = await run({ blocked: ['tag'], spareReserved: false }, unread);
+		expect(all.intents.map((i) => i.target)).toEqual(['1', '2']);
 	});
 	test('a look with no joiner and no new name does nothing', async () => {
 		const ev = await run({ blocked: ['tag'] }, tick([], []));

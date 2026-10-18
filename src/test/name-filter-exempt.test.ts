@@ -3,7 +3,8 @@
 // player wearing the blocked tag stays however their name arrives (a name that changes on the
 // first look after a start, before any list has been read, a join, a reconnect inside the leave
 // grace) and anyone else wearing it is kicked; the dry run leaves them out too; and only those
-// who may run the rule can read the list.
+// who may run the rule can read the list. A rule that spares reserved slots instead acts on
+// nobody until the worker has read who holds one.
 import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { and, eq } from 'drizzle-orm';
 import { join } from 'node:path';
@@ -185,5 +186,58 @@ describe.skipIf(!hasTestDb)("the Name filter's players it never acts on", () => 
 				outcomeOf(answer) === 'ok'
 			]);
 		}
+	});
+
+	test('sparing reserved slots, it acts on nobody before the worker has read who holds one', async () => {
+		// both on the mock game's reserved list from the start
+		const [SLOT, SLOT_TOO] = ['76561198100000201', '76561198100000202'];
+		const [server] = await env.db.select().from(servers).where(eq(servers.id, w.otherServer.id));
+		const [org] = await env.db.select().from(organizations).where(eq(organizations.id, w.org.id));
+		const id = newId();
+		await env.db.insert(triggers).values({
+			id,
+			serverId: server.id,
+			orgId: w.org.id,
+			kind: 'name_filter',
+			name: 'Name filter',
+			enabled: true,
+			config: validateConfig('name_filter', { blocked: ['nobs'], spareReserved: true })
+		});
+		invalidateTriggers(server.id);
+		const look = async (...players: [string, string][]) => {
+			lists.set(server.id, named(...players));
+			const m = memoryFor(server, org);
+			m.playersIntervalMs = 1000;
+			await observeServer(env, m, { status: true, players: true });
+		};
+		const kicksOf = async (steamId: string) =>
+			(
+				await env.db
+					.select()
+					.from(outbox)
+					.where(and(eq(outbox.serverId, server.id), eq(outbox.steamId, steamId)))
+			).filter((r) => r.action === 'kick');
+
+		await look([SLOT, 'Ramon'], [FAKE, 'Fake']);
+		// the worker starts over and both now wear the tag: who holds a slot is not known yet, so
+		// neither is kicked (a wrong kick is worse than a name let by)
+		forgetMemory(server.id);
+		await look([SLOT, '[NoBS] Ramon'], [FAKE, '[NoBS] Fake']);
+		expect(await kicksOf(SLOT)).toHaveLength(0);
+		expect(await kicksOf(FAKE)).toHaveLength(0);
+		const [rule] = await env.db.select().from(triggers).where(eq(triggers.id, id));
+		expect(rule.lastResult).toBe('Waiting for the reserved slots to be read');
+
+		// read at the end of that look: from the next one a slot is spared and anyone else kicked
+		await look(
+			[SLOT, '[NoBS] Ramon'],
+			[FAKE, '[NoBS] Fake'],
+			[SLOT_TOO, '[NoBS] Two'],
+			[FAKE_TOO, '[NoBS] New']
+		);
+		expect(await kicksOf(FAKE_TOO)).toHaveLength(1);
+		expect(await kicksOf(SLOT_TOO)).toHaveLength(0);
+		expect(await kicksOf(SLOT)).toHaveLength(0);
+		forgetMemory(server.id);
 	});
 });
