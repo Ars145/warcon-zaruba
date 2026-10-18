@@ -81,6 +81,8 @@ interface State {
 	matchId: string;
 	/** when the game process started (ms): what GET /v1/health counts its uptime from */
 	startedAt: number;
+	/** what GET /v1/feed reports (setMockFeed); null: a feed that is off */
+	feedReport: Record<string, unknown> | null;
 }
 
 const MAPS = [
@@ -140,7 +142,9 @@ const LIVE_BUILD_MISSING = new Set([
 	'DELETE /v1/rotation/entries/{index}',
 	'POST /v1/rotation/entries/{index}/move',
 	'POST /v1/rotation/save',
-	'PATCH /v1/settings'
+	'PATCH /v1/settings',
+	// Season 2 (CL-516586) on
+	'GET /v1/feed'
 ]);
 const liveBuild = () => /^(1|true|yes)$/i.test(process.env.MOCK_LIVE_BUILD || '');
 // With MOCK_LIVE_ADDS=now as well, a slot added to the document is reserved at once while one taken
@@ -221,7 +225,8 @@ const CAPABILITY_ROUTES = [
 	'GET /v1/audit',
 	'GET /v1/config',
 	'POST /v1/config/validate',
-	'PUT /v1/config'
+	'PUT /v1/config',
+	'GET /v1/feed'
 ];
 
 // The schema live build CL-501228 reports from GET /v1/config (captured 2026-09-14; CL-499480's
@@ -466,10 +471,20 @@ function seed(name: string): State {
 		feed: [],
 		matchState: '',
 		matchId: crypto.randomUUID(),
-		startedAt: STARTED
+		startedAt: STARTED,
+		feedReport: null
 	};
 	state.configText = seedConfig(state);
 	return state;
+}
+
+/**
+ * What the demo's GET /v1/feed reports from now on, as Season 2's (for tests): the demo's own feed
+ * is drained by the worker (feed-events.ts) and posts nowhere, so by default it reports a feed
+ * that is off.
+ */
+export function setMockFeed(key: string, report: Record<string, unknown> | null): void {
+	stateFor(key).feedReport = report;
 }
 
 /** Player slots open to the public: MaxPlayers less what MaxReservedSlots holds back. */
@@ -902,6 +917,11 @@ export function mockHandle(
 			connections: { active: 1 },
 			gameThreadQueue: { inFlight: 0, depth: 32, rejectedTotal: 0 }
 		});
+	}
+	if (route === 'GET feed') {
+		return ok(
+			s.feedReport ?? { enabled: false, endpointCount: 0, anyUnhealthy: false, endpoints: [] }
+		);
 	}
 	if (route === 'GET server-id') {
 		// Stable per demo server, standing in for the join code the WARDOGS backend issues.
