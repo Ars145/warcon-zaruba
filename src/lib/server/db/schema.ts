@@ -266,6 +266,28 @@ export const orgSavedMessages = pgTable('org_saved_messages', {
 });
 
 /**
+ * An org's map sets ($lib/map-sets): rotations saved under a name by its owners, which a server's
+ * Map rotation tab loads in place of its rotation. A row per set, so saving one from a server's
+ * tab never rewrites the others. Names are unique in the org, ignoring case.
+ */
+export const orgMapSets = pgTable(
+	'org_map_sets',
+	{
+		id: text('id').primaryKey(),
+		orgId: text('org_id')
+			.notNull()
+			.references(() => organizations.id, { onDelete: 'cascade' }),
+		name: text('name').notNull(),
+		/** MapSelection[], in the rotation's order */
+		entries: jsonb('entries').notNull(),
+		updatedAt: ts('updated_at').notNull().defaultNow(),
+		/** who saved it last; null once that account is deleted */
+		updatedBy: text('updated_by').references(() => user.id, { onDelete: 'set null' })
+	},
+	(t) => [uniqueIndex('org_map_sets_org_name_uidx').on(t.orgId, sql`lower(${t.name})`)]
+);
+
+/**
  * An org's server roles: a name and the capabilities it carries (see $lib/capabilities). Every org
  * starts with the three built-ins, which owners may edit but not delete; custom roles are more rows.
  */
