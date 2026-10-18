@@ -164,6 +164,18 @@ export const ONE_PER_SERVER: TriggerKind[] = [
 export const FAILURES_ONLY: TriggerKind[] = ['two_teams', 'afk_protection'];
 
 /**
+ * Rules that act on the kill feed and nothing else: without batches arriving they never fire, so
+ * the Automation tab says so on each of them when the feed is silent.
+ */
+export const FEED_KINDS: TriggerKind[] = [
+	'name_change',
+	'team_kill',
+	'kill_rate',
+	'kill_distance',
+	'bounty'
+];
+
+/**
  * Rules that queue no actions, so a Discord webhook has nothing of theirs to carry: the Live server
  * name rule writes the name at the worker's look (live-name.ts). The webhook editor leaves them out.
  */

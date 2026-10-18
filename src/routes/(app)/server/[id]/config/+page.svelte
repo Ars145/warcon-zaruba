@@ -9,7 +9,8 @@
 	import { getScalar, parseIni, setScalarInText } from '$lib/config-doc';
 	import { lockedKeys, S_SESSION } from '$lib/config-fields';
 	import { EVENT_FEED_SECTION, eventFeedLines, usesEventFeed } from '$lib/feed-setup';
-	import { fmtTime } from '$lib/format';
+	import { fmtAgo, fmtTime } from '$lib/format';
+	import type { FeedState } from '$lib/feed-health';
 	import type { ConfigDoc, ConfigResult, Status } from '$lib/types';
 	import type { PageProps } from './$types';
 
@@ -44,6 +45,9 @@
 		url: string;
 		token: string;
 		feedAt: string | null;
+		startedAt: string | null;
+		tokenAt: string | null;
+		state: FeedState;
 	}
 	let feed = $state<FeedSetup | null>(null);
 	let feedBusy = $state(false);
@@ -388,13 +392,31 @@
 	<div class="mb-3 flex flex-wrap items-center gap-x-3 gap-y-2">
 		<span class="label-sm mb-0">Kill feed</span>
 		{#if feed}
-			{#if feed.configured}
+			<!-- $lib/feed-health: a token is not a feed; what came since the game started says whether it works. -->
+			{#if !feed.configured}
+				<span class="badge">off</span>
+			{:else if feed.state === 'silent'}
+				<span class="badge bg-warn/15 text-warn">silent</span>
+				<span class="text-[12.5px] text-mist-400"
+					>nothing since the server started {fmtAgo(feed.startedAt!)} · {feed.feedAt
+						? `last batch ${fmtTime(feed.feedAt)}`
+						: 'no batch received yet'}</span
+				>
+			{:else if feed.state === 'waiting'}
+				<span class="badge bg-info/15 text-info">waiting</span>
+				<span class="text-[12.5px] text-mist-400"
+					>the token is newer than the server's start: the game reads the lines when it next starts</span
+				>
+			{:else if feed.state === 'starting'}
+				<span class="badge">on</span>
+				<span class="text-[12.5px] text-mist-600"
+					>the server started {fmtAgo(feed.startedAt!)}: its first batch comes within a few minutes</span
+				>
+			{:else}
 				<span class="badge bg-ok/15 text-ok">on</span>
 				<span class="text-[12.5px] text-mist-600"
 					>{feed.feedAt ? `last batch ${feedAge(feed.feedAt)}` : 'no batch received yet'}</span
 				>
-			{:else}
-				<span class="badge">off</span>
 			{/if}
 		{/if}
 		{#if data.server.manager && feed}
@@ -414,6 +436,29 @@
 			</span>
 		{/if}
 	</div>
+	{#if feed?.configured && feed.state === 'silent' && eventFeed}
+		<div class="mb-3 rounded-ctl border border-warn/30 bg-warn/10 p-3 text-[13px]">
+			<p class="font-semibold">The game is not posting to Warcon.</p>
+			<p class="mt-1 text-mist-400">
+				The kill feed rules on the Automation tab cannot act until it does. On the host, check that:
+			</p>
+			<ol class="mt-2 list-decimal space-y-1 pl-5">
+				<li>
+					the lines sit under <span class="chip">[{EVENT_FEED_SECTION}]</span> in
+					ServerSettings.ini, with
+					<span class="chip">bEventFeedEnabled=True</span>, not in a section of their own;
+				</li>
+				<li>
+					the Url ends in <span class="font-mono text-[12.5px]">/api/ingest/events</span>: lines
+					copied before 15 October 2026 named the site alone and never arrive;
+				</li>
+				<li>
+					the server has restarted since the lines went in: the game reads them only when it starts;
+				</li>
+				<li>after Replace token, the new line took the old one's place.</li>
+			</ol>
+		</div>
+	{/if}
 	{#if feed?.configured && feed.token && eventFeed}
 		<div class="flex items-start gap-2">
 			<pre
