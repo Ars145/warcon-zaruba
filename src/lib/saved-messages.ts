@@ -21,7 +21,7 @@ export const MAX_SAVED_MESSAGE_TEXT = MAX_CHAT;
  * half an emoji. A line break or any other control character becomes a space, and half an emoji
  * anywhere else the replacement character: Postgres refuses it in jsonb.
  */
-function oneLine(value: unknown, max: number): string {
+export function oneLine(value: unknown, max: number): string {
 	const text = String(value ?? '')
 		.toWellFormed()
 		.replace(/[\s\u0000-\u001f\u007f-\u009f]+/g, ' ')
