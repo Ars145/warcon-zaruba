@@ -1170,6 +1170,13 @@ async function evalNameFilter(
 	// A flag rule does not (the whole server is back after every map change: no new alerts).
 	const back = cfg.action === 'kick' ? ctx.returned : [];
 	if (!ctx.joined.length && !ctx.renamed.length && !back.length) return;
+	// A rule that spares reserved slots acts on nobody until the worker has read who holds one (the
+	// first look after a start reads the list only after the rules): a wrong kick is worse than a
+	// name let by. Said on the rule, so a server whose list cannot be read is not silently idle.
+	if (cfg.spareReserved && !ctx.reservedLoaded) {
+		out.updates.push({ id: row.id, lastResult: 'Waiting for the reserved slots to be read' });
+		return;
+	}
 	const named = [
 		...new Map([...ctx.joined, ...ctx.renamed, ...back].map((p) => [p.steamId, p])).values()
 	];
@@ -3054,17 +3061,24 @@ export async function dryRun(
 				result.notes.push('Could not read the reserved slots; nobody was spared for one.');
 			}
 		}
+		const exempt = new Set(c.exempt ?? []);
 		let spared = 0;
+		let listed = 0;
 		for (const r of rows) {
 			const v = nameVerdict(c, r.name);
 			if (!v) continue;
-			if (reserved.has(r.steamId)) spared++;
+			if (exempt.has(r.steamId)) listed++;
+			else if (reserved.has(r.steamId)) spared++;
 			else push(new Date(r.joinedAt), `${c.action} ${r.name} (${r.steamId}): ${v.verdict}`);
 		}
 		if (rows.length) result.from = new Date(rows[rows.length - 1].joinedAt).toISOString();
 		result.notes.push(
 			`${rows.length} name${rows.length === 1 ? '' : 's'} checked: everyone who has played here${rows.length === NAME_REPLAY_MAX ? `, the latest ${NAME_REPLAY_MAX}` : ''}, under each name they used.`
 		);
+		if (listed)
+			result.notes.push(
+				`${listed} more would match but ${listed === 1 ? 'is a player' : 'are players'} it never acts on.`
+			);
 		if (spared)
 			result.notes.push(
 				`${spared} more would match but hold${spared === 1 ? 's' : ''} a reserved slot.`

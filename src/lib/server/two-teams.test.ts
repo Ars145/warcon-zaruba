@@ -71,6 +71,10 @@ describe('validateTwoTeams', () => {
 		expect(() => validateTwoTeams({ balance: true, exempt: '76561198000000001' })).toThrow(
 			'exempt must be a list'
 		);
+		// a JSON number that long arrives rounded: 76561198100000101 would leave 76561198100000100 alone
+		expect(() =>
+			validateTwoTeams({ balance: true, exempt: JSON.parse('[76561198100000101]') })
+		).toThrow('sent as strings');
 		const many = Array.from({ length: 101 }, (_, i) => String(76561198000000000n + BigInt(i)));
 		expect(() => validateTwoTeams({ balance: true, exempt: many })).toThrow('At most 100');
 	});
