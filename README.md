@@ -1724,7 +1724,9 @@ console connects over plain `http` regardless, and so can Warcon.
 
 ## Local development
 
-Prerequisites: [Bun](https://bun.sh) 1.2+ and a Postgres (the TimescaleDB image is easiest).
+Prerequisites: [Bun](https://bun.sh) 1.4.4+ (earlier releases have the Brotli decoder flaw
+CVE-2026-111497, reachable through any game server's answer) and a Postgres (the TimescaleDB
+image is easiest).
 
 ```bash
 bun install
