@@ -1555,7 +1555,8 @@
 			class="space-y-3"
 			bind:this={formEl}
 			onfocusin={(e) => {
-				if (isText(e.target) && e.target.name !== 'name' && !e.target.dataset.plain)
+				// a bare data-plain is an empty string in the dataset, so look for the attribute itself
+				if (isText(e.target) && e.target.name !== 'name' && !e.target.hasAttribute('data-plain'))
 					lastField = e.target;
 			}}
 			onsubmit={(e) => {
