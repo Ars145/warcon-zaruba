@@ -370,6 +370,9 @@ export function buildWatchedJoinEmbed(
 
 const FLUSH_AFTER_MS = 1500;
 const MAX_EMBEDS = 10;
+/** Discord refuses a message whose embeds hold more characters than this between them, titles,
+ *  descriptions, fields, footers and authors counted together. */
+const MAX_CHARS = 6000;
 const MAX_QUEUE = 100;
 
 interface Queue {
@@ -413,9 +416,29 @@ function scheduleFlush(env: Env, hook: WebhookRow, q: Queue): void {
 		});
 }
 
+const charsOf = (e: Embed) =>
+	e.title.length +
+	e.description.length +
+	(e.footer?.text.length ?? 0) +
+	(e.author?.name.length ?? 0) +
+	(e.fields ?? []).reduce((n, f) => n + f.name.length + f.value.length, 0);
+
+/** Takes the next message's embeds off the front of a queue: as many as Discord takes in one, and
+ *  at least one, so a burst of long cards goes as several messages, not one that Discord refuses. */
+export function nextBatch(embeds: Embed[]): Embed[] {
+	let n = 0;
+	let chars = 0;
+	while (n < embeds.length && n < MAX_EMBEDS) {
+		chars += charsOf(embeds[n]);
+		if (n > 0 && chars > MAX_CHARS) break;
+		n++;
+	}
+	return embeds.splice(0, n);
+}
+
 async function flush(env: Env, hook: WebhookRow, q: Queue): Promise<void> {
 	while (q.embeds.length) {
-		const batch = q.embeds.splice(0, MAX_EMBEDS);
+		const batch = nextBatch(q.embeds);
 		const result = await postDiscord(env, hook, { embeds: batch });
 		await recordResult(env, hook.id, result);
 		if (result.retryAfterMs) {

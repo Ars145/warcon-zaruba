@@ -7,7 +7,9 @@ import {
 	buildWatchedJoinEmbed,
 	classify,
 	dossierUrl,
-	takesRule
+	nextBatch,
+	takesRule,
+	type Embed
 } from './webhook-delivery';
 
 const token = 'a'.repeat(68);
@@ -247,5 +249,46 @@ describe('watched join and dossier links', () => {
 		expect(
 			buildWatchedJoinEmbed('Warcon', 'x', { steamId: '1', name: 'a', reason: '' }, 't').url
 		).toBeUndefined();
+	});
+});
+
+describe('nextBatch', () => {
+	/** a card of `chars` characters as Discord counts them: title, description and footer */
+	const card = (chars: number, title = 'Ban'): Embed => ({
+		title,
+		description: 'x'.repeat(chars - title.length - 'Warcon'.length),
+		color: 0,
+		timestamp: '2026-10-24T00:00:00.000Z',
+		footer: { text: 'Warcon' }
+	});
+	/** the messages a queue goes out as, by the number of cards in each */
+	const messages = (queue: Embed[]) => {
+		const out: Embed[][] = [];
+		// a few rounds at most, so a batch that takes nothing fails the test rather than spinning
+		for (let i = 0; queue.length && i < 20; i++) out.push(nextBatch(queue));
+		return out;
+	};
+
+	test('ten short cards go as one message, the eleventh as the next', () => {
+		expect(messages(Array.from({ length: 11 }, () => card(150))).map((m) => m.length)).toEqual([
+			10, 1
+		]);
+		expect(nextBatch([])).toEqual([]);
+	});
+
+	test('no message holds more than the 6,000 characters Discord takes, and every card goes, in order', () => {
+		const queue = Array.from({ length: 10 }, (_, i) => card(650, `Ban ${i}`));
+		const sent = messages([...queue]);
+		expect(sent.map((m) => m.length)).toEqual([9, 1]);
+		expect(sent.flat()).toEqual(queue);
+		// to the character: 6,000 is taken, one more goes in the next message
+		const full = [card(1500), card(1500), card(1500), card(1500), card(10)];
+		expect(messages(full).map((m) => m.length)).toEqual([4, 1]);
+		const over = [card(1500), card(1500), card(1500), card(1501)];
+		expect(messages(over).map((m) => m.length)).toEqual([3, 1]);
+	});
+
+	test('a card longer than Discord takes goes alone, so the queue moves on', () => {
+		expect(messages([card(100), card(7000), card(100)]).map((m) => m.length)).toEqual([1, 1, 1]);
 	});
 });
