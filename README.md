@@ -908,15 +908,20 @@ restart), or have the proxy in front of the panel rewrite `/api/feed/events/api/
 
 A webhook is one Discord channel, and each one carries what is ticked for it. On the
 organisation's overview an owner adds channel webhooks (in Discord: channel settings →
-Integrations → Webhooks → copy URL) and chooses what to mirror: bans (including org list changes), other game commands, trigger
+Integrations → Webhooks → copy URL) and chooses what to mirror: bans (including org list changes), game commands and chat (what staff whisper and broadcast included), trigger
 actions, player notes and watchlist changes, management changes, sign-ins, team kills from the
 [kill feed](#kill-feed), watched players joining (with why they are watched, a poll after they
 connect; the post opens their page in the panel), bounties set, claimed and lapsed (a card for a
 players' channel: who, the run, the reward and the server, never a SteamID; see the Bounty rule
 under [Automation](#automation-triggers)); for every server or a subset. A separate team-kill channel is a second
-webhook with only that box ticked; the server's **Settings** tab connects one in a click. Events are batched into one message per burst, and the URL
+webhook with only that box ticked; the server's **Settings** tab connects one in a click. Events are batched: a burst goes as one message, or a few when it holds more than Discord takes in one. The URL
 (which lets anyone post to the channel) is stored encrypted with `ENCRYPTION_KEY` and never shown
 again. **Test** posts a message right away; delivery failures show on the org page.
+
+A whisper sent by hand, to one player or a group, says on its card what it said, as the audit trail
+keeps it: whoever reads a channel with _Game commands and chat_ ticked reads what staff whisper, as
+they read broadcasts. A whisper refused for want of _Chat_ posts without its words, and a rule's
+whisper never shows its text.
 
 Trigger actions can be narrowed to some kinds of rule: untick _Every kind of rule_ under them and
 tick the kinds, grouped as on the Automation tab, so a channel for kicks and bans leaves out the
