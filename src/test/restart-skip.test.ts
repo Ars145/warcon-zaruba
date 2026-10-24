@@ -211,6 +211,8 @@ describe.skipIf(!hasTestDb)('Skip map after restart', () => {
 			target: 'Bakurani (Day Clear)',
 			category: 'trigger'
 		});
+		// the rule's count is written just after its audit row
+		await until(async () => (await t.rule()).fireCount > 0);
 		expect((await t.rule()).fireCount).toBe(1);
 		// the rest of the run: nothing more
 		await t.look();
