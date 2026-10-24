@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { validateWebhookUrl } from './webhooks';
 import { RULE_KINDS } from '../rule-kinds';
+import { MAX_CHAT } from '../chat';
 import {
 	buildEmbed,
 	buildTeamKillEmbed,
@@ -110,6 +111,92 @@ describe('buildEmbed', () => {
 		expect(e.description).toContain('Outcome: **denied** (403)');
 		expect(e.color).toBe(0x8a8a90);
 	});
+	const whisper = {
+		...row,
+		action: 'rcon.whisper',
+		detail: { steamId: '76561198000000001', message: 'Stop camping our main' },
+		message: 'OK: message delivered to Nomad.'
+	};
+	test("a whisper by hand says what it said, before the game's answer", () => {
+		expect(buildEmbed('Warcon', whisper).description).toBe(
+			'**james** → `76561198000000001`\nServer: EU #1\nMessage: Stop camping our main\nOK: message delivered to Nomad.'
+		);
+		const group = buildEmbed('Warcon', {
+			...whisper,
+			action: 'rcon.whisperMany',
+			target: 'Valkyra',
+			detail: { faction: 'Valkyra', message: 'Push B' },
+			message: 'Whispered 12 players on Valkyra.'
+		});
+		expect(group.title).toBe('Group whisper');
+		expect(group.description).toEndWith(
+			'→ `Valkyra`\nServer: EU #1\nMessage: Push B\nWhispered 12 players on Valkyra.'
+		);
+		// a game that refused it: the words, then what went wrong
+		const failed = buildEmbed('Warcon', {
+			...whisper,
+			outcome: 'error',
+			status: 404,
+			message: 'Error: no player matching it'
+		});
+		expect(failed.description).toEndWith(
+			'\nMessage: Stop camping our main\nOutcome: **error** (404)\nError: no player matching it'
+		);
+	});
+	test('the words are what the game was sent: cut where the action cut them, on one line', () => {
+		const long = buildEmbed('Warcon', { ...whisper, detail: { message: ` ${'w'.repeat(300)} ` } });
+		expect(long.description).toContain(`\nMessage: ${'w'.repeat(MAX_CHAT)}\n`);
+		// spaces count toward the cut as the game counted them, so no word past it shows
+		const spaced = buildEmbed('Warcon', {
+			...whisper,
+			detail: { message: `${'w'.repeat(MAX_CHAT - 6)}${' '.repeat(6)}unsent` }
+		});
+		expect(spaced.description).toContain(`\nMessage: ${'w'.repeat(MAX_CHAT - 6)}\n`);
+		expect(spaced.description).not.toContain('uns');
+		// the game was sent half an emoji: the card shows the replacement character, never half a pair
+		const emoji = buildEmbed('Warcon', {
+			...whisper,
+			detail: { message: `${'w'.repeat(MAX_CHAT - 1)}😀` }
+		});
+		expect(emoji.description).toContain(`\nMessage: ${'w'.repeat(MAX_CHAT - 1)}\uFFFD\n`);
+		expect(emoji.description.isWellFormed()).toBe(true);
+		const lines = buildEmbed('Warcon', { ...whisper, detail: { message: 'one\ntwo\r\n\nthree' } });
+		expect(lines.description).toContain('\nMessage: one two three\n');
+	});
+	test('no message line when nothing was said, for a refused whisper, or for anything else', () => {
+		for (const detail of [{}, { message: '' }, { message: '   ' }, { message: 7 }, null])
+			expect(buildEmbed('Warcon', { ...whisper, detail }).description).not.toContain('Message:');
+		// someone without Chat: what they typed stays in the trail
+		const denied = buildEmbed('Warcon', {
+			...whisper,
+			outcome: 'denied',
+			status: 403,
+			detail: { steamId: '76561198000000001', message: 'typed by a viewer' },
+			message: "Needs 'chat.send', role 'viewer' lacks it"
+		});
+		expect(denied.description).not.toContain('typed by a viewer');
+		// a rule's whisper says what became of it in the panel's words, never what it told the player
+		for (const action of ['trigger.welcome', 'trigger.faction_change', 'trigger.team_kill']) {
+			const rule = buildEmbed('Warcon', {
+				...whisper,
+				category: 'trigger',
+				action,
+				detail: { message: 'what the rule told the player' },
+				message: 'Whispered Nomad.'
+			});
+			expect(rule.description).not.toContain('what the rule told the player');
+		}
+		// a broadcast's words are its target, said once
+		const broadcast = buildEmbed('Warcon', {
+			...whisper,
+			action: 'rcon.broadcast',
+			target: 'Restart in 5 minutes',
+			detail: { message: 'Restart in 5 minutes' },
+			message: 'OK'
+		});
+		expect(broadcast.description).not.toContain('Message:');
+		expect(broadcast.description.split('Restart in 5 minutes')).toHaveLength(2);
+	});
 	test('a server added, refused or deleted never says where RCON listens', () => {
 		for (const action of ['server.create', 'server.update', 'server.delete']) {
 			const e = buildEmbed('Warcon', {
@@ -171,6 +258,28 @@ describe('names a player chose, in a staff channel', () => {
 			message: '# Free admin at https://evil.example'
 		});
 		expect(heading.description).toContain('\n\\# Free admin at https:\u200B//evil.example');
+	});
+	test('a whisper carries its words as text', () => {
+		const e = buildEmbed('Warcon', {
+			id: 1,
+			ts: new Date('2026-09-28T12:00:00Z'),
+			actorId: 'u1',
+			actorName: 'james',
+			serverId: 's1',
+			serverName: 'EU #1',
+			orgId: 'o1',
+			category: 'rcon',
+			action: 'rcon.whisper',
+			target: '76561198000000001',
+			detail: { steamId: '76561198000000001', message: name },
+			outcome: 'ok',
+			status: 200,
+			message: 'OK: message delivered to Nomad.',
+			userAgent: 'curl',
+			durationMs: 12
+		});
+		intact(e.description);
+		expect(e.description).toContain(`\nMessage: ${shown}\nOK: message delivered to Nomad.`);
 	});
 	test('a team kill and a watched join carry the names as text', () => {
 		intact(

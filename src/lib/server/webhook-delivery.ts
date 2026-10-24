@@ -5,13 +5,15 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import type { Env } from './env';
 import { decryptSecret } from './crypto';
-import { forLog } from './http';
+import { forLog, str } from './http';
 import { playerMarks, servers, webhooks, type AuditRow, type WebhookRow } from './db/schema';
 import { OWNERS_ROWS } from './audit-rows';
 import { escapeMarkdown } from './webhook-status-core';
 import { KILL_DISTANCE_SKIP } from './kill-distance';
 import { causeLabel } from '$lib/causes';
+import { MAX_CHAT } from '$lib/chat';
 import { mapName } from '$lib/format';
+import { oneLine } from '$lib/saved-messages';
 import type { BountyLapse } from './bounty';
 import { FAILURES_ONLY } from '$lib/rule-kinds';
 import type { KillView } from '$lib/types';
@@ -30,7 +32,7 @@ export const WEBHOOK_EVENTS = [
 export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number];
 export const WEBHOOK_EVENT_LABELS: Record<WebhookEvent, string> = {
 	bans: 'Bans and unbans',
-	commands: 'Other game commands (kick, broadcast, map, config…)',
+	commands: 'Game commands and chat (kick, map, config…; whisper and broadcast text)',
 	triggers: 'Automation (trigger actions)',
 	players: 'Player notes and watchlist changes',
 	management: 'Servers, members, invite links, accounts',
@@ -192,6 +194,19 @@ const plain = (s: string, n: number) =>
 /** The same inside a code span, which no escape reaches: its own backtick would close the span. */
 const code = (s: string, n: number) => `\`${clip(s.replace(/`/g, 'ˋ'), n)}\``;
 
+/** Whispers by hand, whose detail keeps what they said and whose message is the game's answer. A
+ *  rule's whisper keeps no words of its own (see OWN_WORDS in outbox.ts). */
+const WHISPERS = new Set(['rcon.whisper', 'rcon.whisperMany']);
+
+/** What a whisper by hand said, as the action cut it for the game, on one line; none on a refused
+ *  request, whose words stay in the audit trail. */
+function whisperOf(row: AuditRow): string {
+	const message = (row.detail as { message?: unknown } | null)?.message;
+	return WHISPERS.has(row.action) && row.outcome !== 'denied' && typeof message === 'string'
+		? oneLine(str(message, MAX_CHAT), MAX_CHAT)
+		: '';
+}
+
 export function buildEmbed(appName: string, row: AuditRow): Embed {
 	const title = ACTION_TITLES[row.action] || row.action;
 	const lines: string[] = [];
@@ -203,6 +218,8 @@ export function buildEmbed(appName: string, row: AuditRow): Embed {
 	const target = row.target && !bare ? ` → ${code(row.target, 120)}` : '';
 	lines.push(`**${plain(who, 60)}**${target}`);
 	if (row.serverName) lines.push(`Server: ${plain(row.serverName, 80)}`);
+	const said = whisperOf(row);
+	if (said) lines.push(`Message: ${plain(said, MAX_CHAT)}`);
 	if (row.outcome !== 'ok')
 		lines.push(`Outcome: **${row.outcome}**${row.status ? ` (${row.status})` : ''}`);
 	if (row.message && !bare) lines.push(plain(row.message, 600));
