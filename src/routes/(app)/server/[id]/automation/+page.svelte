@@ -818,6 +818,7 @@
 					watchlist: f.watchlist,
 					kickAtScore: Number(f.kickAtScore) || null,
 					spareReserved: f.spareReserved,
+					exempt: f.exempt.split(/[\s,]+/).filter(Boolean),
 					reason: f.reason
 				};
 			case 'name_filter':
@@ -1037,7 +1038,12 @@
 					c.watchlist && 'watchlist',
 					kickAtScoreOf(c) && `risk ${kickAtScoreOf(c)}+`
 				].filter(Boolean);
-				return `${rules.join(', ')}${c.spareReserved ? ' · spares reserved slots' : ''}`;
+				const exempt = ((c.exempt as string[] | undefined) ?? []).length;
+				const spares = [
+					c.spareReserved && 'reserved slots',
+					exempt && `${exempt} player${exempt === 1 ? '' : 's'}`
+				].filter(Boolean);
+				return `${rules.join(', ')}${spares.length ? ` · spares ${spares.join(' and ')}` : ''}`;
 			}
 			case 'name_filter': {
 				const also = ((c.extraScripts as string[] | undefined) ?? []).map(
@@ -2025,11 +2031,24 @@
 							or more, as the players table shows it (0 is off)</label
 						>
 					</fieldset>
-					<fieldset class="space-y-1.5 text-[13px]">
+					<fieldset class="space-y-2 text-[13px]">
 						<legend class="field-label">Never kick</legend>
 						<label class="flex items-center gap-2"
 							><input type="checkbox" bind:checked={f.spareReserved} /> players with a reserved slot</label
 						>
+						<label class="block space-y-1.5 border-t border-black pt-2"
+							><span class="block">these players <span class="text-mist-600">(optional)</span></span
+							>
+							<textarea
+								class="input font-mono text-[12.5px]"
+								rows="3"
+								data-plain
+								bind:value={f.exempt}
+								placeholder="SteamID64, one per line"></textarea></label
+						>
+						<p class="text-[12px] text-mist-600">
+							Whatever the rules above find on them: a regular with an old VAC ban, say. Up to 100.
+						</p>
 					</fieldset>
 					<fieldset class="space-y-2">
 						<legend class="field-label">Kick reason, shown to the player</legend>
