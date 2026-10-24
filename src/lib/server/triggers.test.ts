@@ -121,6 +121,25 @@ describe('validateConfig', () => {
 		expect(riskKickScore({ watchlist: true })).toBeNull();
 		expect(() => validateConfig('risk_kick', { kickAtLevel: 'low' })).toThrow('at least one rule');
 	});
+	test('risk_kick: players it never kicks are SteamID64 strings, each once, 100 at most', () => {
+		const rule = (exempt: unknown) =>
+			validateConfig('risk_kick', { watchlist: true, exempt }) as RiskKickConfig;
+		expect(rule(undefined).exempt).toEqual([]);
+		expect(rule([' 76561198000000001', '76561198000000001', '']).exempt).toEqual([
+			'76561198000000001'
+		]);
+		expect(() => rule(['Ramon'])).toThrow('"Ramon" is not a SteamID64');
+		expect(() => rule('76561198000000001')).toThrow('exempt must be a list');
+		// a JSON number that long arrives rounded, and would leave another player alone
+		expect(() => rule(JSON.parse('[76561198100000101]'))).toThrow('sent as strings');
+		const many = Array.from({ length: 101 }, (_, i) => String(76561198000000000n + BigInt(i)));
+		expect(rule(many.slice(0, 100)).exempt).toHaveLength(100);
+		expect(() => rule(many)).toThrow('At most 100');
+		// a list of players is no rule to kick by
+		expect(() => validateConfig('risk_kick', { exempt: ['76561198000000001'] })).toThrow(
+			'at least one rule'
+		);
+	});
 	test('ping_kick validates the ping and duration and supplies a reason', () => {
 		expect(validateConfig('ping_kick', {})).toEqual({
 			maxPingMs: 200,

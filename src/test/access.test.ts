@@ -743,78 +743,90 @@ describe.skipIf(!hasTestDb)('access', () => {
 			expect(second.status).toBe(409);
 		});
 
-		test('a Name filter rule: who may save, dry-run, switch it on and say whom it leaves alone', async () => {
-			const w = await seedWorld(env);
-			const config = { characters: 'ascii', action: 'alert', exempt: ['76561198000000801'] };
-			const body = { kind: 'name_filter', config };
-			const made = await api(w, 'owner', 'POST api/servers/[id]/triggers', {
-				params: { id: w.server.id },
-				body
+		// Both kick, so both need Kick as well as Automation; each keeps a list of players it never
+		// acts on, which nobody who could not save the rule can change.
+		for (const [what, kind, rule] of [
+			['a Name filter rule', 'name_filter', { characters: 'ascii', action: 'alert' }],
+			['a Kick on connect risk rule', 'risk_kick', { watchlist: true }]
+		] as const)
+			test(`${what}: who may save, dry-run, switch it on and say whom it leaves alone`, async () => {
+				const w = await seedWorld(env);
+				const config = { ...rule, exempt: ['76561198000000801'] };
+				const body = { kind, config };
+				const made = await api(w, 'owner', 'POST api/servers/[id]/triggers', {
+					params: { id: w.server.id },
+					body
+				});
+				expect(made.status).toBe(201);
+				const triggerId = (made.body as { trigger: { id: string } }).trigger.id;
+				// Automation without Kick: the rule is not theirs to make, replay or enable.
+				await env.db
+					.update(orgRoles)
+					.set({ capabilities: ['server.view', 'automation.manage'] })
+					.where(eq(orgRoles.id, w.roles.viewer));
+				const expected: Record<PrincipalName, number> = {
+					anon: 401,
+					stranger: 404,
+					outsider: 404,
+					member: 404,
+					viewer: 403,
+					operator: 403,
+					admin: 200,
+					elsewhere: 404,
+					orgBans: 403,
+					orgSlots: 403,
+					owner: 200,
+					site: 200,
+					keyView: 403,
+					keyAll: 200,
+					keyElsewhere: 404,
+					keyBans: 403
+				};
+				const principals = Object.entries(expected) as [PrincipalName, number][];
+				for (const [i, [who, status]] of principals.entries()) {
+					// each names a player of their own for the rule to leave alone
+					const own = String(76561198000000810n + BigInt(i));
+					const got = [
+						await api(w, who, 'POST api/servers/[id]/triggers/dry-run', {
+							params: { id: w.server.id },
+							body
+						}),
+						await api(w, who, 'PATCH api/servers/[id]/triggers/[triggerId]', {
+							params: { id: w.server.id, triggerId },
+							body: { enabled: true }
+						}),
+						await api(w, who, 'POST api/servers/[id]/triggers', {
+							params: { id: w.server.id },
+							body
+						}),
+						await api(w, who, 'PATCH api/servers/[id]/triggers/[triggerId]', {
+							params: { id: w.server.id, triggerId },
+							body: { config: { ...config, exempt: [own] } }
+						})
+					].map((r) => r.status);
+					// a create that gets through answers 201
+					expect([who, ...got]).toEqual([
+						who,
+						status,
+						status,
+						status === 200 ? 201 : status,
+						status
+					]);
+					// a change let through is saved; a refused one leaves the list as it was
+					const [saved] = await env.db
+						.select({ config: triggers.config })
+						.from(triggers)
+						.where(eq(triggers.id, triggerId));
+					const kept = (saved.config as { exempt: string[] }).exempt;
+					expect([who, kept.includes(own)]).toEqual([who, status === 200]);
+				}
+				// The rule's id under another server's path is not found, even for its org's owner.
+				const moved = await api(w, 'owner', 'PATCH api/servers/[id]/triggers/[triggerId]', {
+					params: { id: w.otherServer.id, triggerId },
+					body: { enabled: false }
+				});
+				expect(moved.status).toBe(404);
 			});
-			expect(made.status).toBe(201);
-			const triggerId = (made.body as { trigger: { id: string } }).trigger.id;
-			// Automation without Kick: the rule is not theirs to make, replay or enable.
-			await env.db
-				.update(orgRoles)
-				.set({ capabilities: ['server.view', 'automation.manage'] })
-				.where(eq(orgRoles.id, w.roles.viewer));
-			const expected: Record<PrincipalName, number> = {
-				anon: 401,
-				stranger: 404,
-				outsider: 404,
-				member: 404,
-				viewer: 403,
-				operator: 403,
-				admin: 200,
-				elsewhere: 404,
-				orgBans: 403,
-				orgSlots: 403,
-				owner: 200,
-				site: 200,
-				keyView: 403,
-				keyAll: 200,
-				keyElsewhere: 404,
-				keyBans: 403
-			};
-			const principals = Object.entries(expected) as [PrincipalName, number][];
-			for (const [i, [who, status]] of principals.entries()) {
-				// each names a player of their own for the rule to leave alone
-				const own = String(76561198000000810n + BigInt(i));
-				const got = [
-					await api(w, who, 'POST api/servers/[id]/triggers/dry-run', {
-						params: { id: w.server.id },
-						body
-					}),
-					await api(w, who, 'PATCH api/servers/[id]/triggers/[triggerId]', {
-						params: { id: w.server.id, triggerId },
-						body: { enabled: true }
-					}),
-					await api(w, who, 'POST api/servers/[id]/triggers', {
-						params: { id: w.server.id },
-						body
-					}),
-					await api(w, who, 'PATCH api/servers/[id]/triggers/[triggerId]', {
-						params: { id: w.server.id, triggerId },
-						body: { config: { ...config, exempt: [own] } }
-					})
-				].map((r) => r.status);
-				// a create that gets through answers 201
-				expect([who, ...got]).toEqual([who, status, status, status === 200 ? 201 : status, status]);
-				// a change let through is saved; a refused one leaves the list as it was
-				const [saved] = await env.db
-					.select({ config: triggers.config })
-					.from(triggers)
-					.where(eq(triggers.id, triggerId));
-				const kept = (saved.config as { exempt: string[] }).exempt;
-				expect([who, kept.includes(own)]).toEqual([who, status === 200]);
-			}
-			// The rule's id under another server's path is not found, even for its org's owner.
-			const moved = await api(w, 'owner', 'PATCH api/servers/[id]/triggers/[triggerId]', {
-				params: { id: w.otherServer.id, triggerId },
-				body: { enabled: false }
-			});
-			expect(moved.status).toBe(404);
-		});
 
 		test('a Kill rate rule: who may save, dry-run and switch it on', async () => {
 			const w = await seedWorld(env);

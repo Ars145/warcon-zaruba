@@ -1114,7 +1114,10 @@ async function evalRiskKick(
 	let n = 0;
 	let last = '';
 	const kicks: { p: Player; verdict: string }[] = [];
+	// A player on the rule's own list is never kicked by it, whatever it finds on them.
+	const exempt = new Set(cfg.exempt ?? []);
 	for (const p of ctx.riskCheck) {
+		if (exempt.has(p.steamId)) continue;
 		const l = ctx.signals.get(p.steamId);
 		const verdict = riskKickVerdict(cfg, {
 			profile: ctx.profiles.get(p.steamId) ?? null,
@@ -2314,6 +2317,8 @@ export async function dryRun(
 					)
 				: new Map<string, RiskPerformance>()
 		]);
+		const exempt = new Set(c.exempt ?? []);
+		let listed = 0;
 		for (const p of players) {
 			const l = signals.get(p.steamId);
 			const verdict = riskKickVerdict(c, {
@@ -2326,7 +2331,9 @@ export async function dryRun(
 				performance: performance.get(p.steamId),
 				now: to
 			});
-			if (verdict) push(seen.get(p.steamId)!.joinedAt, `kick ${p.name} (${p.steamId}): ${verdict}`);
+			if (!verdict) continue;
+			if (exempt.has(p.steamId)) listed++;
+			else push(seen.get(p.steamId)!.joinedAt, `kick ${p.name} (${p.steamId}): ${verdict}`);
 		}
 		if (!steamEnabled(env))
 			result.notes.push(
@@ -2335,6 +2342,10 @@ export async function dryRun(
 		result.notes.push(
 			`${players.length} distinct player${players.length === 1 ? '' : 's'} on the server in the window${players.length === RISK_REPLAY_MAX ? `, the latest ${RISK_REPLAY_MAX}` : ''}, each judged once.`
 		);
+		if (listed)
+			result.notes.push(
+				`${listed} more would be kicked but ${listed === 1 ? 'is a player' : 'are players'} it never kicks.`
+			);
 		return result;
 	}
 	if (kind === 'team_kill') {
