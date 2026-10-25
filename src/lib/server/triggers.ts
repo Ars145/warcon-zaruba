@@ -23,6 +23,8 @@
 //                acted on in feed-events.ts)
 //   afk_protection  kill everyone every few minutes while the server seeds, so the game's idle kick
 //                spares the seeders (afk-protection.ts)
+//   afk_watch    warn, then kick or flag, a player with no kill, death or cash earned for too long
+//                in a live match (afk-watch.ts)
 // The worker evaluates them on every observation and writes the actions they want to the outbox
 // (outbox.ts delivers, and every delivery lands in the audit trail as category "trigger"). A dry
 // run replays the last 24 hours from the samples and sessions tables so a rule can be checked
@@ -163,6 +165,17 @@ import {
 	type AfkProtectionConfig
 } from './afk-protection';
 import {
+	AFK_WATCH_FLAG,
+	afkWatchAction,
+	afkWatchGapMs,
+	afkWatchSettingsKey,
+	afkWatchStep,
+	afkWatchWarns,
+	idleMinutes,
+	type AfkWatchConfig,
+	type AfkWatchState
+} from './afk-watch';
+import {
 	BOUNTY_LAPSE,
 	bountyReplay,
 	bountyReward,
@@ -298,7 +311,7 @@ async function triggerOf(env: Env, serverId: string, id: string): Promise<Trigge
  * need to do the same by hand: a rule that kicks needs Kick, not only Automation.
  */
 const RULE_NEEDS: Record<
-	Exclude<TriggerKind, 'seed_reward' | 'kill_distance' | 'bounty'>,
+	Exclude<TriggerKind, 'seed_reward' | 'kill_distance' | 'bounty' | 'afk_watch'>,
 	[Capability, string]
 > = {
 	welcome: ['chat.send', 'messages players'],
@@ -330,7 +343,7 @@ const SLOT_NEEDS: Record<'server' | 'org', [Capability, string]> = {
  * What one rule needs of whoever saves it. The Seeding reward reserves slots: here, or on the
  * organisation's list. A Kill distance rule flags, warns, kills (and whispers), kicks, or bans:
  * here, or on the organisation's ban list. A Bounty broadcasts, and reserves the claimer a slot when
- * it has a reward.
+ * it has a reward. An AFK watch kicks, or flags, which takes Kick as a Name filter's alert does.
  */
 export function ruleNeeds(kind: TriggerKind, config: unknown): [Capability, string] {
 	if (kind === 'seed_reward')
@@ -348,15 +361,19 @@ export function ruleNeeds(kind: TriggerKind, config: unknown): [Capability, stri
 		if (action === 'kill') return RULE_KILL_NEEDS[0];
 		return ['players.kick', action === 'kick' ? 'kicks players' : 'flags players'];
 	}
+	if (kind === 'afk_watch')
+		return ['players.kick', afkWatchAction(config) === 'kick' ? 'kicks players' : 'flags players'];
 	return RULE_NEEDS[kind];
 }
 
 /**
  * What else a rule needs when it also messages players: a Team balance rule with a whisper, an AFK
- * protection rule with a broadcast, a Kill distance rule's kill with its whisper.
+ * protection rule with a broadcast, a Kill distance rule's kill with its whisper, an AFK watch with
+ * its warning.
  */
 function ruleAlsoNeeds(kind: TriggerKind, config: unknown): [Capability, string] | null {
 	if (kind === 'kill_distance' && killDistanceAction(config) === 'kill') return RULE_KILL_NEEDS[1];
+	if (kind === 'afk_watch' && afkWatchWarns(config)) return ['chat.send', 'whispers players'];
 	if (kind === 'bounty' && bountyReward(config) === 'slot')
 		return ['chat.send', 'messages players'];
 	if (kind === 'two_teams' && str((config as Partial<TwoTeamsConfig> | null)?.message))
@@ -550,13 +567,15 @@ export async function deleteTrigger(
  * delivery): a Team balance move decided under the old closed faction or gap could take a player
  * to the wrong side, and a Kill distance kick or ban decided under settings an admin has just corrected, or by
  * a rule just switched off, is not to be sent; nor is an AFK protection round once the rule is off,
- * which is how it is stopped in a hurry, nor a Name change flag or kick, nor a skip of the map a
- * server came up on (it has no settings: only being switched off or deleted stops it).
+ * which is how it is stopped in a hurry, nor a Name change flag or kick, nor an AFK watch warning,
+ * kick or flag, nor a skip of the map a server came up on (it has no settings: only being switched
+ * off or deleted stops it).
  */
 export const SETTINGS_KEYS: Partial<Record<string, (config: unknown) => string>> = {
 	two_teams: (c) => twoTeamsSettingsKey(c as TwoTeamsConfig),
 	kill_distance: (c) => killDistanceSettingsKey(c as KillDistanceConfig),
 	afk_protection: (c) => afkSettingsKey(c as AfkProtectionConfig),
+	afk_watch: (c) => afkWatchSettingsKey(c as AfkWatchConfig),
 	name_change: (c) => nameChangeSettingsKey(c as NameChangeConfig),
 	restart_skip: () => RESTART_SKIP_KEY
 };
@@ -865,6 +884,9 @@ export async function evaluateTriggers(
 					break;
 				case 'afk_protection':
 					evalAfkProtection(ctx, row, row.config as AfkProtectionConfig, out);
+					break;
+				case 'afk_watch':
+					await evalAfkWatch(ctx, row, row.config as AfkWatchConfig, out, read);
 					break;
 				case 'bounty':
 					// Kills move it on as they arrive (feed-events.ts); a look ends it.
@@ -1702,6 +1724,150 @@ function evalAfkProtection(
 }
 
 /**
+ * Each AFK watch rule's clocks, in this worker's memory (afk-watch.ts says why not on the rule's
+ * row): a restart, or another worker taking over, starts them over. They start over as well when the
+ * rule's settings change, at the first look after the server was out of reach, and after a gap in
+ * the looks at the player list, a rule switched off and on again included: who played meanwhile is
+ * unknown. `note`: why the rule last said it holds what fell due, '' once it has acted since. A rule
+ * not looked at for AFK_WATCH_FORGET_MS (deleted, switched off, its server gone) is let go by the
+ * sweep.
+ */
+const afkWatchMemory = new Map<string, { key: string; state: AfkWatchState; note: string }>();
+const AFK_WATCH_FORGET_MS = 3600_000;
+let afkWatchSweptAt = 0;
+
+async function evalAfkWatch(
+	ctx: TickContext,
+	row: TriggerRow,
+	cfg: AfkWatchConfig,
+	out: Evaluation,
+	read: StatsReader
+) {
+	if (!ctx.playersObserved) return;
+	const now = ctx.ts.getTime();
+	if (now - afkWatchSweptAt >= 60_000) {
+		afkWatchSweptAt = now;
+		for (const [id, m] of afkWatchMemory)
+			if (now - m.state.at > AFK_WATCH_FORGET_MS) afkWatchMemory.delete(id);
+	}
+	// The same fingerprint rides on every warning, kick and flag, for delivery to check against.
+	const rule = afkWatchSettingsKey(cfg);
+	const memory = afkWatchMemory.get(row.id);
+	const prev =
+		memory &&
+		memory.key === rule &&
+		!ctx.recovered &&
+		now >= memory.state.at &&
+		now - memory.state.at <= afkWatchGapMs(ctx.playersIntervalMs)
+			? memory.state
+			: null;
+	// The most anyone says is on: a status a few seconds old must not hide a full list.
+	const count = Math.max(ctx.status.playerCount || 0, ctx.players.length);
+	const exempt = new Set(cfg.exempt);
+	const step = afkWatchStep(cfg, prev, {
+		now,
+		live:
+			!ctx.matchEnd &&
+			count >= cfg.minPlayers &&
+			(ctx.status.scores ?? []).some((s) => s.score > 0),
+		// A rule that spares reserved slots acts on nobody until the worker has read who holds one
+		// (the first look after a start reads the list only after the rules): what falls due waits.
+		waiting: cfg.spareReserved && !ctx.reservedLoaded,
+		players: ctx.players
+			.filter((p) => /^\d{17}$/.test(p.steamId))
+			.map((p) => ({
+				steamId: p.steamId,
+				kills: p.kills,
+				deaths: p.deaths,
+				cash: p.cash,
+				spared: exempt.has(p.steamId) || (cfg.spareReserved && ctx.reserved.has(p.steamId))
+			}))
+	});
+	const { warn, act } = step;
+	// Why it holds is said on the rule once, so a server whose reserved slots cannot be read, or
+	// that reports no cash, is not silently idle.
+	const held =
+		step.held === 'reserved'
+			? 'Waiting for the reserved slots to be read'
+			: step.held === 'cash'
+				? `Holding: nobody here has earned cash in ${cfg.minutes} min, so the server may not report it`
+				: '';
+	const note = warn.length || act.length ? '' : held || (memory?.note ?? '');
+	const byId = new Map(ctx.players.map((p) => [p.steamId, p]));
+	const kick = cfg.action === 'kick';
+	const stats = await statsFor(read, [
+		...warn.map((d) => ({ steamId: d.steamId, text: cfg.warnMessage })),
+		...(kick ? act.map((d) => ({ steamId: d.steamId, text: cfg.reason })) : [])
+	]);
+	const say = (text: string, p: Player, idleMs: number, max: number) =>
+		renderTemplate(
+			text,
+			vars(ctx, p, statsOf(stats, p.steamId), { idle: idleMinutes(idleMs), limit: cfg.minutes }),
+			max
+		);
+	// What the player's counters were when it was decided: delivery drops it if they have moved.
+	const seen = (p: Player) => ({ kills: p.kills, deaths: p.deaths, cash: p.cash });
+	for (const d of warn) {
+		const p = byId.get(d.steamId)!;
+		out.intents.push({
+			trigger: row,
+			action: 'whisper',
+			params: {
+				steamId: p.steamId,
+				message: say(cfg.warnMessage, p, d.idleMs, MAX_CHAT),
+				rule,
+				seen: seen(p)
+			},
+			target: p.steamId,
+			okMessage: `Warned ${p.name}: idle ${idleMinutes(d.idleMs)} min.`,
+			detail: { name: p.name, stage: 'warn', idleMinutes: idleMinutes(d.idleMs) },
+			steamId: p.steamId,
+			dedupeKey: key(row, p.steamId, 'warn', d.since)
+		});
+	}
+	for (const d of act) {
+		const p = byId.get(d.steamId)!;
+		const verdict = `no kill, death or cash earned for ${idleMinutes(d.idleMs)} min of a live match`;
+		out.intents.push({
+			trigger: row,
+			action: kick ? 'kick' : AFK_WATCH_FLAG,
+			params: kick
+				? {
+						steamId: p.steamId,
+						reason: say(cfg.reason, p, d.idleMs, MAX_REASON),
+						rule,
+						seen: seen(p)
+					}
+				: { rule, seen: seen(p) },
+			target: p.steamId,
+			okMessage: `${kick ? 'Kicked' : 'Flagged'} ${p.name}: ${verdict}.`,
+			detail: { name: p.name, verdict, idleMinutes: idleMinutes(d.idleMs) },
+			steamId: p.steamId,
+			dedupeKey: key(row, p.steamId, d.since)
+		});
+	}
+	// The clocks move on only once this look's warnings, kicks and flags are queued: a look whose
+	// write fails is decided again at the next one, rather than remembered as done.
+	(out.afterCommit ??= []).push(() =>
+		afkWatchMemory.set(row.id, { key: rule, state: step.state, note })
+	);
+	const named = (list: { steamId: string; idleMs: number }[], verb: string) =>
+		list.length === 1
+			? `${verb} ${byId.get(list[0].steamId)!.name}: idle ${idleMinutes(list[0].idleMs)} min`
+			: list.length
+				? `${verb} ${list.length} players: idle`
+				: '';
+	const result = [
+		named(act, kick ? 'Kicking' : 'Flagging'),
+		named(warn, act.length ? 'warning' : 'Warning')
+	]
+		.filter(Boolean)
+		.join('; ');
+	if (result) out.updates.push({ id: row.id, lastFiredAt: ctx.ts, lastResult: result });
+	else if (held && held !== memory?.note) out.updates.push({ id: row.id, lastResult: held });
+}
+
+/**
  * A Bounty rule at each look: a match end starts the runs over, and an open bounty lapses when the
  * match ends, when its player's session closes (gone past the leave grace, so a map change's empty
  * list is no leave), or at the first look after the server was out of reach (whatever happened
@@ -1801,6 +1967,7 @@ export function forgetRuleMemory(): void {
 	twoTeamsMemory.clear();
 	staffMoves.clear();
 	afkEmpty.clear();
+	afkWatchMemory.clear();
 	forgetBounties();
 }
 
@@ -2266,6 +2433,12 @@ export async function dryRun(
 	if (kind === 'ping_kick') {
 		result.notes.push(
 			'Ping is not stored in historical samples, so past high-ping streaks cannot be replayed. The live rule checks each fresh player-list sample and resets a streak when ping recovers, becomes unavailable, or sampling is interrupted.'
+		);
+		return result;
+	}
+	if (kind === 'afk_watch') {
+		result.notes.push(
+			"Players' kills, deaths and cash are not kept look by look, so idle stretches cannot be replayed. Set the rule to alert only to see live whom it would kick, under Actions and on Discord, without kicking anyone."
 		);
 		return result;
 	}

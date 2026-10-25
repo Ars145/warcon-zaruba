@@ -87,6 +87,13 @@ export const RULE_KINDS: { kind: TriggerKind; group: RuleGroup; label: string; b
 		blurb: 'Kick players whose ping stays too high for a configured time.'
 	},
 	{
+		kind: 'afk_watch',
+		group: 'In play',
+		label: 'AFK watch',
+		blurb:
+			'Kick or flag players who go too long in a live match without a kill, a death or cash earned, even when a macro keeps the idle kick off them.'
+	},
+	{
 		kind: 'seed_reward',
 		group: 'Seeding and rewards',
 		label: 'Seeding reward',

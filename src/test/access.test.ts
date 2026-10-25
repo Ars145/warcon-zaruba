@@ -536,6 +536,8 @@ describe.skipIf(!hasTestDb)('access', () => {
 				['kill_distance', { causes: [DEFIB], action: 'ban', banScope: 'org' }, 'lists.ban'],
 				['two_teams', { closedFaction: 'Lonestar' }, 'players.move'],
 				['afk_protection', {}, 'players.kill'],
+				['afk_watch', {}, 'players.kick'],
+				['afk_watch', { action: 'alert' }, 'players.kick'],
 				['name_change', { takenOnly: true }, 'players.kick'],
 				['name_change', { action: 'kick' }, 'players.kick'],
 				['seed_reward', { minutes: 60, scope: 'server' }, 'slots.manage'],
@@ -743,11 +745,12 @@ describe.skipIf(!hasTestDb)('access', () => {
 			expect(second.status).toBe(409);
 		});
 
-		// Both kick, so both need Kick as well as Automation; each keeps a list of players it never
+		// All three kick, so all need Kick as well as Automation; each keeps a list of players it never
 		// acts on, which nobody who could not save the rule can change.
 		for (const [what, kind, rule] of [
 			['a Name filter rule', 'name_filter', { characters: 'ascii', action: 'alert' }],
-			['a Kick on connect risk rule', 'risk_kick', { watchlist: true }]
+			['a Kick on connect risk rule', 'risk_kick', { watchlist: true }],
+			['an AFK watch rule', 'afk_watch', { minutes: 10 }]
 		] as const)
 			test(`${what}: who may save, dry-run, switch it on and say whom it leaves alone`, async () => {
 				const w = await seedWorld(env);
@@ -1274,6 +1277,52 @@ describe.skipIf(!hasTestDb)('access', () => {
 				expect((await addMessage()).status).toBe(200);
 				await env.db.delete(triggers).where(eq(triggers.serverId, w.server.id));
 			}
+		});
+
+		test('an AFK watch rule that warns needs Chat as well', async () => {
+			const w = await seedWorld(env);
+			const params = { id: w.server.id };
+			const warns = { warnMinutes: 10, warnMessage: 'Idle {idle} min: play on.' };
+			const holds = (caps: string[]) =>
+				env.db
+					.update(orgRoles)
+					.set({ capabilities: ['server.view', 'automation.manage', ...caps] })
+					.where(eq(orgRoles.id, w.roles.viewer));
+			const dryRun = (config: Record<string, unknown>) =>
+				api(w, 'viewer', 'POST api/servers/[id]/triggers/dry-run', {
+					params,
+					body: { kind: 'afk_watch', config }
+				});
+			const create = (config: Record<string, unknown>) =>
+				api(w, 'viewer', 'POST api/servers/[id]/triggers', {
+					params,
+					body: { kind: 'afk_watch', config }
+				});
+			// Chat alone, or Kick alone, is not enough for a rule that warns and kicks
+			for (const caps of [['chat.send'], ['players.kick']]) {
+				await holds(caps);
+				expect([caps, (await dryRun(warns)).status, (await create(warns)).status]).toEqual([
+					caps,
+					403,
+					403
+				]);
+			}
+			// Kick alone makes one that does not warn, but cannot add the warning to it
+			const made = await create({});
+			expect(made.status).toBe(201);
+			const triggerId = (made.body as { trigger: { id: string } }).trigger.id;
+			const addWarning = () =>
+				api(w, 'viewer', 'PATCH api/servers/[id]/triggers/[triggerId]', {
+					params: { ...params, triggerId },
+					body: { config: warns }
+				});
+			expect((await addWarning()).status).toBe(403);
+			const [kept] = await env.db.select().from(triggers).where(eq(triggers.id, triggerId));
+			expect((kept.config as { warnMinutes: number }).warnMinutes).toBe(0);
+			// both: the warning is theirs to add
+			await holds(['players.kick', 'chat.send']);
+			expect((await dryRun(warns)).status).toBe(200);
+			expect((await addWarning()).status).toBe(200);
 		});
 
 		test('a rule that tells players their stats is saved only by those who read them: View', async () => {

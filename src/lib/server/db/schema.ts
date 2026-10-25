@@ -934,6 +934,7 @@ export const triggers = pgTable(
 				'two_teams',
 				'kill_distance',
 				'afk_protection',
+				'afk_watch',
 				'name_change',
 				'bounty',
 				'rotation_shuffle',

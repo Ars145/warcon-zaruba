@@ -162,6 +162,7 @@ const ACTION_TITLES: Record<string, string> = {
 	'trigger.two_teams': 'Trigger · team balance',
 	'trigger.kill_distance': 'Trigger · kill distance watch',
 	'trigger.afk_protection': 'Trigger · AFK protection',
+	'trigger.afk_watch': 'Trigger · AFK watch',
 	'trigger.name_change': 'Trigger · name change watch',
 	'trigger.bounty': 'Trigger · bounty',
 	'trigger.rotation_shuffle': 'Trigger · rotation shuffle',
