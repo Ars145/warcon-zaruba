@@ -137,6 +137,13 @@ export const RULE_KINDS: { kind: TriggerKind; group: RuleGroup; label: string; b
 		blurb: 'A new rotation order every day, the maps in turn so none plays twice in a row.'
 	},
 	{
+		kind: 'weather_cycle',
+		group: 'Server',
+		label: 'Weather cycle',
+		blurb:
+			'Change the time of day and weather every few minutes, in the match being played, with no map change.'
+	},
+	{
 		kind: 'live_name',
 		group: 'Server',
 		label: 'Live server name',
@@ -150,8 +157,9 @@ export const RULE_KINDS: { kind: TriggerKind; group: RuleGroup; label: string; b
  * server, two Team balance rules would move players back and forth, two AFK protection rules would
  * kill everyone twice a round, two Bounty rules would mark two players at once, two Rotation shuffle
  * rules would each undo the other's order, two Live server name rules would each write their own
- * name over the other's, two Skip map after restart rules would end the match twice. The picker
- * opens the one a server has.
+ * name over the other's, two Skip map after restart rules would end the match twice, two Weather
+ * cycle rules would each change the weather on a clock of their own. The picker opens the one a
+ * server has.
  */
 export const ONE_PER_SERVER: TriggerKind[] = [
 	'seed_reward',
@@ -160,15 +168,16 @@ export const ONE_PER_SERVER: TriggerKind[] = [
 	'bounty',
 	'rotation_shuffle',
 	'live_name',
-	'restart_skip'
+	'restart_skip',
+	'weather_cycle'
 ];
 
 /**
  * Rules whose actions come by the hundred as a matter of course (a Team balance sort at every match
- * start, an AFK protection round every few minutes while a server seeds): Discord hears only of
- * those that fail (webhook-delivery.ts).
+ * start, an AFK protection round every few minutes while a server seeds, a Weather cycle change
+ * every few minutes all day): Discord hears only of those that fail (webhook-delivery.ts).
  */
-export const FAILURES_ONLY: TriggerKind[] = ['two_teams', 'afk_protection'];
+export const FAILURES_ONLY: TriggerKind[] = ['two_teams', 'afk_protection', 'weather_cycle'];
 
 /**
  * Rules that act on the kill feed and nothing else: without batches arriving they never fire, so

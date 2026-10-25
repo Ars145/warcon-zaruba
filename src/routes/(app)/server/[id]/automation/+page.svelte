@@ -3,7 +3,7 @@
 	import { invalidate, invalidateAll } from '$app/navigation';
 	import { api, errorMessage } from '$lib/api';
 	import { MAX_CHAT } from '$lib/chat';
-	import { fmtAgo, fmtSpan, fmtTime, mapLabel } from '$lib/format';
+	import { fmtAgo, fmtSpan, fmtTime, lightingLabel, mapLabel } from '$lib/format';
 	import { can } from '$lib/capabilities';
 	import {
 		causeKind,
@@ -181,7 +181,9 @@
 											? 'shuffle'
 											: action === 'restart_skip'
 												? 'skip map'
-												: action;
+												: action === 'weather_cycle'
+													? 'weather'
+													: action;
 	const label = (kind: TriggerKind) => KINDS.find((k) => k.kind === kind)?.label ?? kind;
 	const blurb = (kind: TriggerKind) => KINDS.find((k) => k.kind === kind)?.blurb ?? '';
 	/** Why a kind cannot run on this server yet, or '' when it can. */
@@ -213,6 +215,10 @@
 				return canMatch
 					? ''
 					: 'Saving needs the Match control capability as well as Automation: the rule changes the map.';
+			case 'weather_cycle':
+				return canMatch
+					? ''
+					: 'Saving needs the Match control capability as well as Automation: the rule changes the weather.';
 			case 'rotation_shuffle':
 				return canConfig
 					? ''
@@ -241,7 +247,8 @@
 	let canBanHere = $derived(can(data.server.caps, 'bans.manage'));
 	/** a Rotation shuffle rule rewrites the rotation in the config document */
 	let canConfig = $derived(can(data.server.caps, 'config.apply'));
-	/** an Empty-server map reset and a Skip map after restart rule change the map */
+	/** an Empty-server map reset and a Skip map after restart rule change the map, a Weather cycle
+	 *  the weather */
 	let canMatch = $derived(can(data.server.caps, 'match.control'));
 	let canBanOrg = $derived(can(data.server.caps, 'lists.ban'));
 	/** Charges that are placed and set off from anywhere: how far away the killer was says nothing. */
@@ -331,7 +338,7 @@
 							? 'Needs Reserved slots'
 							: kind === 'rotation_shuffle' || kind === 'live_name'
 								? 'Needs Config & settings'
-								: kind === 'empty_reset' || kind === 'restart_skip'
+								: kind === 'empty_reset' || kind === 'restart_skip' || kind === 'weather_cycle'
 									? 'Needs Match control'
 									: '';
 	/** A Bounty rule's texts until they are written: a slot is named, an announcement-only rule asks. */
@@ -527,6 +534,11 @@
 		/** a Live server name rule's own name and what it appends */
 		liveBase: string;
 		liveAppend: string;
+		/** a Weather cycle rule's rows (its lightings in their turn, then the server's others) and
+		 *  the ticked ones */
+		lightOrder: string[];
+		lightOn: string[];
+		random: boolean;
 	}
 	/** WARDOGS' factions, offered for Team balance; a name the game adds later can still be typed. */
 	const FACTIONS = ['Lonestar', 'Valkyra', 'Manticore'];
@@ -587,24 +599,44 @@
 		}
 	});
 
-	/** A Rotation shuffle rule's turn: the maps it names, then the game's other maps. */
-	function mapTurn(named: unknown): string[] {
+	/** A rule's turn: what it names, in its order, then the rest of what the game lists. */
+	function turnOf(named: unknown, all: string[]): string[] {
 		const seen = new Set<string>();
 		const out: string[] = [];
-		for (const id of [
-			...(Array.isArray(named) ? (named as string[]) : []),
-			...data.catalog.maps.map((m) => m.id)
-		])
+		for (const id of [...(Array.isArray(named) ? (named as string[]) : []), ...all])
 			if (!seen.has(id.toLowerCase())) {
 				seen.add(id.toLowerCase());
 				out.push(id);
 			}
 		return out;
 	}
+	/** A Rotation shuffle rule's turn: the maps it names, then the game's other maps. */
+	const mapTurn = (named: unknown) =>
+		turnOf(
+			named,
+			data.catalog.maps.map((m) => m.id)
+		);
 	function moveMap(f: Form, i: number, by: -1 | 1) {
 		const list = f.mapOrder.slice();
 		[list[i], list[i + by]] = [list[i + by], list[i]];
 		f.mapOrder = list;
+	}
+	/** A Weather cycle rule's lighting a turn earlier or later: its row goes just above the ticked one
+	 *  before it, or just below the one after it. */
+	function moveLight(f: Form, l: string, by: -1 | 1) {
+		const ticked = f.lightOrder.filter((x) => f.lightOn.includes(x));
+		const other = ticked[ticked.indexOf(l) + by];
+		if (!other) return;
+		const list = f.lightOrder.filter((x) => x !== l);
+		list.splice(list.indexOf(other) + (by > 0 ? 1 : 0), 0, l);
+		f.lightOrder = list;
+	}
+	/** A new Weather cycle rule's lightings: clear, fog, cloud and rain, where the server has them. */
+	const WEATHER_PICKS = ['DayClear', 'DayEarlyFog', 'DayLateGray', 'DayLateRain'];
+	function weatherPicks(): string[] {
+		const ids = data.catalog.lightings.map((l) => l.id);
+		const picked = ids.filter((id) => WEATHER_PICKS.includes(id));
+		return picked.length >= 2 ? picked : ids.slice(0, 2);
 	}
 
 	/** The editor for a new rule of a kind, an existing rule, or a copy of one (`copy`). */
@@ -657,7 +689,10 @@
 			messages: Array.isArray(c.messages)
 				? (c.messages as string[]).join('\n')
 				: 'Join our Discord for events and support.\nNo team-killing. Admins are watching.',
-			everyMinutes: n('everyMinutes', kind === 'afk_protection' ? 3 : 15),
+			everyMinutes: n(
+				'everyMinutes',
+				kind === 'afk_protection' ? 3 : kind === 'weather_cycle' ? 30 : 15
+			),
 			minPlayers: n('minPlayers', kind === 'bounty' || kind === 'afk_watch' ? 20 : 1),
 			maxPlayers: typeof c.maxPlayers === 'number' ? c.maxPlayers : null,
 			afterMinutes: n('afterMinutes', 20),
@@ -766,7 +801,13 @@
 			mapOrder: mapTurn(c.maps),
 			// a new rule starts from the name the server shows now
 			liveBase: s('base', liveStatus?.serverName ?? ''),
-			liveAppend: s('append', LIVE_NAME_APPEND_DEFAULT)
+			liveAppend: s('append', LIVE_NAME_APPEND_DEFAULT),
+			lightOrder: turnOf(
+				Array.isArray(c.lightings) ? c.lightings : weatherPicks(),
+				data.catalog.lightings.map((l) => l.id)
+			),
+			lightOn: Array.isArray(c.lightings) ? [...(c.lightings as string[])] : weatherPicks(),
+			random: b('random', false)
 		};
 		dry = null;
 		pendingSel =
@@ -967,6 +1008,13 @@
 				return { base: f.liveBase, append: f.liveAppend };
 			case 'restart_skip':
 				return {};
+			case 'weather_cycle':
+				return {
+					lightings: f.lightOrder.filter((l) => f.lightOn.includes(l)),
+					everyMinutes: Number(f.everyMinutes),
+					random: f.random,
+					minPlayers: Number(f.minPlayers)
+				};
 		}
 	}
 
@@ -1225,6 +1273,16 @@
 				return `${c.base} + ${c.append} · at most once a minute`;
 			case 'restart_skip':
 				return 'Skips the map a restart starts on, when the rotation does not have it';
+			case 'weather_cycle': {
+				const ls = Array.isArray(c.lightings) ? (c.lightings as string[]) : [];
+				const which =
+					ls.length > 4
+						? `${ls.length} lightings ${c.random ? 'at random' : 'in turn'}`
+						: c.random
+							? `${ls.map((l) => lightingLabel(data.catalog, l)).join(', ')} at random`
+							: ls.map((l) => lightingLabel(data.catalog, l)).join(' → ');
+				return `${which} · every ${c.everyMinutes} min · at least ${c.minPlayers} on`;
+			}
 		}
 	}
 </script>
@@ -1540,6 +1598,13 @@
 			>
 		{:else if r.kind === 'afk_watch'}
 			<span>Nothing to replay</span>
+		{:else if r.kind === 'weather_cycle'}
+			<span
+				>Replayed the last 24 h on this server: would have changed the weather <b
+					class={r.fires ? 'text-warn' : 'text-ok'}>{r.fires}</b
+				>
+				time{r.fires === 1 ? '' : 's'}</span
+			>
 		{:else if r.kind === 'bounty'}
 			<span
 				>Replayed the last 24 h on this server: would have set <b
@@ -1810,6 +1875,125 @@
 						Only the rotation in the config document is written, as Apply on the Map rotation tab
 						does. The new order is turned so the map that follows the one on comes next. One rule
 						per server.
+					</p>
+				{:else if f.kind === 'weather_cycle'}
+					{@const ticked = f.lightOrder.filter((l) => f.lightOn.includes(l))}
+					<fieldset>
+						<legend class="field-label">Lightings</legend>
+						{#if f.lightOrder.length}
+							<ol class="border-t border-white/6">
+								{#each f.lightOrder as l (l)}
+									{@const name = lightingLabel(data.catalog, l)}
+									{@const turn = ticked.indexOf(l)}
+									<!-- as tall with the arrows as without, so ticking one moves no row -->
+									<li
+										class="flex min-h-13 items-center gap-2.5 border-b border-white/6 py-2 pr-2 pl-1 pointer-coarse:min-h-15"
+									>
+										<span class="w-4 shrink-0 text-right text-[12px] text-mist-600 tabular"
+											>{!f.random && turn >= 0 ? turn + 1 : ''}</span
+										>
+										<label class="flex min-w-0 grow items-center gap-2 text-[13px]"
+											><input type="checkbox" value={l} bind:group={f.lightOn} />
+											<span class="truncate">{name}</span>
+											{#if !data.catalog.lightings.some((x) => x.id === l)}<span
+													class="shrink-0 text-[12px] text-warn">not on this server's list</span
+												>{/if}</label
+										>
+										{#if !f.random && turn >= 0}
+											<span class="inline-flex shrink-0 gap-1">
+												<button
+													type="button"
+													class="btn w-9 px-0 pointer-coarse:size-11"
+													aria-label="Move {name} up"
+													disabled={turn === 0}
+													onclick={() => moveLight(f, l, -1)}
+													><svg
+														width="16"
+														height="16"
+														viewBox="0 0 24 24"
+														fill="none"
+														stroke="currentColor"
+														stroke-width="2"
+														stroke-linecap="round"
+														stroke-linejoin="round"
+														aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg
+													></button
+												>
+												<button
+													type="button"
+													class="btn w-9 px-0 pointer-coarse:size-11"
+													aria-label="Move {name} down"
+													disabled={turn === ticked.length - 1}
+													onclick={() => moveLight(f, l, 1)}
+													><svg
+														width="16"
+														height="16"
+														viewBox="0 0 24 24"
+														fill="none"
+														stroke="currentColor"
+														stroke-width="2"
+														stroke-linecap="round"
+														stroke-linejoin="round"
+														aria-hidden="true"><path d="M12 5v14M19 12l-7 7-7-7" /></svg
+													></button
+												>
+											</span>
+										{/if}
+									</li>
+								{/each}
+							</ol>
+						{:else}
+							<p class="note mb-0 text-warn">
+								This server's lightings could not be read, so there is nothing to pick from. Try
+								again once the server answers.
+							</p>
+						{/if}
+						<p class="note">
+							Tick two or more. The list is the server's own: rain, say, is there only where the
+							server allows it.
+						</p>
+					</fieldset>
+					<fieldset class="space-y-1.5 text-[13px]">
+						<legend class="field-label">Order</legend>
+						<label class="flex items-center gap-2"
+							><input type="radio" value={false} bind:group={f.random} /> In this order, round and round</label
+						>
+						<label class="flex flex-wrap items-center gap-2"
+							><input type="radio" value={true} bind:group={f.random} /> At random
+							<span class="text-mist-600">(never the lighting already on)</span></label
+						>
+					</fieldset>
+					<fieldset class="space-y-2">
+						<legend class="field-label">When</legend>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							Every
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="5"
+								max="1440"
+								bind:value={f.everyMinutes}
+								aria-label="Every, minutes"
+								required
+							/>
+							min, with at least
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="0"
+								max="1000"
+								bind:value={f.minPlayers}
+								aria-label="At least, players"
+							/>
+							players on
+						</div>
+					</fieldset>
+					<p class="note">
+						Changes the time of day and weather of the match being played, with no map change or
+						restart; the first change comes at once. The next map comes up on its rotation entry's
+						own lighting, and the rule changes that at its next turn. A change in order passes over
+						the lighting already on. Every change is under Recent actions and in the audit trail;
+						Discord hears only of the ones that fail. One rule per server.
 					</p>
 				{:else if f.kind === 'restart_skip'}
 					<div class="space-y-1.5 text-[13px]">
