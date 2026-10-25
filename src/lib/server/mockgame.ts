@@ -162,6 +162,11 @@ const PREMATCH_MINIMUM = 60;
 // report live servers doing since Season 2 (the Skip map after restart rule ends that match).
 const startupMap = () => /^(1|true|yes)$/i.test(process.env.MOCK_STARTUP_MAP || '');
 const STARTUP_MAP = { map: 'Kavkazi', experiences: ['Bakurani_KOTH_01'], lighting: 'DayClear' };
+// With MOCK_AFK=true a new demo server has one more player, who sits in spawn on a macro: never a
+// kill, a death or a dollar; and a match runs ten times as long (half an hour, nearer a real one), so
+// an AFK watch rule can be watched at work before the match ends and starts every clock again.
+const afkPlayer = () => /^(1|true|yes)$/i.test(process.env.MOCK_AFK || '');
+const AFK_PLAYER = '76561198100000150';
 // The match states the demo's feed reports (match_state events): a new match starts in pre-match,
 // waits there below the minimum under MOCK_PREMATCH, plays, and ends (with match_ended first).
 // Pre-match carries no match id, as on the game: it has none until the world has loaded.
@@ -379,7 +384,8 @@ function seed(name: string): State {
 			mk('KillustratorPro', '76561198100000107', 'Lonestar', 8, 5, 3300, 41),
 			mk('QuietStorm', '76561198100000109', 'Manticore', 13, 7, 5000, 33),
 			mk('Dutchie', '76561198100000110', 'Manticore', 10, 10, 3800, 55),
-			mk('Rooikat', '76561198100000111', 'Manticore', 7, 3, 2900, 73)
+			mk('Rooikat', '76561198100000111', 'Manticore', 7, 3, 2900, 73),
+			...(afkPlayer() ? [mk('Sleepwalker', AFK_PLAYER, 'Lonestar', 0, 0, 0, 45)] : [])
 		],
 		bans: [
 			{
@@ -611,16 +617,18 @@ function tick(s: State): void {
 	feedState(s, waiting ? WAITING : PLAYING);
 	if (!waiting)
 		for (const f of s.factions) {
-			f.score += f.rate * dt * (0.8 + Math.random() * 0.4);
+			f.score += f.rate * (afkPlayer() ? 0.1 : 1) * dt * (0.8 + Math.random() * 0.4);
 		}
 	if (s.factions.some((f) => f.score >= s.scoreCap)) {
 		matchOver(s);
 	}
+	// the AFK player under MOCK_AFK neither kills nor is killed
+	const fighting = s.players.filter((p) => p.steamId !== AFK_PLAYER);
 	for (const p of s.players) {
-		if (Math.random() < 0.05) {
+		if (p.steamId !== AFK_PLAYER && Math.random() < 0.05) {
 			p.kills++;
 			p.cash += 150;
-			const v = s.players[Math.floor(Math.random() * s.players.length)];
+			const v = fighting[Math.floor(Math.random() * fighting.length)];
 			if (v !== p) {
 				v.deaths++;
 			}
