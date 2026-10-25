@@ -939,7 +939,8 @@ export const triggers = pgTable(
 				'bounty',
 				'rotation_shuffle',
 				'live_name',
-				'restart_skip'
+				'restart_skip',
+				'weather_cycle'
 			]
 		}).notNull(),
 		name: text('name').notNull(),

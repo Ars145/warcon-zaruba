@@ -25,6 +25,8 @@
 //                spares the seeders (afk-protection.ts)
 //   afk_watch    warn, then kick or flag, a player with no kill, death or cash earned for too long
 //                in a live match (afk-watch.ts)
+//   weather_cycle  change the time of day and weather every few minutes, in the match being played
+//                (weather-cycle.ts)
 // The worker evaluates them on every observation and writes the actions they want to the outbox
 // (outbox.ts delivers, and every delivery lands in the audit trail as category "trigger"). A dry
 // run replays the last 24 hours from the samples and sessions tables so a rule can be checked
@@ -219,6 +221,14 @@ import {
 	selectionName,
 	underWay
 } from './restart-skip';
+import {
+	lightingName,
+	nextLighting,
+	WEATHER_CYCLE,
+	weatherCycleIndex,
+	weatherCycleSettingsKey,
+	type WeatherCycleConfig
+} from './weather-cycle';
 import { mapName } from '$lib/format';
 import { statsIn, usesStats } from '$lib/placeholders';
 import { settings } from './settings';
@@ -321,6 +331,7 @@ const RULE_NEEDS: Record<
 	match_broadcast: ['chat.send', 'messages players'],
 	empty_reset: ['match.control', 'changes the map'],
 	restart_skip: ['match.control', 'ends the match'],
+	weather_cycle: ['match.control', 'changes the weather'],
 	risk_kick: ['players.kick', 'kicks players'],
 	name_filter: ['players.kick', 'kicks players'],
 	ping_kick: ['players.kick', 'kicks players'],
@@ -569,7 +580,7 @@ export async function deleteTrigger(
  * a rule just switched off, is not to be sent; nor is an AFK protection round once the rule is off,
  * which is how it is stopped in a hurry, nor a Name change flag or kick, nor an AFK watch warning,
  * kick or flag, nor a skip of the map a server came up on (it has no settings: only being switched
- * off or deleted stops it).
+ * off or deleted stops it), nor a change of the weather.
  */
 export const SETTINGS_KEYS: Partial<Record<string, (config: unknown) => string>> = {
 	two_teams: (c) => twoTeamsSettingsKey(c as TwoTeamsConfig),
@@ -577,7 +588,8 @@ export const SETTINGS_KEYS: Partial<Record<string, (config: unknown) => string>>
 	afk_protection: (c) => afkSettingsKey(c as AfkProtectionConfig),
 	afk_watch: (c) => afkWatchSettingsKey(c as AfkWatchConfig),
 	name_change: (c) => nameChangeSettingsKey(c as NameChangeConfig),
-	restart_skip: () => RESTART_SKIP_KEY
+	restart_skip: () => RESTART_SKIP_KEY,
+	weather_cycle: (c) => weatherCycleSettingsKey(c as WeatherCycleConfig)
 };
 
 /**
@@ -894,6 +906,9 @@ export async function evaluateTriggers(
 					break;
 				case 'rotation_shuffle':
 					evalRotationShuffle(ctx, row, row.config as RotationShuffleConfig, out);
+					break;
+				case 'weather_cycle':
+					evalWeatherCycle(ctx, row, row.config as WeatherCycleConfig, out);
 					break;
 				case 'live_name':
 					// Written at the look itself, after the rules (live-name-write.ts): no action is queued.
@@ -1633,6 +1648,39 @@ function evalRotationShuffle(
 		lastResult: `Shuffling ${SHUFFLE_WHEN[step.when]}.`,
 		state: step.state
 	});
+}
+
+/**
+ * Every `everyMinutes` while the rule's players are on, one change of the weather (weather-cycle.ts).
+ * The row moves on at the decision, as a broadcast's does, so the cadence holds whatever delivery
+ * makes of it.
+ */
+function evalWeatherCycle(
+	ctx: TickContext,
+	row: TriggerRow,
+	cfg: WeatherCycleConfig,
+	out: Evaluation
+) {
+	if (ctx.status.playerCount < cfg.minPlayers) return;
+	if (row.lastFiredAt && ctx.ts.getTime() - row.lastFiredAt.getTime() < cfg.everyMinutes * 60_000)
+		return;
+	const next = nextLighting(cfg, weatherCycleIndex(row.state), ctx.status.lighting);
+	if (!next) return;
+	const name = lightingName(next.lighting);
+	out.intents.push({
+		trigger: row,
+		action: WEATHER_CYCLE,
+		params: { rule: weatherCycleSettingsKey(cfg), lighting: next.lighting },
+		target: name,
+		okMessage: `Changed the weather to ${name}.`,
+		detail: { lighting: next.lighting, from: ctx.status.lighting },
+		steamId: null,
+		dedupeKey: key(row, ctx.ts.getTime())
+	});
+	const state = { index: next.index };
+	row.lastFiredAt = ctx.ts;
+	row.state = state;
+	out.updates.push({ id: row.id, lastFiredAt: ctx.ts, lastResult: `Changing to ${name}`, state });
 }
 
 /**
@@ -3108,6 +3156,7 @@ export async function dryRun(
 			max: samples.maxPlayers,
 			map: samples.map,
 			experiences: samples.experiences,
+			lighting: samples.lighting,
 			scores: samples.scores
 		})
 		.from(samples)
@@ -3306,6 +3355,40 @@ export async function dryRun(
 			ends.length
 				? `${ends.length} match${ends.length === 1 ? '' : 'es'} ended in the window. Times shown are the sample that first saw the reset; live, the rule fires one poll after the round ends.`
 				: 'No match ended in the window: the map never changed and the scores never fell back.'
+		);
+		return result;
+	}
+	if (kind === 'weather_cycle') {
+		const c = cfg as WeatherCycleConfig;
+		let last: Date | null = null;
+		let index = -1;
+		/** what the server would show: the last change, until the samples show another map or lighting */
+		let showing = '';
+		let seen = '';
+		for (const r of rows) {
+			if (!r.ok) continue;
+			const lighting = r.lighting ?? '';
+			if (`${r.map}|${lighting}` !== seen) {
+				seen = `${r.map}|${lighting}`;
+				showing = lighting;
+			}
+			if ((r.count ?? 0) < c.minPlayers) continue;
+			if (last && r.ts.getTime() - last.getTime() < c.everyMinutes * 60_000) continue;
+			const from = showing ? lightingName(showing) : 'the lighting on';
+			if (c.random) {
+				last = r.ts;
+				push(r.ts, `weather (${r.count} on): ${from} → another at random`);
+				continue;
+			}
+			const next = nextLighting(c, index, showing);
+			if (!next) continue;
+			last = r.ts;
+			index = next.index;
+			showing = next.lighting;
+			push(r.ts, `weather (${r.count} on): ${from} → ${lightingName(next.lighting)}`);
+		}
+		result.notes.push(
+			`Times shown are the samples a change fell due at, with at least ${c.minPlayers} on. A new map comes up on its rotation entry's own lighting, which the rule changes at its next turn; a lighting the server does not list is not sent.`
 		);
 		return result;
 	}
