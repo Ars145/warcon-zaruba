@@ -158,7 +158,10 @@
 	const KINDS = RULE_KINDS;
 	/** The outbox action as the table shows it: a flag sends nothing to the game, so it reads as one. */
 	const actionLabel = (action: string) =>
-		action === 'name_flag' || action === 'kill_rate_flag' || action === 'kill_distance_flag'
+		action === 'name_flag' ||
+		action === 'kill_rate_flag' ||
+		action === 'kill_distance_flag' ||
+		action === 'afk_watch_flag'
 			? 'flag'
 			: action === 'panel_ban'
 				? 'ban'
@@ -480,6 +483,8 @@
 		untilFull: boolean;
 		fullAt: number | null;
 		minutes: number;
+		/** an AFK watch rule's warning, minutes idle; 0 for none */
+		warnMinutes: number;
 		windowDays: number;
 		slotDays: number;
 		slotScope: 'server' | 'org';
@@ -653,7 +658,7 @@
 				? (c.messages as string[]).join('\n')
 				: 'Join our Discord for events and support.\nNo team-killing. Admins are watching.',
 			everyMinutes: n('everyMinutes', kind === 'afk_protection' ? 3 : 15),
-			minPlayers: n('minPlayers', kind === 'bounty' ? 20 : 1),
+			minPlayers: n('minPlayers', kind === 'bounty' || kind === 'afk_watch' ? 20 : 1),
 			maxPlayers: typeof c.maxPlayers === 'number' ? c.maxPlayers : null,
 			afterMinutes: n('afterMinutes', 20),
 			cooldownMinutes: n('cooldownMinutes', 30),
@@ -677,9 +682,11 @@
 						? 'Changing your name mid-game is not allowed here.'
 						: kind === 'ping_kick'
 							? 'Ping too high for too long.'
-							: kind === 'kill_distance'
-								? distanceText(distanceAction)
-								: 'Your account does not meet this server’s requirements.'
+							: kind === 'afk_watch'
+								? 'AFK: no kill, death or cash earned for {idle} minutes.'
+								: kind === 'kill_distance'
+									? distanceText(distanceAction)
+									: 'Your account does not meet this server’s requirements.'
 			),
 			leadMinutes: n('leadMinutes', 30),
 			leadMessage: s(
@@ -690,7 +697,12 @@
 			endMessage: s('endMessage', 'Match over: {faction} wins on {previous} · {scores}'),
 			startMessage: s('startMessage', 'New match on {map}. Good luck!'),
 			warnAt: n('warnAt', 2),
-			warnMessage: s('warnMessage', 'Careful, {name}: that was a team kill ({count} this match).'),
+			warnMessage: s(
+				'warnMessage',
+				kind === 'afk_watch'
+					? '{name}, you look AFK: no kill, death or cash earned for {idle} min. Play on, or you are kicked at {limit} min.'
+					: 'Careful, {name}: that was a team kill ({count} this match).'
+			),
 			kickAt: n('kickAt', 4),
 			kickReason: s('kickReason', 'Team killing ({count} this match).'),
 			notCounted: Array.isArray(c.notCounted)
@@ -699,7 +711,9 @@
 			lowAt: n('lowAt', 20),
 			untilFull: b('untilFull', true),
 			fullAt: typeof c.fullAt === 'number' ? c.fullAt : null,
-			minutes: n('minutes', 60),
+			minutes: n('minutes', kind === 'afk_watch' ? 15 : 60),
+			// a new AFK watch rule warns first
+			warnMinutes: n('warnMinutes', 10),
 			windowDays: n('windowDays', 7),
 			slotDays: n('slotDays', kind === 'bounty' ? 1 : 7),
 			// a rule saved before the scope existed hands out org-wide slots; a new one, this server's
@@ -775,7 +789,7 @@
 					? 'Preview next restart'
 					: kind === 'name_filter'
 						? 'Dry run, past players'
-						: kind === 'ping_kick'
+						: kind === 'ping_kick' || kind === 'afk_watch'
 							? 'Check dry-run limits'
 							: 'Dry run, last 24 h';
 	const lines = (text: string) =>
@@ -849,6 +863,17 @@
 					maxPingMs: Number(f.maxPingMs),
 					durationSeconds: Number(f.durationSeconds),
 					spareReserved: f.spareReserved,
+					reason: f.reason
+				};
+			case 'afk_watch':
+				return {
+					minutes: Number(f.minutes),
+					warnMinutes: Number(f.warnMinutes),
+					warnMessage: f.warnMessage,
+					action: f.nameAction,
+					minPlayers: Number(f.minPlayers),
+					spareReserved: f.spareReserved,
+					exempt: f.exempt.split(/[\s,]+/).filter(Boolean),
 					reason: f.reason
 				};
 			case 'restart_notice':
@@ -1089,6 +1114,21 @@
 					.join(' · ');
 			case 'ping_kick':
 				return `ping over ${c.maxPingMs} ms for ${c.durationSeconds} s${c.spareReserved ? ' · spares reserved slots' : ''}`;
+			case 'afk_watch': {
+				const exempt = ((c.exempt as string[] | undefined) ?? []).length;
+				const spares = [
+					c.spareReserved && 'reserved slots',
+					exempt && `${exempt} player${exempt === 1 ? '' : 's'}`
+				].filter(Boolean);
+				return [
+					`no kill, death or cash earned for ${c.minutes} min of a live match, ${c.minPlayers}+ on`,
+					Number(c.warnMinutes) ? `warn at ${c.warnMinutes} min` : '',
+					c.action === 'alert' ? 'alert only' : 'kick',
+					spares.length ? `spares ${spares.join(' and ')}` : ''
+				]
+					.filter(Boolean)
+					.join(' · ');
+			}
 			case 'restart_notice':
 				return `"${c.message}"${c.leadMinutes ? ` · heads-up ${c.leadMinutes} min before` : ''}${c.repeatMinutes ? ` · again every ${c.repeatMinutes} min` : ''} · at least ${c.minPlayers} on`;
 			case 'match_broadcast':
@@ -1498,6 +1538,8 @@
 				>
 				name{r.fires === 1 ? '' : 's'}</span
 			>
+		{:else if r.kind === 'afk_watch'}
+			<span>Nothing to replay</span>
 		{:else if r.kind === 'bounty'}
 			<span
 				>Replayed the last 24 h on this server: would have set <b
@@ -2282,6 +2324,108 @@
 						The timer starts on the first high-ping sample. It resets when ping drops to the limit
 						or below, is unavailable, the player leaves, or the player list cannot be sampled on
 						time.
+					</p>
+				{:else if f.kind === 'afk_watch'}
+					<fieldset class="space-y-2">
+						<legend class="field-label">Idle</legend>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							No kill, death or cash earned for
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="5"
+								max="120"
+								bind:value={f.minutes}
+								aria-label="Idle for, minutes"
+								required
+							/>
+							minutes of a live match
+						</div>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							Counted while at least
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="1"
+								max="1000"
+								bind:value={f.minPlayers}
+								aria-label="Counted while at least, players on"
+								required
+							/>
+							players are on
+						</div>
+						<p class="text-[12px] text-mist-600">
+							A live match is one a side has scored in, so pre-match and seeding never count. Cash
+							is earned with every kill, capture, delivery and spot: someone playing rarely goes
+							long without it. Cash spent does not count, since a macro can buy things.
+						</p>
+					</fieldset>
+					<fieldset class="space-y-2">
+						<legend class="field-label">Whisper a warning</legend>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							At
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="0"
+								max="119"
+								bind:value={f.warnMinutes}
+								aria-label="Warn at, minutes idle"
+							/>
+							minutes idle <span class="text-mist-600">(0 turns it off)</span>
+						</div>
+						<input
+							class="input"
+							type="text"
+							bind:value={f.warnMessage}
+							maxlength={MAX_CHAT}
+							aria-label="Warning"
+							disabled={!Number(f.warnMinutes)}
+						/>
+					</fieldset>
+					<fieldset class="space-y-1.5 text-[13px]">
+						<legend class="field-label">Then</legend>
+						<label class="flex items-center gap-2"
+							><input type="radio" value="kick" bind:group={f.nameAction} /> Kick the player</label
+						>
+						<label class="flex flex-wrap items-center gap-2"
+							><input type="radio" value="alert" bind:group={f.nameAction} /> Alert only
+							<span class="text-mist-600">(audit trail and Discord, nobody is kicked)</span></label
+						>
+					</fieldset>
+					<fieldset class="space-y-2 text-[13px]">
+						<legend class="field-label">Never act on</legend>
+						<label class="flex items-center gap-2"
+							><input type="checkbox" bind:checked={f.spareReserved} /> players with a reserved slot</label
+						>
+						<label class="block space-y-1.5 border-t border-black pt-2"
+							><span class="block">these players <span class="text-mist-600">(optional)</span></span
+							>
+							<textarea
+								class="input font-mono text-[12.5px]"
+								rows="3"
+								data-plain
+								bind:value={f.exempt}
+								placeholder="SteamID64, one per line"></textarea></label
+						>
+						<p class="text-[12px] text-mist-600">
+							Staff who sit in spawn on purpose, say. Up to 100.
+						</p>
+					</fieldset>
+					{#if f.nameAction === 'kick'}
+						<fieldset class="space-y-2">
+							<legend class="field-label">Kick reason, shown to the player</legend>
+							<input class="input" type="text" bind:value={f.reason} maxlength="200" />
+						</fieldset>
+					{/if}
+					{@render placeholders('afk_watch', [f.warnMessage, f.reason])}
+					<p class="note">
+						The game's own idle kick goes by input, which a macro fakes; the panel goes by the
+						player list. A player's time starts again with any kill, death or cash earned, at a
+						match end, when they leave, and when the panel loses sight of the server. A warning or
+						kick for someone who plays again before it goes is dropped. While nobody on the server
+						earns cash for that long (a host may not report it), the rule holds and says so on its
+						row.
 					</p>
 				{:else if f.kind === 'two_teams'}
 					<fieldset class="space-y-2 text-[13px]">
