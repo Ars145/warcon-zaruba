@@ -1,5 +1,5 @@
 <script lang="ts">
-	// Sets or clears the expiry of one org-list entry. Only the organisation list
+	// Sets or clears the expiry of one org-list or reserved-slot group entry. A list
 	// keeps entries, so this is also the only place an expiry can be changed:
 	// a slot written straight into a server's config document has no record to
 	// expire.
@@ -14,6 +14,7 @@
 	let {
 		orgId,
 		kind,
+		groupId = null,
 		steamId,
 		name = null,
 		expiresAt = null,
@@ -22,6 +23,8 @@
 	}: {
 		orgId: string;
 		kind: ListKind;
+		/** The reserved-slot group being edited; null for the org's default list. */
+		groupId?: string | null;
 		steamId: string;
 		/** shown in the title when the player has been seen on a server */
 		name?: string | null;
@@ -46,16 +49,17 @@
 	let busy = $state(false);
 
 	let label = $derived(name ? `${name} (${steamId})` : steamId);
+	let path = $derived(
+		groupId
+			? `/api/orgs/${encodeURIComponent(orgId)}/slot-groups/${encodeURIComponent(groupId)}/entries/${encodeURIComponent(steamId)}`
+			: `/api/orgs/${encodeURIComponent(orgId)}/lists/${kind}/entries/${encodeURIComponent(steamId)}`
+	);
 
 	async function save() {
 		const next = expiryIso(choice, custom);
 		busy = true;
 		try {
-			const res = await api<{ sync: ListSyncSummary }>(
-				'PATCH',
-				`/api/orgs/${encodeURIComponent(orgId)}/lists/${kind}/entries/${encodeURIComponent(steamId)}`,
-				{ expiresAt: next }
-			);
+			const res = await api<{ sync: ListSyncSummary }>('PATCH', path, { expiresAt: next });
 			toast(
 				describeSync(
 					res.sync,

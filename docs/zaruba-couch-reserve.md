@@ -6,7 +6,7 @@ instead of Postgres `list_entries`. Every other org's reserve list is untouched 
 `list_entries`, same as before this feature existed. Server-own reserve lists, the ban list, and
 everything else about Warcon are unchanged for every org, `COUCH_ORG_ID` included.
 
-## Why
+## Scope
 
 The default reserve list of `COUCH_ORG_ID` is the CouchDB boundary. Reserved-slot groups remain
 in Postgres, including their activation windows and expiry. The sync combines the default list,

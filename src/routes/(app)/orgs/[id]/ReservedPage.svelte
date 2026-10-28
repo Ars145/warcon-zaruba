@@ -641,6 +641,7 @@
 	<ExpiryDialog
 		orgId={org.id}
 		kind="reserve"
+		groupId={group?.id ?? null}
 		steamId={e.steamId}
 		name={e.name}
 		expiresAt={e.expiresAt}

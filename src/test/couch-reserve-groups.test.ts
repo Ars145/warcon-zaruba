@@ -1,6 +1,6 @@
 // The fork's CouchDB default list must coexist with upstream reserved-slot groups.
 import { beforeAll, describe, expect, test } from 'bun:test';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type { Env } from '$lib/server/env';
 import { getOrg } from '$lib/server/access';
 import { listEntries, lists, serverLists } from '$lib/server/db/schema';
@@ -76,11 +76,11 @@ describe.skipIf(!hasTestDb)('CouchDB default reserve with Postgres groups', () =
 			await env.db
 				.update(listEntries)
 				.set({ expiresAt: new Date(Date.now() - 60_000) })
-				.where(eq(listEntries.steamId, B));
+				.where(and(eq(listEntries.listId, groupId), eq(listEntries.steamId, B)));
 			await env.db
 				.update(listEntries)
 				.set({ expiresAt: new Date(Date.now() - 60_000) })
-				.where(eq(listEntries.steamId, LEGACY));
+				.where(and(eq(listEntries.listId, def.id), eq(listEntries.steamId, LEGACY)));
 			await expireEntries(scoped);
 			const rows = await env.db.select().from(listEntries).where(eq(listEntries.listId, groupId));
 			expect(rows.find((r) => r.steamId === B)!.removal).toBe('expired');
