@@ -12,7 +12,7 @@
 import { and, eq, gt, inArray, isNotNull, isNull, lte, ne, notInArray, or, sql } from 'drizzle-orm';
 import type { Env } from './env';
 import { banUid, renderBanMessage } from '$lib/ban-message';
-import { ApiError, forLog } from './http';
+import { ApiError, forLog, publicMessage } from './http';
 import { writeAudit } from './audit';
 import { ACTIONS, configResult, liveReservedIds, readConfig } from './actions';
 import { withServer, type Priority } from './dispatcher';
@@ -225,8 +225,8 @@ export async function desiredFor(
 						}
 					}
 			} catch (err) {
-				reserveError = err instanceof Error ? err.message : String(err);
-				console.error(`[warcon] couch reserve unavailable for org ${server.orgId}`, err);
+				reserveError = publicMessage(err);
+				console.error(`[warcon] couch reserve unavailable for org ${server.orgId}`, forLog(err));
 			}
 		}
 		if (org.membersReserved)

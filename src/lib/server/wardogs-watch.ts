@@ -8,6 +8,7 @@
 // instead of re-scanning.
 import { and, eq, isNull } from 'drizzle-orm';
 import type { Env } from './env';
+import { forLog } from './http';
 import { changes, couchConfig, CouchConflict, type CouchChange } from './couch';
 import { resolveConflict } from './wardogs-reserve';
 import { couchState } from './db/couch-state';
@@ -131,7 +132,7 @@ const syncCoalescer = makeCoalescer<{ env: Env; org: OrgRow }>(
 		gateway()
 			.syncOrg(env, org)
 			.then(() => undefined)
-			.catch((err) => console.error(`[warcon] couch reserve sync ${org.name}`, err)),
+			.catch((err) => console.error(`[warcon] couch reserve sync ${org.name}`, forLog(err))),
 	({ org }) => org.id
 );
 
@@ -151,7 +152,7 @@ async function loop(env: Env): Promise<void> {
 			await saveSeq(env, batch.last_seq);
 			since = batch.last_seq;
 		} catch (err) {
-			console.error('[warcon] couch reserve watch', err);
+			console.error('[warcon] couch reserve watch', forLog(err));
 			await new Promise((r) => setTimeout(r, RETRY_MS));
 		}
 	}
@@ -162,7 +163,7 @@ export function startReserveWatch(env: Env): void {
 	if (loopPromise) return;
 	stopRequested = false;
 	loopPromise = loop(env).catch((err) =>
-		console.error('[warcon] couch reserve watch stopped', err)
+		console.error('[warcon] couch reserve watch stopped', forLog(err))
 	);
 }
 
