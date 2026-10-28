@@ -39,8 +39,10 @@ import {
 import { phaseOffset, pickDue, withHold } from './poller-schedule';
 import { rollupSamples } from './rollups';
 import { liveView } from './live';
-import { feedDemoKills, forgetKillDistance } from './feed-events';
-import { publicMessage } from './http';
+import { feedDemoKills, forgetKillDistance, forgetNameChange } from './feed-events';
+import { forgetBounties } from './bounty';
+import { startAliasFill } from './aliases';
+import { forLog, publicMessage } from './http';
 import * as metrics from './metrics';
 import type { LiveView } from '$lib/types';
 
@@ -127,7 +129,9 @@ export function startPoller(env: Env, label = 'worker'): void {
 	// Lease renewal runs on its own timer so a slow roster or settings read never delays it.
 	scheduler.renewTimer = setInterval(
 		() =>
-			void acquireOrRenew(env, label).catch((err) => console.error('[warcon] worker lease', err)),
+			void acquireOrRenew(env, label).catch((err) =>
+				console.error('[warcon] worker lease', forLog(err))
+			),
 		RENEW_MS
 	);
 	globalThis.__warconRenew = scheduler.renewTimer;
@@ -213,7 +217,8 @@ export async function observeNow(env: Env, serverId: string): Promise<LiveView |
 	await withServer(serverId, PRIORITY.command, () =>
 		observeServer(env, mem, { status: true, players: true })
 	).catch((err) => {
-		if (!(err instanceof LostOwnership)) console.error(`[warcon] observe ${mem.server.name}`, err);
+		if (!(err instanceof LostOwnership))
+			console.error(`[warcon] observe ${mem.server.name}`, forLog(err));
 	});
 	return mem.observedAt ? liveView(mem) : null;
 }
@@ -229,7 +234,7 @@ async function beat(env: Env): Promise<void> {
 			// The first acquisition; renewals then run on their own timer.
 			s.renewAt = now;
 			await acquireOrRenew(env, s.label).catch((err) =>
-				console.error('[warcon] worker lease', err)
+				console.error('[warcon] worker lease', forLog(err))
 			);
 		}
 		if (!isOwner()) return;
@@ -239,10 +244,14 @@ async function beat(env: Env): Promise<void> {
 			s.epoch = period;
 			forgetRemembered();
 			forgetKillDistance();
+			forgetNameChange();
 		}
+		// Once, in the background: the names the kill feed showed before they were recorded (a fill
+		// that did not finish is tried again a while later).
+		startAliasFill(env);
 		if (now - s.settingsAt >= SETTINGS_MS) {
 			s.settingsAt = now;
-			await loadSettings(env).catch((err) => console.error('[warcon] settings', err));
+			await loadSettings(env).catch((err) => console.error('[warcon] settings', forLog(err)));
 			if (settingsVersion() !== s.settingsSeen) {
 				s.settingsSeen = settingsVersion();
 				for (const m of allMemory()) if (m.inFlight === null) replan(m, now);
@@ -253,7 +262,7 @@ async function beat(env: Env): Promise<void> {
 		if (now - s.rosterAt >= ROSTER_MS) await refreshRoster(env, s, now);
 		launchDue(env, s, now);
 	} catch (err) {
-		console.error('[warcon] scheduler beat', err);
+		console.error('[warcon] scheduler beat', forLog(err));
 	} finally {
 		s.beating = false;
 	}
@@ -268,7 +277,7 @@ async function refreshRoster(env: Env, s: Scheduler, now: number): Promise<void>
 			.from(servers)
 			.innerJoin(organizations, eq(organizations.id, servers.orgId));
 	} catch (err) {
-		console.error('[warcon] roster', err);
+		console.error('[warcon] roster', forLog(err));
 		return;
 	}
 	const present = new Set<string>();
@@ -287,11 +296,13 @@ async function refreshRoster(env: Env, s: Scheduler, now: number): Promise<void>
 		if (!present.has(m.server.id) && m.inFlight === null) {
 			forgetMemory(m.server.id);
 			forgetKillDistance(m.server.id);
+			forgetNameChange(m.server.id);
+			forgetBounties(m.server.id);
 		}
 	if (now - s.expiryAt >= EXPIRY_MS) {
 		s.expiryAt = now;
 		const expired = await expireEntries(env).catch((err) => {
-			console.error('[warcon] list expiry', err);
+			console.error('[warcon] list expiry', forLog(err));
 			return { lifted: 0, orgIds: [] as string[] };
 		});
 		// A lifted ban comes off the servers on their next look, not at the next scheduled sync.
@@ -347,7 +358,7 @@ function launchDue(env: Env, s: Scheduler, now: number): void {
 		)
 			.catch((err) => {
 				if (err instanceof LostOwnership) return;
-				console.error(`[warcon] observe ${m.server.name}`, err);
+				console.error(`[warcon] observe ${m.server.name}`, forLog(err));
 			})
 			.finally(() => {
 				m.inFlight = null;
@@ -366,7 +377,7 @@ async function housekeep(env: Env): Promise<void> {
 	try {
 		await rollupSamples(env);
 	} catch (err) {
-		console.error('[warcon] rollups failed', err);
+		console.error('[warcon] rollups failed', forLog(err));
 	} finally {
 		housekeeping = false;
 	}

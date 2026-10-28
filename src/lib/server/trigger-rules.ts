@@ -8,10 +8,19 @@ import { validateKillRate, type KillRateConfig } from './kill-rate';
 import { validateKillDistance, type KillDistanceConfig } from './kill-distance';
 import { validateTwoTeams, type TwoTeamsConfig } from './two-teams';
 import { validateAfkProtection, type AfkProtectionConfig } from './afk-protection';
+import { validateAfkWatch, type AfkWatchConfig } from './afk-watch';
+import { validateNameChange, type NameChangeConfig } from './name-change';
+import { validateBounty, type BountyConfig } from './bounty';
+import { validateRotationShuffle, type RotationShuffleConfig } from './rotation-shuffle';
+import { validateLiveName } from './live-name';
+import { validateRestartSkip, type RestartSkipConfig } from './restart-skip';
+import { validateWeatherCycle, type WeatherCycleConfig } from './weather-cycle';
+import { steamIdList } from './steam';
+import type { LiveNameConfig } from '$lib/live-name';
 import { causeTags } from './cause-tags';
-import { RESTART_AFTER_HOURS, restartWindow } from '$lib/uptime';
+import { MAX_RESTART_LEAD_MINUTES, restartWindow, type RestartSchedule } from '$lib/uptime';
 import { MAX_CHAT } from '$lib/chat';
-import { TEAM_KILL_NOT_COUNTED } from '$lib/causes';
+import { isVehicleCrash, TEAM_KILL_NOT_COUNTED, VEHICLE_CRASH } from '$lib/causes';
 import { mapName } from '$lib/format';
 import { UNKNOWN } from './message-vars';
 import type { SteamProfileRow } from './db/schema';
@@ -32,7 +41,14 @@ export const TRIGGER_KINDS: TriggerKind[] = [
 	'kill_rate',
 	'two_teams',
 	'kill_distance',
-	'afk_protection'
+	'afk_protection',
+	'name_change',
+	'bounty',
+	'rotation_shuffle',
+	'live_name',
+	'restart_skip',
+	'afk_watch',
+	'weather_cycle'
 ];
 export const TRIGGER_LABELS: Record<TriggerKind, string> = {
 	welcome: 'Welcome whisper',
@@ -49,7 +65,14 @@ export const TRIGGER_LABELS: Record<TriggerKind, string> = {
 	kill_rate: 'Kill rate watch',
 	two_teams: 'Team balance',
 	kill_distance: 'Kill distance watch',
-	afk_protection: 'AFK protection'
+	afk_protection: 'AFK protection',
+	name_change: 'Name change watch',
+	bounty: 'Bounty',
+	rotation_shuffle: 'Rotation shuffle',
+	live_name: 'Live server name',
+	restart_skip: 'Skip map after restart',
+	afk_watch: 'AFK watch',
+	weather_cycle: 'Weather cycle'
 };
 
 export interface WelcomeConfig {
@@ -90,11 +113,16 @@ export interface RiskKickConfig {
 	/** also kick at this advisory risk score or more (the score the players table shows); null is off */
 	kickAtScore: number | null;
 	spareReserved: boolean;
+	/** SteamIDs the rule never kicks, whatever it finds on them (absent on rules saved before it) */
+	exempt?: string[];
 	reason: string;
 }
 export interface PingKickConfig {
 	maxPingMs: number;
 	durationSeconds: number;
+	/** never kick a player with a reserved slot; rules saved before it existed have none and spare
+	 *  nobody */
+	spareReserved?: boolean;
 	reason: string;
 }
 
@@ -133,10 +161,10 @@ export function pingKickStep(
 	return { state: next, kicks };
 }
 /**
- * Tells players about the game's own restart: WARDOGS restarts a server once it has been up for
- * 24 hours, at the end of the round then in progress. Two broadcasts per uptime cycle: a
- * heads-up `leadMinutes` before the window opens (0 = none) and `message` once it has, repeated
- * every `repeatMinutes` while the round drags on (0 = once).
+ * Tells players about the server's next restart ($lib/uptime's restartScheduleOf: daily at a
+ * time UTC, or 24 hours up), which happens at the end of the round then in progress. Two broadcasts per game start: a heads-up `leadMinutes` before the window opens
+ * (0 = none) and `message` once it has, repeated every `repeatMinutes` while the round drags on
+ * (0 = once).
  */
 export interface RestartNoticeConfig {
 	message: string;
@@ -148,9 +176,9 @@ export interface RestartNoticeConfig {
 /**
  * Acts on team kills the kill feed reports, counted per killer within each match: a whisper
  * from `warnAt` team kills on (0 = never), a kick at `kickAt` (0 = never). Team kills by a cause
- * in `notCounted` (feed tags, any case) are left out of the count and never acted on; they stay
- * team kills everywhere else. A rule saved before the list existed has none and leaves out
- * TEAM_KILL_NOT_COUNTED.
+ * in `notCounted` (feed tags, any case) are left out of the count and never acted on, and so are
+ * crashes when it holds VEHICLE_CRASH; they stay team kills everywhere else. A rule saved before
+ * the list existed has none and leaves out TEAM_KILL_NOT_COUNTED.
  */
 export interface TeamKillConfig {
 	warnAt: number;
@@ -206,10 +234,19 @@ export type TriggerConfig =
 	| KillRateConfig
 	| TwoTeamsConfig
 	| KillDistanceConfig
-	| AfkProtectionConfig;
+	| AfkProtectionConfig
+	| NameChangeConfig
+	| BountyConfig
+	| RotationShuffleConfig
+	| LiveNameConfig
+	| RestartSkipConfig
+	| AfkWatchConfig
+	| WeatherCycleConfig;
 
 /** A kick reason: not chat, so not held to the game's chat cap. */
 export const MAX_REASON = 200;
+/** Players a Kick on connect risk rule leaves alone, as many as the Name filter's. */
+const RISK_MAX_EXEMPT = 100;
 
 export const isTriggerKind = (v: unknown): v is TriggerKind =>
 	TRIGGER_KINDS.includes(v as TriggerKind);
@@ -290,6 +327,7 @@ export function validateConfig(kind: TriggerKind, raw: unknown): TriggerConfig {
 				watchlist: !!c.watchlist,
 				kickAtScore: riskKickScore(c),
 				spareReserved: c.spareReserved === undefined ? true : !!c.spareReserved,
+				exempt: steamIdList(c.exempt, RISK_MAX_EXEMPT),
 				reason:
 					str(c.reason, MAX_REASON) || 'Your account does not meet this server’s requirements.'
 			};
@@ -312,13 +350,14 @@ export function validateConfig(kind: TriggerKind, raw: unknown): TriggerConfig {
 			return {
 				maxPingMs,
 				durationSeconds,
+				spareReserved: !!c.spareReserved,
 				reason: str(c.reason, MAX_REASON) || 'Ping too high for too long.'
 			};
 		}
 		case 'restart_notice': {
 			const message = str(c.message, MAX_CHAT);
 			if (!message) throw new ApiError(400, 'The restart message is empty.');
-			const leadMinutes = int(c.leadMinutes, 0, 0, RESTART_AFTER_HOURS * 60 - 1);
+			const leadMinutes = int(c.leadMinutes, 0, 0, MAX_RESTART_LEAD_MINUTES);
 			const leadMessage = str(c.leadMessage, MAX_CHAT);
 			if (leadMinutes && !leadMessage)
 				throw new ApiError(400, 'Add the heads-up message, or set the heads-up to 0 minutes.');
@@ -397,6 +436,20 @@ export function validateConfig(kind: TriggerKind, raw: unknown): TriggerConfig {
 			return validateKillDistance(c);
 		case 'afk_protection':
 			return validateAfkProtection(c);
+		case 'name_change':
+			return validateNameChange(c);
+		case 'bounty':
+			return validateBounty(c);
+		case 'rotation_shuffle':
+			return validateRotationShuffle(c);
+		case 'live_name':
+			return validateLiveName(c);
+		case 'restart_skip':
+			return validateRestartSkip();
+		case 'afk_watch':
+			return validateAfkWatch(c);
+		case 'weather_cycle':
+			return validateWeatherCycle(c);
 	}
 }
 
@@ -544,14 +597,14 @@ export function broadcastWanted(
 export const teamKillNotCounted = (cfg: Pick<TeamKillConfig, 'notCounted'>): readonly string[] =>
 	Array.isArray(cfg.notCounted) ? cfg.notCounted : TEAM_KILL_NOT_COUNTED;
 
-/** Whether a team-kill rule counts a team kill by this cause: one with no cause always counts. */
+/** Whether a team-kill rule counts a team kill: one with no cause always counts. */
 export function countsForTeamKill(
 	cfg: Pick<TeamKillConfig, 'notCounted'>,
-	cause: string | null | undefined
+	k: { cause: string | null; tags: readonly string[] }
 ): boolean {
-	if (!cause) return true;
-	const lower = cause.toLowerCase();
-	return !teamKillNotCounted(cfg).some((c) => c.toLowerCase() === lower);
+	const left = teamKillNotCounted(cfg).map((c) => c.toLowerCase());
+	if (left.includes(VEHICLE_CRASH.toLowerCase()) && isVehicleCrash(k)) return false;
+	return !k.cause || !left.includes(k.cause.toLowerCase());
 }
 
 /** What a team-kill rule does once the killer's count this match has reached `count`. */
@@ -589,10 +642,16 @@ const SAME_START_MS = 60_000;
 export function restartNoticeStage(
 	cfg: Pick<RestartNoticeConfig, 'leadMinutes' | 'repeatMinutes' | 'minPlayers'>,
 	prev: RestartNoticeState | null | undefined,
-	input: { startedAt: number; playerCount: number; now: number }
+	input: {
+		startedAt: number;
+		playerCount: number;
+		now: number;
+		/** the server's restart schedule (restartScheduleOf); null or undefined is 24 hours up */
+		schedule?: RestartSchedule | null;
+	}
 ): RestartNoticeStage | null {
 	if (!input.startedAt || input.playerCount < cfg.minPlayers) return null;
-	const w = restartWindow(new Date(input.startedAt).toISOString(), RESTART_AFTER_HOURS, input.now);
+	const w = restartWindow(new Date(input.startedAt).toISOString(), input.schedule, input.now);
 	if (!w) return null;
 	// The start is derived from the uptime at each look, so it moves by the look's latency: a
 	// start within SAME_START_MS of the one on record is the same run, not a restart.
@@ -629,7 +688,34 @@ export interface MatchEnd {
 	winner: string | null;
 	/** the leader, or every faction tied at the top; empty when nobody scored */
 	leaders: string[];
+	/** the result is the game's own (the feed's `match_ended`), not the last look's */
+	byFeed?: boolean;
 }
+
+/**
+ * A match's result from its final scores: the winner the game named, else the faction alone at
+ * the top when it scored (a tie at the top, or nobody scoring, has no winner).
+ */
+export function resultOf(
+	map: string,
+	final: { name: string; score: number }[],
+	named: string | null = null
+): MatchEnd {
+	const scores = [...final].sort((a, b) => b.score - a.score);
+	const top = scores[0]?.score ?? 0;
+	const leaders = named
+		? [named]
+		: top > 0
+			? scores.filter((f) => f.score === top).map((f) => f.name)
+			: [];
+	return { map, scores, winner: leaders.length === 1 ? leaders[0] : null, leaders };
+}
+
+/** Both name the same factions, in any order. */
+export const sameFactions = (
+	a: readonly { name: string }[],
+	b: readonly { name: string }[]
+): boolean => a.length === b.length && a.every((f) => b.some((g) => g.name === f.name));
 
 /**
  * The match that ended between two looks, or null while it is the same match. A boundary is a
@@ -646,15 +732,7 @@ export function matchBoundary(prev: MatchLook | null, next: MatchLook): MatchEnd
 		next.matchSeconds !== null &&
 		next.matchSeconds < prev.matchSeconds - 30;
 	if (prev.map === next.map && !clockBack && total(next) >= total(prev)) return null;
-	const scores = [...prev.scores].sort((a, b) => b.score - a.score);
-	const top = scores[0]?.score ?? 0;
-	const leaders = top > 0 ? scores.filter((f) => f.score === top).map((f) => f.name) : [];
-	return {
-		map: prev.map,
-		scores,
-		winner: leaders.length === 1 ? leaders[0] : null,
-		leaders
-	};
+	return resultOf(prev.map, prev.scores);
 }
 
 /** A player's line of the match that ended, as far as the placeholders need it. */
@@ -845,10 +923,20 @@ export interface RiskKickSignals {
 }
 
 /** Why a joiner would be kicked under this config, or null when they pass. */
+/**
+ * A kick's verdict goes into this server's trail, the rule's last result and Discord cards, whose
+ * readers need not be able to open the server that banned the player: it says that one did, never
+ * which or why. The player page shows those to whoever may open that server.
+ */
+const ELSEWHERE = 'banned on another server of this organisation';
+const KICK_TEXT: Record<string, string> = {
+	banned_elsewhere: 'Banned on another server of this organisation',
+	resembles: 'Name resembles a banned player'
+};
+
 export function riskKickVerdict(cfg: RiskKickConfig, s: RiskKickSignals): string | null {
 	if (s.reserved && cfg.spareReserved) return null;
-	if (cfg.bannedElsewhere && s.bannedOn.length)
-		return `banned on ${s.bannedOn[0].serverName}${s.bannedOn[0].reason ? ` (${s.bannedOn[0].reason})` : ''}`;
+	if (cfg.bannedElsewhere && s.bannedOn.length) return ELSEWHERE;
 	if (cfg.watchlist && s.watched)
 		return `on the watchlist${s.watched.reason ? ` (${s.watched.reason})` : ''}`;
 	if (s.steamEnabled && s.profile && !s.profile.error) {
@@ -883,10 +971,14 @@ export function riskKickVerdict(cfg: RiskKickConfig, s: RiskKickSignals): string
 			now: s.now
 		});
 		if (risk.score >= minScore) {
-			const why = [...risk.reasons]
-				.sort((a, b) => b.weight - a.weight)
+			const why = [
+				...new Set(
+					[...risk.reasons]
+						.sort((a, b) => b.weight - a.weight)
+						.map((r) => KICK_TEXT[r.code] ?? r.text)
+				)
+			]
 				.slice(0, 3)
-				.map((r) => r.text)
 				.join('; ');
 			const what =
 				risk.level === 'low' ? `risk ${risk.score}` : `${risk.level} risk (${risk.score})`;

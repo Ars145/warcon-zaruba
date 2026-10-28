@@ -6,6 +6,7 @@
 // removed; a webhook Discord no longer knows shows as failing on the org page like the mirror.
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { Env } from './env';
+import { forLog } from './http';
 import { organizations, servers, webhooks, type WebhookRow } from './db/schema';
 import { isOwner } from './leadership';
 import { memoryOf } from './observe';
@@ -14,6 +15,7 @@ import { deleteDiscord, editDiscord, postDiscord, type PostResult } from './webh
 import { cardLinks, statusMessage, type StatusServer } from './webhook-status-core';
 import { sendStatusCard, statusCardFor } from './status-card';
 import { effectiveFeatures, type FeatureSet } from '$lib/features';
+import { readManualRestart } from '$lib/uptime';
 
 export const STATUS_TICK_MS = 20_000;
 /** Re-edit an unchanged message this often so its embed timestamps do not drift into the past. */
@@ -82,7 +84,7 @@ async function tick(env: Env): Promise<void> {
 	try {
 		await refreshStatusMessages(env);
 	} catch (err) {
-		console.error('[warcon] status messages', err);
+		console.error('[warcon] status messages', forLog(err));
 	} finally {
 		ticking = false;
 	}
@@ -108,7 +110,12 @@ export async function refreshStatusMessages(env: Env, now = Date.now()): Promise
 	const byOrg = new Map<string, CardServer[]>();
 	for (const { server, org } of rows) {
 		const list = byOrg.get(server.orgId) ?? [];
-		list.push({ id: server.id, name: server.name, features: effectiveFeatures(org, server) });
+		list.push({
+			id: server.id,
+			name: server.name,
+			restartSchedule: readManualRestart(server.restartSchedule),
+			features: effectiveFeatures(org, server)
+		});
 		byOrg.set(server.orgId, list);
 	}
 	// Different webhooks are different rate-limit buckets, so they need not wait on each other;
@@ -119,7 +126,7 @@ export async function refreshStatusMessages(env: Env, now = Date.now()): Promise
 			const only = hook.serverIds as string[] | null;
 			const list = only && only.length ? all.filter((s) => only.includes(s.id)) : all;
 			return refreshHook(env, hook, orgName, list, now).catch((err) =>
-				console.error(`[warcon] status messages ${hook.label}`, err)
+				console.error(`[warcon] status messages ${hook.label}`, forLog(err))
 			);
 		})
 	);

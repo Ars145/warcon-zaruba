@@ -4,6 +4,7 @@
 // an attachment. Posted straight away instead, the way the status cards are, one request per
 // webhook that asked for match results.
 import type { Env } from '../env';
+import { forLog } from '../http';
 import type { WebhookRow } from '../db/schema';
 import { discordCall, enabledWebhooks, orgOfServer, recordResult } from '../webhook-delivery';
 import type { MatchResultCard } from './data';
@@ -56,7 +57,7 @@ export async function notifyMatchResult(
 		}
 		return sent;
 	} catch (err) {
-		console.error('[warcon] match card notify', err);
+		console.error('[warcon] match card notify', forLog(err));
 		return 0;
 	}
 }

@@ -1,9 +1,7 @@
 name: Sync upstream
 
-# Keeps this fork current with warcon-app/warcon on its own. A clean merge is
-# pushed straight to main, which runs CI and then publishes the image; a merge
-# that conflicts is left alone and reported as an issue, so main is never in a
-# half-merged state and the server never pulls an image nobody looked at.
+# The fork's deploy key makes the push trigger CI and permits upstream workflow updates.
+# CI gates publication of the image the server pulls. Conflicts require review.
 
 on:
   schedule:
@@ -11,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: sync-upstream
@@ -26,55 +24,39 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          ssh-key: ${{ secrets.UPSTREAM_SYNC_SSH_KEY }}
 
       - name: Merge upstream/main
-        id: merge
+        shell: bash
         run: |
-          set -u
+          set -euo pipefail
           git config user.name "warcon-sync"
           git config user.email "sync@users.noreply.github.com"
           git remote add upstream https://github.com/warcon-app/warcon.git
           git fetch --no-tags upstream main
 
           BEHIND=$(git rev-list --count HEAD..upstream/main)
-          echo "behind=$BEHIND" >> "$GITHUB_OUTPUT"
           if [ "$BEHIND" = "0" ]; then
             echo "Already up to date with upstream."
             exit 0
           fi
           echo "Upstream is $BEHIND commit(s) ahead."
-          git log --oneline HEAD..upstream/main | head -20
+          git log -20 --oneline HEAD..upstream/main
 
           if git merge --no-edit upstream/main; then
             git push origin main
-            echo "merged=true" >> "$GITHUB_OUTPUT"
+            echo "Merged $BEHIND upstream commit(s). Push starts CI; successful CI publishes the main image." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
           # The conflicted paths have to be read before the abort clears the index.
-          {
-            echo "conflicts<<GHEOF"
-            git diff --name-only --diff-filter=U | head -40
-            echo "GHEOF"
-          } >> "$GITHUB_OUTPUT"
+          CONFLICTS=$(git diff --name-only --diff-filter=U)
           git merge --abort
-          echo "merged=false" >> "$GITHUB_OUTPUT"
-
-          # Park upstream's tip on a branch so the conflict can be reviewed and
-          # resolved in a pull request. main is left exactly as it was.
-          git push --force origin upstream/main:refs/heads/sync/upstream
-
-      # Issues are off on a fork and Actions is deliberately not allowed to open
-      # pull requests here, so a conflict is reported by failing the run: it goes
-      # red in the Actions tab and GitHub emails the owner. Upstream's tip is
-      # already parked on sync/upstream to resolve from.
-      - name: Fail on a conflict
-        if: steps.merge.outputs.merged == 'false'
-        env:
-          BEHIND: ${{ steps.merge.outputs.behind }}
-          CONFLICTS: ${{ steps.merge.outputs.conflicts }}
-        run: |
+          {
+            echo "### Upstream merge needs review"
+            echo "$BEHIND commit(s) behind; main was left untouched."
+            printf '\nConflicted files:\n\n%s\n' "$CONFLICTS"
+          } >> "$GITHUB_STEP_SUMMARY"
           echo "::error title=Upstream merge needs hands::$BEHIND commit(s) behind; conflicts in: $(echo "$CONFLICTS" | tr '\n' ' ')"
-          echo "main was left untouched. Upstream's tip is on the sync/upstream branch."
           echo "Resolve with: git fetch upstream && git merge upstream/main"
           exit 1

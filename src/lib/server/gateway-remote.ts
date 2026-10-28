@@ -3,7 +3,7 @@
 // event bus so the SSE route and pages work exactly as in the single-process role.
 import type { Env } from './env';
 import type { OrgRow, ServerRow } from './access';
-import { ApiError } from './http';
+import { ApiError, forLog } from './http';
 import { GameError } from './rcon';
 import { emit, subscribe, type WarconEvent } from './events';
 import type { Gateway } from './gateway';
@@ -11,6 +11,7 @@ import type { Priority } from './dispatcher';
 import type { KillView, LiveView, ListSyncSummary } from '$lib/types';
 import type { SyncResult } from './lists-sync';
 import type { PollerStats } from './poller';
+import type { MatchFeed } from './match-feed';
 import { RELAY_PREFIX, type RelayError } from './relay';
 
 const TIMEOUT_MS = 30_000;
@@ -23,6 +24,30 @@ function rethrow(e: RelayError): never {
 	if (e.kind === 'game') throw new GameError(e.status, e.message, e.code, e.body ?? null);
 	if (e.kind === 'api') throw new ApiError(e.status, e.message, e.code);
 	throw new ApiError(502, `Worker: ${e.message}`, 'worker_error');
+}
+
+/**
+ * Ids in one GET of the worker's live views (300 ids are about 11.7 KB of URL, which the worker
+ * takes); past this they go in a POST body, which a worker from before the POST form ignores.
+ */
+export const LIVE_GET_IDS = 300;
+
+/**
+ * The worker's live views of these servers. A long list goes in a body: in a URL a few hundred
+ * ids pass what the worker accepts. A short one stays a GET, which a worker from before the POST
+ * form also answers (a web rolled out first sees an older worker for a minute).
+ */
+export async function remoteLive(env: Env, ids: string[]): Promise<Map<string, LiveView>> {
+	const r =
+		ids.length > LIVE_GET_IDS
+			? await call<Record<string, LiveView>>(env, '/live', { ids })
+			: await call<Record<string, LiveView>>(
+					env,
+					`/live?ids=${encodeURIComponent(ids.join(','))}`,
+					undefined,
+					'GET'
+				);
+	return new Map(Object.entries(r));
 }
 
 export async function call<T>(
@@ -46,7 +71,7 @@ export async function call<T>(
 		});
 	} catch (err) {
 		// The runtime's text can quote the relay's URL, which is for the log, not for whoever clicked.
-		console.error('[warcon] relay', err instanceof Error ? err.message : err);
+		console.error('[warcon] relay', forLog(err));
 		throw new ApiError(503, 'The worker is not reachable.', 'worker_unavailable');
 	}
 	const data = (await res.json().catch(() => null)) as {
@@ -112,7 +137,7 @@ function consumeEvents(env: Env): void {
 					}
 				}
 			} catch (err) {
-				console.warn('[warcon] worker event stream:', err instanceof Error ? err.message : err);
+				console.warn('[warcon] worker event stream:', forLog(err));
 			} finally {
 				clearTimeout(watchdog);
 			}
@@ -129,15 +154,7 @@ export function connectRemoteGateway(env: Env): Gateway {
 		run(env, server, action, params, priority?: Priority) {
 			return call<unknown>(env, '/run', { serverId: server.id, action, params, priority });
 		},
-		async live(env, ids) {
-			const r = await call<Record<string, LiveView>>(
-				env,
-				`/live?ids=${encodeURIComponent(ids.join(','))}`,
-				undefined,
-				'GET'
-			);
-			return new Map(Object.entries(r));
-		},
+		live: remoteLive,
 		interest(ids) {
 			void call(env, '/interest', { ids }).catch(() => {});
 		},
@@ -167,6 +184,9 @@ export function connectRemoteGateway(env: Env): Gateway {
 		},
 		killsIngested(env, serverId, kills: KillView[]) {
 			void call(env, '/kills', { serverId, kills }).catch(() => {});
+		},
+		matchFeed(env, serverId, feed: MatchFeed) {
+			void call(env, '/match-feed', { serverId, feed }).catch(() => {});
 		},
 		subscribe,
 		health(env) {

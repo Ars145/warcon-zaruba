@@ -35,6 +35,17 @@ test('changeTeam moves the faction then kills the player', async () => {
 	expect(r.message).toContain('respawn');
 });
 
+test('changeTeam with kill: false sends the move alone', async () => {
+	const { client, calls } = fakeClient(false);
+	const r: any = await ACTIONS.changeTeam.run(client, {
+		steamId: '76561198000000001',
+		faction: 'Valkyra',
+		kill: false
+	});
+	expect(calls).toEqual(['PATCH /v1/players/76561198000000001']);
+	expect(r.message).toBe('Moved to Valkyra.');
+});
+
 test('changeTeam tolerates a failed kill', async () => {
 	const { client, calls } = fakeClient(true);
 	const r: any = await ACTIONS.changeTeam.run(client, {
@@ -471,6 +482,27 @@ test('config hides the RCON password and the feed token from whoever reads it', 
 	expect(r.text).toContain('Password=(hidden)');
 	expect(r.text).toContain('ServerName=x');
 	expect(r.revision).toBe('r1');
+});
+
+// CL-516586 reads the kill feed from the RCON block: each endpoint carries an address and a token.
+const WITH_FEED = `${RCON}\r\nPassword=hunter2\r\nbEventFeedEnabled=True\r\n!EventFeedEndpoints=ClearArray\r\n.EventFeedEndpoints=(Url="https://feed.example",Token="wkf_live")\r\n`;
+
+test('config hides the kill feed endpoints, and apply puts them back as they were', async () => {
+	const f = reservedClient({ route: false, text: WITH_FEED });
+	const shown = ((await ACTIONS.config.run(f.client, {})) as any).text as string;
+	expect(shown).not.toContain('wkf_live');
+	expect(shown).not.toContain('feed.example');
+	expect(shown).toContain('\r\n.EventFeedEndpoints=(hidden)\r\n');
+	expect(shown).toContain('\r\n!EventFeedEndpoints=ClearArray\r\n');
+	await ACTIONS.configApply.run(f.client, { text: shown, revision: 'r1' });
+	expect(f.text()).toBe(WITH_FEED);
+	f.client.configCall = async () => ({
+		status: 200,
+		body: { ok: true, warnings: ['endpoint token wkf_live was refused'] }
+	});
+	const told = JSON.stringify(await ACTIONS.configValidate.run(f.client, { text: shown }));
+	expect(told).not.toContain('wkf_live');
+	expect(told).toContain('endpoint token (hidden) was refused');
 });
 
 test('configApply puts the live credentials back where the placeholder was left alone', async () => {
@@ -939,6 +971,33 @@ test('the live build refuses 257 characters, and the broadcast action never send
 		expect(JSON.parse(refused.text).error.code).toBe('message_too_long');
 		const r: any = await ACTIONS.broadcast.run(client, { message: 'x'.repeat(400) });
 		expect(r.message).toContain('Announcement sent');
+	} finally {
+		if (before === undefined) delete process.env.MOCK_LIVE_BUILD;
+		else process.env.MOCK_LIVE_BUILD = before;
+	}
+});
+
+// ---- next map on a live build -----------------------------------------------------------------
+
+// The live builds read the rotation but serve none of its edit routes, so the panel disables Play
+// next and Set as next map there (issue #50). The action itself has no other way to queue a map.
+test('setNextMap on the live build answers 404 no_route and leaves the rotation as it was', async () => {
+	const { WardogsClient } = await import('./rcon');
+	const before = process.env.MOCK_LIVE_BUILD;
+	process.env.MOCK_LIVE_BUILD = 'true';
+	try {
+		const server = { id: 'next-live', host: 'demo', port: 1, scheme: 'http' as const };
+		const client = new WardogsClient({} as any, server, 'demo', 'next-live');
+		const rotation: any = await ACTIONS.rotation.run(client, {});
+		expect(rotation.entries.length).toBeGreaterThan(2);
+		// one already in the rotation (moved up) and one that is not (added, then moved)
+		const picks = [rotation.entries.at(-1), { map: 'Europe', experiences: ['KOTH_Hardcore'] }];
+		for (const sel of picks) {
+			const err: any = await ACTIONS.setNextMap.run(client, sel).catch((e) => e);
+			expect(err).toBeInstanceOf(GameError);
+			expect([err.status, err.code]).toEqual([404, 'no_route']);
+		}
+		expect(await ACTIONS.rotation.run(client, {})).toEqual(rotation);
 	} finally {
 		if (before === undefined) delete process.env.MOCK_LIVE_BUILD;
 		else process.env.MOCK_LIVE_BUILD = before;
