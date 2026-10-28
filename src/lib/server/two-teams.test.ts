@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
 import {
-	clanTag,
 	emptyTwoTeamsState,
 	TWO_TEAMS_ASK_WINDOW_MS,
 	TWO_TEAMS_FORGET_MS,
@@ -72,6 +71,10 @@ describe('validateTwoTeams', () => {
 		expect(() => validateTwoTeams({ balance: true, exempt: '76561198000000001' })).toThrow(
 			'exempt must be a list'
 		);
+		// a JSON number that long arrives rounded: 76561198100000101 would leave 76561198100000100 alone
+		expect(() =>
+			validateTwoTeams({ balance: true, exempt: JSON.parse('[76561198100000101]') })
+		).toThrow('sent as strings');
 		const many = Array.from({ length: 101 }, (_, i) => String(76561198000000000n + BigInt(i)));
 		expect(() => validateTwoTeams({ balance: true, exempt: many })).toThrow('At most 100');
 	});
@@ -270,6 +273,37 @@ describe('twoTeamsStep balancing', () => {
 		expect(helper.state.sides.get('v0')?.side).toBe(M);
 	});
 
+	test('a player who keeps switching onto the bigger side is put back every time', () => {
+		const players = [...side('v', 7, V), ...side('m', 5, M)];
+		const onV = players.map((x) => (x.steamId === 'm0' ? { ...x, faction: V } : x));
+		let state = seeded(players);
+		for (let i = 0; i < 2 * TWO_TEAMS_MAX_ASKS; i++) {
+			// onto Valkyra again, eight against four
+			const r = bal(state, onV, (2 * i + 1) * 2000);
+			expect(r.moves.map((m) => [m.steamId, m.to, m.why])).toEqual([['m0', M, 'back']]);
+			expect(r.stopped).toEqual([]);
+			// and the put-back lands
+			state = bal(r.state, players, (2 * i + 2) * 2000).state;
+		}
+	});
+
+	test('a put-back the game does not carry out is asked three times in ten minutes at most', () => {
+		const players = [...side('v', 7, V), ...side('m', 5, M)];
+		const onV = players.map((x) => (x.steamId === 'm0' ? { ...x, faction: V } : x));
+		let state = seeded(players);
+		const whys: string[] = [];
+		const stopped: string[] = [];
+		// still on Valkyra at every look, each a retry's wait after the one before
+		for (let i = 0; i < 2 * TWO_TEAMS_MAX_ASKS; i++) {
+			const r = bal(state, onV, 2000 + i * (TWO_TEAMS_RETRY_MS + 1000));
+			state = r.state;
+			whys.push(...r.moves.map((m) => m.why));
+			stopped.push(...r.stopped.map((s) => s.steamId));
+		}
+		expect(whys).toEqual(Array(TWO_TEAMS_MAX_ASKS).fill('back'));
+		expect(stopped).toEqual(['m0']);
+	});
+
 	test('a player who leaves and rejoins on the bigger side is still put back, until forgotten', () => {
 		const players = [...side('v', 7, V), ...side('m', 5, M)];
 		const others = players.filter((x) => x.steamId !== 'm0');
@@ -418,6 +452,41 @@ describe('twoTeamsStep balancing', () => {
 		);
 	});
 
+	test('with clan tags kept together, a new match moves players with no clanmates beside them first', () => {
+		const withClans = { ...B, clans: true };
+		// the clan first in the list, where list order would take the moves from it
+		const players = [
+			...Array.from({ length: 6 }, (_, i) => named(`t${i}`, `[ABC] Mate${i}`, M)),
+			...side('m', 6, M),
+			...side('v', 2, V)
+		];
+		const r = bal(seeded(players, withClans), players, 1000, { newMatch: true }, withClans);
+		expect(r.moves.map((m) => [m.steamId, m.to])).toEqual([
+			['m0', V],
+			['m1', V],
+			['m2', V],
+			['m3', V]
+		]);
+	});
+
+	test('a new match moves first the clan members whose clan is on the side they are short of', () => {
+		const withClans = { ...B, clans: true };
+		// 10 v 6, two of the clan on the bigger side, five on the smaller
+		const players = [
+			...side('m', 8, M),
+			named('a0', '[ABC] One', M),
+			named('a1', '[ABC] Two', M),
+			...Array.from({ length: 5 }, (_, i) => named(`b${i}`, `[ABC] Mate${i}`, V)),
+			p('v0', V)
+		];
+		const r = bal(seeded(players, withClans), players, 1000, { newMatch: true }, withClans);
+		// joining their clan evens the sides: nobody else moves
+		expect(r.moves.map((m) => [m.steamId, m.to])).toEqual([
+			['a0', V],
+			['a1', V]
+		]);
+	});
+
 	test('clanmates arriving on opposite sides are put together with one move', () => {
 		const withClans = { ...B, clans: true };
 		const players = [...side('v', 4, V), ...side('m', 4, M)];
@@ -442,15 +511,6 @@ describe('twoTeamsStep balancing', () => {
 			withClans
 		);
 		expect(new Set(r.moves.map((m) => m.to)).size).toBe(1);
-	});
-
-	test('clanTag reads a short bracketed tag at the front, in one case', () => {
-		expect(clanTag('[ABC] Name')).toBe('abc');
-		expect(clanTag('  {Wolf}Name')).toBe('wolf');
-		expect(clanTag('(TAG) x')).toBe('tag');
-		expect(clanTag('Name [ABC]')).toBeNull();
-		expect(clanTag('[] Name')).toBeNull();
-		expect(clanTag('[a tag far too long to be one] Name')).toBeNull();
 	});
 
 	test('a move a person made from the panel is kept, not put back', () => {

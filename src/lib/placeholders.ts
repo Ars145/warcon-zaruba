@@ -61,8 +61,9 @@ interface MessageRule {
 	fields: readonly string[];
 	own: readonly string[];
 	player: boolean;
-	/** its text can be kept where staff read it (a Kill distance reason becomes a ban reason), so it
-	 *  has no org-wide stats: staff of this server may not see the organisation's other servers */
+	/** its text can be kept where staff read it (a Kill distance reason becomes a ban reason), or is
+	 *  said to the whole server (a Bounty's), so it has no org-wide stats: staff of this server may
+	 *  not see the organisation's other servers, and a player's are told to them alone */
 	kept?: boolean;
 }
 
@@ -81,6 +82,8 @@ export const MESSAGE_RULES: Readonly<Partial<Record<TriggerKind, MessageRule>>> 
 	risk_kick: { fields: ['reason'], own: [], player: true },
 	name_filter: { fields: ['reason'], own: ['why'], player: true },
 	ping_kick: { fields: ['reason'], own: [], player: true },
+	// how long the player has been idle, and the idle time the rule acts at (both whole minutes)
+	afk_watch: { fields: ['warnMessage', 'reason'], own: ['idle', 'limit'], player: true },
 	team_kill: { fields: ['warnMessage', 'kickReason'], own: ['victim', 'count'], player: true },
 	two_teams: { fields: ['message'], own: ['team'], player: true },
 	kill_distance: {
@@ -90,7 +93,17 @@ export const MESSAGE_RULES: Readonly<Partial<Record<TriggerKind, MessageRule>>> 
 		kept: true
 	},
 	seed_reward: { fields: ['message'], own: ['minutes', 'until', 'days'], player: true },
-	afk_protection: { fields: ['message', 'doneMessage'], own: ['goal'], player: false }
+	afk_protection: { fields: ['message', 'doneMessage'], own: ['goal'], player: false },
+	// the name the player had before the change
+	name_change: { fields: ['reason'], own: ['previous'], player: true },
+	// said to the whole server, so no org-wide stats: `{name}` is the marked player when the bounty is
+	// set and the claimer after, `{target}` always the marked player
+	bounty: {
+		fields: ['setMessage', 'claimMessage', 'whisper'],
+		own: ['target', 'streak', 'reward', 'days', 'until'],
+		player: true,
+		kept: true
+	}
 };
 
 export type PlaceholderGroupKey = 'own' | 'player' | 'stats' | 'org' | 'server';

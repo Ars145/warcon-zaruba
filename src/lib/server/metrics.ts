@@ -9,6 +9,7 @@
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from 'prom-client';
 import { buildInfo, type BuildInfo } from './build-info';
 import { timingSafeEqualStr } from './crypto';
+import { forLog } from './http';
 
 export const registry = new Registry();
 collectDefaultMetrics({ register: registry });
@@ -136,6 +137,12 @@ export const feedKills = new Counter({
 	labelNames: ['result'] as const,
 	registers: [registry]
 });
+export const boardReads = new Counter({
+	name: 'warcon_board_reads_total',
+	help: 'Board pages asked for, by what the minute cache did: had it (hit), was reading it (shared) or read it (miss).',
+	labelNames: ['outcome'] as const,
+	registers: [registry]
+});
 export const rateLimited = new Counter({
 	name: 'warcon_rate_limited_total',
 	help: 'Requests refused by the in-memory limiter, by the limit that fired.',
@@ -164,8 +171,12 @@ export interface ProcessSnapshot {
 		unauthorized: number;
 		rejected: number;
 		kills: number;
+		/** joins, leaves, match states and results: known events other than kills (feed-core.ts) */
+		other: number;
 		skipped: number;
 		duplicates: number;
+		/** match states the same as the last one stored for the server (feed.ts) */
+		repeats: number;
 	};
 	rateLimited: { total: number; feed: number };
 	rssBytes: number;
@@ -209,8 +220,10 @@ export async function snapshot(): Promise<ProcessSnapshot> {
 			unauthorized: await total(feedPosts, (l) => l.outcome === 'unauthorized'),
 			rejected: await total(feedPosts, (l) => l.outcome === 'rejected'),
 			kills: await total(feedKills, (l) => l.result === 'accepted'),
+			other: await total(feedKills, (l) => l.result === 'other'),
 			skipped: await total(feedKills, (l) => l.result === 'skipped'),
-			duplicates: await total(feedKills, (l) => l.result === 'duplicate')
+			duplicates: await total(feedKills, (l) => l.result === 'duplicate'),
+			repeats: await total(feedKills, (l) => l.result === 'repeat')
 		},
 		rateLimited: {
 			total: await total(rateLimited),
@@ -239,7 +252,7 @@ export async function renderMetrics(): Promise<string> {
 			try {
 				await fn();
 			} catch (err) {
-				console.warn('[warcon] metrics collector:', err instanceof Error ? err.message : err);
+				console.warn('[warcon] metrics collector:', forLog(err));
 			}
 		})
 	);

@@ -9,26 +9,35 @@ const OTHER_ORG = 'org-other';
 describe('includedInPostgresDesired', () => {
 	test('bans are always included, for every org, on or off a server', () => {
 		expect(
-			includedInPostgresDesired({ kind: 'ban', orgId: COUCH_ORG, listServerId: null }, COUCH_ORG)
+			includedInPostgresDesired(
+				{ kind: 'ban', orgId: COUCH_ORG, listServerId: null, isDefault: true },
+				COUCH_ORG
+			)
 		).toBe(true);
 		expect(
-			includedInPostgresDesired({ kind: 'ban', orgId: OTHER_ORG, listServerId: null }, COUCH_ORG)
+			includedInPostgresDesired(
+				{ kind: 'ban', orgId: OTHER_ORG, listServerId: null, isDefault: true },
+				COUCH_ORG
+			)
 		).toBe(true);
 		expect(
-			includedInPostgresDesired({ kind: 'ban', orgId: COUCH_ORG, listServerId: 'srv-1' }, COUCH_ORG)
+			includedInPostgresDesired(
+				{ kind: 'ban', orgId: COUCH_ORG, listServerId: 'srv-1', isDefault: false },
+				COUCH_ORG
+			)
 		).toBe(true);
 	});
 
 	test("a server's own reserve list is always included, for every org", () => {
 		expect(
 			includedInPostgresDesired(
-				{ kind: 'reserve', orgId: COUCH_ORG, listServerId: 'srv-1' },
+				{ kind: 'reserve', orgId: COUCH_ORG, listServerId: 'srv-1', isDefault: false },
 				COUCH_ORG
 			)
 		).toBe(true);
 		expect(
 			includedInPostgresDesired(
-				{ kind: 'reserve', orgId: OTHER_ORG, listServerId: 'srv-1' },
+				{ kind: 'reserve', orgId: OTHER_ORG, listServerId: 'srv-1', isDefault: false },
 				COUCH_ORG
 			)
 		).toBe(true);
@@ -37,7 +46,7 @@ describe('includedInPostgresDesired', () => {
 	test("COUCH_ORG_ID's own org-wide reserve list (server_id null) is excluded — its entries come from CouchDB", () => {
 		expect(
 			includedInPostgresDesired(
-				{ kind: 'reserve', orgId: COUCH_ORG, listServerId: null },
+				{ kind: 'reserve', orgId: COUCH_ORG, listServerId: null, isDefault: true },
 				COUCH_ORG
 			)
 		).toBe(false);
@@ -46,7 +55,18 @@ describe('includedInPostgresDesired', () => {
 	test("every other org's org-wide reserve list stays included — regression test for the HIGH bug where it was dropped for every org, not just COUCH_ORG_ID's", () => {
 		expect(
 			includedInPostgresDesired(
-				{ kind: 'reserve', orgId: OTHER_ORG, listServerId: null },
+				{ kind: 'reserve', orgId: OTHER_ORG, listServerId: null, isDefault: true },
+				COUCH_ORG
+			)
+		).toBe(true);
+	});
+});
+
+describe('reserve groups', () => {
+	test('a CouchDB org still reads its non-default groups from Postgres', () => {
+		expect(
+			includedInPostgresDesired(
+				{ kind: 'reserve', orgId: COUCH_ORG, listServerId: null, isDefault: false },
 				COUCH_ORG
 			)
 		).toBe(true);
@@ -55,7 +75,7 @@ describe('includedInPostgresDesired', () => {
 
 describe('withReserveRemovalsHeldBack', () => {
 	const plan = (): SyncPlan => ({
-		adds: [{ kind: 'ban', steamId: '11111111111111111', listId: 'l1', reason: 'x' }],
+		adds: [{ kind: 'ban', steamId: '11111111111111111', listId: 'l1', reason: 'x', priority: 0 }],
 		removes: [
 			{ kind: 'reserve', steamId: '22222222222222222' },
 			{ kind: 'ban', steamId: '33333333333333333' }

@@ -10,11 +10,13 @@ import {
 	lte,
 	notInArray,
 	or,
+	sql,
 	type SQL
 } from 'drizzle-orm';
 import type { Env } from './env';
 import { userAgent, int, str } from './http';
 import { auditLog, user, type AuditRow } from './db/schema';
+import { storableText } from './db/storable';
 import { notifyWebhooks } from './webhook-delivery';
 import { OWNERS_ROWS } from './audit-rows';
 
@@ -44,17 +46,23 @@ const SECRET_KEYS = /pass|secret|token|key|authorization|cookie/i;
 const SECRET_LINES =
 	/^([ \t]*[A-Za-z0-9_.-]*(?:pass|secret|token|key)[A-Za-z0-9_.-]*[ \t]*=)[^\r\n]*/gim;
 const MAX_TEXT = 4000;
+/**
+ * What a key named `__proto__` is kept under. Assigned, it became the copy's prototype and dropped
+ * out of the trail; kept as an own key, devalue refuses to send the row to the Audit page.
+ */
+const PROTO_KEY = '__proto__ (key)';
 
 /** Strips anything that looks like a credential (by key name, and by line inside text) before it is persisted. */
 export function redact(value: unknown, depth = 0): unknown {
 	if (depth > 6) return '[deep]';
 	if (Array.isArray(value)) return value.slice(0, 50).map((v) => redact(v, depth + 1));
 	if (value && typeof value === 'object') {
-		const out: Record<string, unknown> = {};
-		for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-			out[k] = SECRET_KEYS.test(k) ? (v ? '[redacted]' : v) : redact(v, depth + 1);
-		}
-		return out;
+		return Object.fromEntries(
+			Object.entries(value as Record<string, unknown>).map(([k, v]) => [
+				k === '__proto__' ? PROTO_KEY : k,
+				SECRET_KEYS.test(k) ? (v ? '[redacted]' : v) : redact(v, depth + 1)
+			])
+		);
 	}
 	if (typeof value === 'string') {
 		const text = value.replace(SECRET_LINES, '$1[redacted]');
@@ -76,23 +84,25 @@ export async function writeAudit(env: Env, req: Request | null, ev: AuditEvent):
 			.limit(1);
 		actorName = row?.username || row?.name || '';
 	}
+	// The row is written after the game has acted, so no text it carries may stop it: what Postgres
+	// refuses (NUL, half a surrogate pair) is stored as U+FFFD, here and in detail (the jsonb type).
 	const [row] = await env.db
 		.insert(auditLog)
 		.values({
 			ts: new Date(),
 			actorId: ev.actor?.id ?? null,
-			actorName,
+			actorName: storableText(actorName),
 			serverId: ev.server?.id ?? null,
-			serverName: ev.server?.name ?? '',
+			serverName: storableText(ev.server?.name ?? ''),
 			orgId: ev.orgId ?? null,
 			category: ev.category,
-			action: ev.action,
-			target: str(ev.target, 300),
+			action: storableText(ev.action),
+			target: storableText(str(ev.target, 300)),
 			detail: ev.detail === undefined || ev.detail === null ? null : redact(ev.detail),
 			outcome: ev.outcome,
 			status: ev.status ?? null,
-			message: str(ev.message, 1000),
-			userAgent: ev.userAgent ?? (req ? userAgent(req) : ''),
+			message: storableText(str(ev.message, 1000)),
+			userAgent: storableText(ev.userAgent ?? (req ? userAgent(req) : '')),
 			durationMs: ev.durationMs ?? null
 		})
 		.returning();
@@ -168,7 +178,9 @@ export async function queryAudit(
 	const to = parseDate(q.to);
 	if (from) where.push(gte(auditLog.ts, from));
 	if (to) where.push(lte(auditLog.ts, to));
-	if (q.target) where.push(eq(auditLog.target, q.target));
+	// target <> '' as text: audit_target_idx holds only rows with a target, and a bound value alone
+	// does not prove that to a generic plan.
+	if (q.target) where.push(eq(auditLog.target, q.target), sql`${auditLog.target} <> ''`);
 	if (q.scope) {
 		const any: SQL[] = [eq(auditLog.orgId, q.scope.orgId)];
 		if (q.scope.serverIds.length) any.push(inArray(auditLog.serverId, q.scope.serverIds));
@@ -225,6 +237,27 @@ export function auditFilters(params: URLSearchParams) {
  * name wins.
  */
 export async function auditMeta(env: Env, visibleTo: AuditVisibility) {
+	const { actionRows, actorRows } = visibleTo
+		? await visibleMeta(env, visibleTo)
+		: await everyoneMeta(env);
+	const byName = (a: string, b: string) => a.localeCompare(b, undefined, { sensitivity: 'base' });
+	return {
+		actions: actionRows.sort(
+			(a, b) => a.category.localeCompare(b.category) || a.action.localeCompare(b.action)
+		),
+		actors: actorRows
+			.filter((a): a is { actorId: string; actorName: string } => !!a.actorId)
+			.sort((a, b) => byName(a.actorName, b.actorName))
+	};
+}
+
+type MetaRows = {
+	actionRows: { category: string; action: string }[];
+	actorRows: { actorId: string | null; actorName: string }[];
+};
+
+/** The dropdowns over the rows one caller may see: one pass over those rows per list. */
+async function visibleMeta(env: Env, visibleTo: NonNullable<AuditVisibility>): Promise<MetaRows> {
 	const visible = visibleWhere(visibleTo);
 	const actionRows = await env.db
 		.selectDistinctOn([auditLog.action], { category: auditLog.category, action: auditLog.action })
@@ -237,15 +270,53 @@ export async function auditMeta(env: Env, visibleTo: AuditVisibility) {
 			actorName: auditLog.actorName
 		})
 		.from(auditLog)
-		.where(visible ? and(isNotNull(auditLog.actorId), visible) : isNotNull(auditLog.actorId))
+		.where(and(isNotNull(auditLog.actorId), visible))
 		.orderBy(auditLog.actorId, desc(auditLog.id));
-	const byName = (a: string, b: string) => a.localeCompare(b, undefined, { sensitivity: 'base' });
-	return {
-		actions: actionRows.sort(
-			(a, b) => a.category.localeCompare(b.category) || a.action.localeCompare(b.action)
-		),
-		actors: actorRows
-			.filter((a): a is { actorId: string; actorName: string } => !!a.actorId)
-			.sort((a, b) => byName(a.actorName, b.actorName))
-	};
+	return { actionRows, actorRows };
+}
+
+/**
+ * The dropdowns over every row (the site owner), stepping through the indexes one distinct value
+ * at a time instead of sorting the whole trail, which is kept for good: audit_action_idx gives the
+ * actions, audit_actor_idx the actors and each actor's latest name.
+ */
+async function everyoneMeta(env: Env): Promise<MetaRows> {
+	const pairs = (await env.db.execute<{ category: string; action: string }>(sql`
+		WITH RECURSIVE pairs AS (
+			(SELECT category, action FROM audit_log ORDER BY category, action LIMIT 1)
+			UNION ALL
+			SELECT n.category, n.action FROM pairs p
+			 CROSS JOIN LATERAL (SELECT category, action FROM audit_log
+			                      WHERE (category, action) > (p.category, p.action)
+			                      ORDER BY category, action LIMIT 1) n
+		)
+		SELECT category, action FROM pairs`)) as unknown as { category: string; action: string }[];
+	// An action filed under more than one category (a rename) takes its latest row's, as the
+	// per-caller lists do; that never happens today, so this costs nothing.
+	const seen = new Map<string, number>();
+	for (const p of pairs) seen.set(p.action, (seen.get(p.action) ?? 0) + 1);
+	const actionRows: MetaRows['actionRows'] = [];
+	for (const p of pairs) {
+		if ((seen.get(p.action) ?? 0) === 1) actionRows.push(p);
+		else if (!actionRows.some((a) => a.action === p.action)) {
+			const [latest] = await env.db
+				.select({ category: auditLog.category, action: auditLog.action })
+				.from(auditLog)
+				.where(eq(auditLog.action, p.action))
+				.orderBy(desc(auditLog.id))
+				.limit(1);
+			if (latest) actionRows.push(latest);
+		}
+	}
+	const actorRows = (await env.db.execute<{ actorId: string; actorName: string }>(sql`
+		WITH RECURSIVE a AS (
+			(SELECT actor_id FROM audit_log WHERE actor_id IS NOT NULL ORDER BY actor_id LIMIT 1)
+			UNION ALL
+			SELECT (SELECT actor_id FROM audit_log WHERE actor_id > a.actor_id ORDER BY actor_id LIMIT 1)
+			  FROM a WHERE a.actor_id IS NOT NULL
+		)
+		SELECT a.actor_id AS "actorId",
+		       (SELECT actor_name FROM audit_log l WHERE l.actor_id = a.actor_id ORDER BY l.id DESC LIMIT 1) AS "actorName"
+		  FROM a WHERE a.actor_id IS NOT NULL`)) as unknown as MetaRows['actorRows'];
+	return { actionRows, actorRows };
 }

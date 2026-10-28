@@ -24,6 +24,9 @@ import { gateway } from './gateway';
 import { skipQueued } from './json-webhook-queue';
 import type { InviteStatus, InviteView, ListSyncSummary, OrgMemberView, OrgView } from '$lib/types';
 import { parseDiscordInvite } from '$lib/discord-invite';
+import { isBoardOpens } from '$lib/seasons';
+import { hiddenColumns } from '$lib/leaderboard';
+import { forgetSeasons } from './seasons';
 import {
 	BAN_MESSAGE_VARS,
 	DEFAULT_BAN_MESSAGE,
@@ -77,11 +80,16 @@ export const suspendedProblem = (org: Pick<OrgRow, 'suspendedAt'>): string | nul
 	org.suspendedAt ? 'This organisation is suspended. Contact the site owner.' : null;
 
 /** Org owners may add a server while the org is active and under its limit; the site owner always may. */
-export async function assertCanAddServer(env: Env, org: OrgRow, actor: SessionUser): Promise<void> {
+export async function assertCanAddServer(
+	env: Env,
+	org: OrgRow,
+	actor: SessionUser,
+	db: DbOrTx = env.db
+): Promise<void> {
 	if (actor.role === 'owner') return;
 	const suspended = suspendedProblem(org);
 	if (suspended) throw new ApiError(403, suspended, 'suspended');
-	const [row] = await env.db.select({ n: count() }).from(servers).where(eq(servers.orgId, org.id));
+	const [row] = await db.select({ n: count() }).from(servers).where(eq(servers.orgId, org.id));
 	const limit = serverLimitFor(env, org);
 	if ((row?.n ?? 0) >= limit)
 		throw new ApiError(
@@ -319,9 +327,23 @@ export async function updateOrg(
 		set.discordInviteUrl = url;
 		detail.discordInviteUrl = url;
 	}
+	if (body.boardOpens !== undefined) {
+		if (!isBoardOpens(body.boardOpens))
+			throw new ApiError(400, 'Pick what the boards open on: official, custom, 30d or all.');
+		set.boardOpens = body.boardOpens;
+		detail.boardOpens = body.boardOpens;
+	}
+	if (body.boardHidden !== undefined) {
+		const hidden = hiddenColumns(body.boardHidden);
+		if (!hidden)
+			throw new ApiError(400, "Leave out only the board's own columns, and never kills.");
+		set.boardHidden = hidden;
+		detail.boardHidden = hidden;
+	}
 	if (!Object.keys(set).length) throw new ApiError(400, 'Nothing to update.');
 	set.updatedAt = new Date();
 	await env.db.update(organizations).set(set).where(eq(organizations.id, org.id));
+	if (set.boardOpens !== undefined || set.boardHidden !== undefined) forgetSeasons(org.id);
 	await writeAudit(env, req, {
 		actor,
 		orgId: org.id,

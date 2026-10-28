@@ -8,6 +8,27 @@ everything else about Warcon are unchanged for every org, `COUCH_ORG_ID` include
 
 ## Why
 
+The default reserve list of `COUCH_ORG_ID` is the CouchDB boundary. Reserved-slot groups remain
+in Postgres, including their activation windows and expiry. The sync combines the default list,
+groups and server-owned slots using upstream attribution and priority rules. If CouchDB is
+unreachable, reserve removals are held back while the other sources and bans can still sync.
+
+## Upstream updates
+
+`.github/workflows/sync-upstream.yml` checks upstream every 12 hours and accepts manual runs.
+It uses the fork's dedicated write deploy key (`upstream-sync`, private half in repository secret
+`UPSTREAM_SYNC_SSH_KEY`). Unlike the default Actions token, this SSH push triggers CI and permits
+upstream changes to workflow files. A green CI run publishes the image; the existing server timer
+pulls it, backs up the database and checks health during deployment.
+
+Clean merges are pushed automatically. A conflicting merge is aborted, leaves `main` untouched,
+and fails with the conflicted paths in the run summary; it does not force a conflict policy or
+push an unreviewed resolution. Resolve those conflicts on a branch and merge its reviewed PR
+with a merge commit, so upstream ancestry is retained. The key is scoped to this fork and must
+be replaced together with its repository secret if rotated.
+
+## Why CouchDB
+
 The platform writes personal and clan reserved slots directly; Berni keeps adding/removing
 personal entries by hand through the Warcon WebUI. Both sides need to see and write the same data
 without going through each other's API, so it lives in a replicated document store both write to

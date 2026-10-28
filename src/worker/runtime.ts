@@ -15,6 +15,7 @@ import { organizations } from '$lib/server/db/schema';
 import { RELAY_PREFIX, serializeError } from '$lib/server/relay';
 import { metricsResponse } from '$lib/server/metrics';
 import type { KillView } from '$lib/types';
+import { matchFeedOf } from '$lib/server/match-feed';
 import type { Priority } from '$lib/server/dispatcher';
 
 const json = (data: unknown, status = 200) =>
@@ -58,7 +59,8 @@ export function startWorker(env: Env, label = 'worker'): ReturnType<typeof Bun.s
 	return server;
 }
 
-async function relay(env: Env, path: string, url: URL, req: Request): Promise<Response> {
+/** One relay call, after the bearer check in startWorker (exported for tests). */
+export async function relay(env: Env, path: string, url: URL, req: Request): Promise<Response> {
 	const body =
 		req.method === 'POST' ? ((await req.json().catch(() => ({}))) as Record<string, unknown>) : {};
 	const serverOf = async (id: unknown) => {
@@ -83,7 +85,10 @@ async function relay(env: Env, path: string, url: URL, req: Request): Promise<Re
 			);
 		}
 		case '/live': {
-			const ids = (url.searchParams.get('ids') || '').split(',').filter(Boolean);
+			// GET ?ids=a,b, or POST { ids } for a list too long for a URL (a fleet of hundreds).
+			const ids = Array.isArray(body.ids)
+				? body.ids.map(String)
+				: (url.searchParams.get('ids') || '').split(',').filter(Boolean);
 			return ok(Object.fromEntries(await localGateway.live(env, ids)));
 		}
 		case '/interest':
@@ -127,6 +132,9 @@ async function relay(env: Env, path: string, url: URL, req: Request): Promise<Re
 				String(body.serverId),
 				Array.isArray(body.kills) ? (body.kills as KillView[]) : []
 			);
+			return ok(null);
+		case '/match-feed':
+			localGateway.matchFeed(env, String(body.serverId), matchFeedOf(body.feed));
 			return ok(null);
 		case '/events': {
 			const encoder = new TextEncoder();

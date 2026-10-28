@@ -267,6 +267,118 @@
       "when": 1790877877865,
       "tag": "0036_player_action_capabilities",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1791069654398,
+      "tag": "0037_read_and_write_indexes",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1791109561028,
+      "tag": "0038_player_totals",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1791142161935,
+      "tag": "0039_player_days",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1791305520229,
+      "tag": "0040_seasons",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1791324194967,
+      "tag": "0041_org_ban_reasons",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1791329296794,
+      "tag": "0042_player_aliases",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1791332646106,
+      "tag": "0043_org_board_hidden",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1791381639365,
+      "tag": "0044_webhook_trigger_kinds",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1791506691049,
+      "tag": "0045_reserved_flags",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1791507471276,
+      "tag": "0046_slot_groups",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1791569710555,
+      "tag": "0047_match_players_from_feed",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1791586148171,
+      "tag": "0048_restart_schedule",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1792065256438,
+      "tag": "0049_feed_match_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1792156935138,
+      "tag": "0050_org_saved_messages",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1792329889527,
+      "tag": "0051_feed_token_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1792362823266,
+      "tag": "0052_org_map_sets",
+      "breakpoints": true
     }
   ]
 }

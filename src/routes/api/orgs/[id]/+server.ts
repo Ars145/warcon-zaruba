@@ -1,6 +1,8 @@
 import { getEnv } from '$lib/server/env';
 import { apiJson, param, readJson, route } from '$lib/server/http';
 import { requireOrgRole, requireOwner } from '$lib/server/access';
+import { setBanReasons } from '$lib/server/ban-reasons';
+import { setSavedMessages } from '$lib/server/saved-messages';
 import {
 	deleteOrg,
 	setBanMessage,
@@ -10,8 +12,9 @@ import {
 } from '$lib/server/orgs';
 
 /**
- * {name} or {discordInviteUrl} or {membersReserved} or {banMessage} for org owners; {serverLimit, suspended,
- * reason, allowPublicStatus, allowPublicLeaderboards} for the site owner only.
+ * {name} or {discordInviteUrl} or {boardOpens} or {boardHidden} or {membersReserved} or
+ * {banMessage} or {banReasons} or {savedMessages} for org owners; {serverLimit, suspended, reason,
+ * allowPublicStatus, allowPublicLeaderboards} for the site owner only.
  */
 export const PATCH = route(async (event) => {
 	const env = getEnv();
@@ -31,6 +34,12 @@ export const PATCH = route(async (event) => {
 	} else if (body.banMessage !== undefined) {
 		const banMessage = await setBanMessage(env, event.request, user, org, body.banMessage);
 		return apiJson({ ok: true, banMessage });
+	} else if (body.banReasons !== undefined) {
+		const banReasons = await setBanReasons(env, event.request, user, org, body.banReasons);
+		return apiJson({ ok: true, banReasons });
+	} else if (body.savedMessages !== undefined) {
+		const savedMessages = await setSavedMessages(env, event.request, user, org, body.savedMessages);
+		return apiJson({ ok: true, savedMessages });
 	} else {
 		await updateOrg(env, event.request, user, org, body);
 	}
