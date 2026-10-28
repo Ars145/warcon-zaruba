@@ -5,7 +5,7 @@
 // ban list that the panel's own enforcement removes the player with at the next look, written only
 // while the worker is owned. A kill kills the player, then whispers them, soon or not at all. From 0 m every kill with the chosen weapons counts, one without a
 // distance too. Nothing a person or a key can call runs the rule's ban or flag.
-import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { and, eq, isNull } from 'drizzle-orm';
 import { join } from 'node:path';
 import type { Env } from '$lib/server/env';
@@ -149,6 +149,10 @@ describe.skipIf(!hasTestDb)('Kill distance rule, live', () => {
 			};
 			return client;
 		});
+	});
+	// Each test models an active worker. The whole suite can outlive its 15-second lease.
+	beforeEach(async () => {
+		expect(await acquireOrRenew(env, 'kill-distance test')).toBe(true);
 	});
 	afterAll(async () => {
 		await stopDelivery();
