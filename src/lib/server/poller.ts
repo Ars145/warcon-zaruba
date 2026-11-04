@@ -39,7 +39,12 @@ import {
 import { phaseOffset, pickDue, withHold } from './poller-schedule';
 import { rollupSamples } from './rollups';
 import { liveView } from './live';
-import { feedDemoKills, forgetKillDistance, forgetNameChange } from './feed-events';
+import {
+	feedDemoKills,
+	forgetDeathWhispers,
+	forgetKillDistance,
+	forgetNameChange
+} from './feed-events';
 import { forgetBounties } from './bounty';
 import { startAliasFill } from './aliases';
 import { forLog, publicMessage } from './http';
@@ -245,6 +250,7 @@ async function beat(env: Env): Promise<void> {
 			forgetRemembered();
 			forgetKillDistance();
 			forgetNameChange();
+			forgetDeathWhispers();
 		}
 		// Once, in the background: the names the kill feed showed before they were recorded (a fill
 		// that did not finish is tried again a while later).
@@ -297,6 +303,7 @@ async function refreshRoster(env: Env, s: Scheduler, now: number): Promise<void>
 			forgetMemory(m.server.id);
 			forgetKillDistance(m.server.id);
 			forgetNameChange(m.server.id);
+			forgetDeathWhispers(m.server.id);
 			forgetBounties(m.server.id);
 		}
 	if (now - s.expiryAt >= EXPIRY_MS) {
