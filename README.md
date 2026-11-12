@@ -91,9 +91,27 @@ What is in the box:
   slots, bans, score tick, sponsor image, a live cash-in-play chart for the current match, and the
   full `ServerSettings.ini` config document as a typed form (or the raw file) with validate/apply,
   revision conflict handling and copy/download.
-- **A modifier on every map**: the Map rotation tab adds Infantry Only or Hardcore to every rotation
-  entry whose map offers it, or takes it off them all, in one apply. It is there where the rotation
-  is edited through the config document (every live build so far), so it needs Config & settings.
+- **A modifier on every map**: the Map rotation tab adds Infantry Only, Hardcore or Limited Gear to
+  every rotation entry whose map offers it, or takes it off them all, in one apply. It is there
+  where the rotation is edited through the config document (every live build so far), so it needs
+  Config & settings.
+- **Rotation entries the server would skip, flagged**: a server skips a rotation entry that names a
+  map, game mode, modifier or lighting it does not list, and what it lists is its hosting
+  provider's to set (`AllowedMaps` and `AllowedExperiences` in the provider's `Game.ini`, which
+  `ServerSettings.ini` cannot add to). The Map rotation tab marks such an entry _not listed_ and
+  names what is missing, so a host knows what to ask the provider for; it also marks a lighting
+  the entry's map does not take (Sabatulo takes four: Day Clear, Day Late Clear, Day Late Gray and
+  Day Late Rain), an entry with Limited Gear and no game mode, which starts no match, and an entry
+  the server itself reports as denied. The map pickers offer a map only the lightings it takes.
+  A server takes new lists when it restarts, so the panel reads them again at the first page
+  opened once it has seen the restart (on builds that report their uptime; otherwise within the
+  hour), and a map the host has just been given is there then. While a restarted server cannot be
+  reached, its pages stay on the lists read before.
+- **The game's welcome popup, with a preview**: from Season 3 a server shows each player a popup
+  of its own text when they first deploy. The Config tab edits that text beside the popup as
+  players will read it, with buttons for its styles, colours and sizes, and names a line the game
+  would refuse (too long, a link, a tag it does not keep) before anything is sent. See
+  [Welcome popup](#welcome-popup).
 - **Map sets**: an organisation keeps whole rotations under a name, say an infantry set and a
   standard one, and the Map rotation tab loads one in place of the server's rotation in one apply,
   then switches back the same way. Owners save a server's rotation as a set, or paste one in from
@@ -111,7 +129,12 @@ What is in the box:
   `Demo Clan #1 | 34-27-30`, and keeps it current, at most once a minute.
 - **Weather that changes mid-match**: a [Weather cycle](#automation-triggers) rule changes the
   time of day and weather every so many minutes, in turn or at random, with no map change or
-  restart; rain only where the server allows it.
+  restart; rain only where the server allows it, and on Sabatulo only the lightings it takes.
+- **In-game chat, live**: on Season 3 servers a **Chat** tab shows what players type as they type
+  it: the channel, the side, the name the others saw (the hidden name of a player in anonymous
+  mode), and where the game's chat filter changed a line, what was typed. It is for those an
+  organisation's owners give _Read chat_, once an owner has accepted the game's chat terms for the
+  server on that tab, and nothing of it is stored. See [In-game chat](#in-game-chat).
 - **Group whispers**: one message to everyone on a faction, from the Overview's message box, or to
   the players ticked on the Players tab. The game has no route for it, so Warcon whispers each of
   them in turn and says who got it.
@@ -336,6 +359,7 @@ site owner hold every capability on every server in scope.
 | Capability         | Unlocks                                                                                                                                                                                                    | viewer | operator | admin |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | -------- | ----- |
 | View               | what is happening on the server: status, players, kills, rotation, who is banned and who holds a reserved slot, analytics, leaderboards, player stats. Every role has it.                                  | ✓      | ✓        | ✓     |
+| Read chat          | the in-game chat on the server's Chat tab (Season 3), live, once an owner has accepted the game's chat terms; nothing of it is kept. No built-in role starts with it, and an API key cannot hold it        |        |          |       |
 | Chat               | broadcast; whisper one player, several, or everyone on a faction; pick from the organisation's saved messages                                                                                              |        | ✓        | ✓     |
 | Kick               | kick a player; the rules that kick or flag players                                                                                                                                                         |        | ✓        | ✓     |
 | Kill               | kill a player's character; AFK protection, and a Kill distance watch that kills                                                                                                                            |        | ✓        | ✓     |
@@ -352,7 +376,11 @@ site owner hold every capability on every server in scope.
 | Config & settings  | read, validate and apply the config document; score tick, sponsor image, connection test, the game's raw status                                                                                            |        |          | ✓     |
 | Automation         | see the triggers and what they did; create, edit, dry-run and delete them; a player's Seeding reward progress                                                                                              |        |          | ✓     |
 | Audit trail        | everyone's actions on the server in the audit log, not just your own; the game server's own RCON log                                                                                                       |        |          | ✓     |
-| Raw RCON           | any /v1 route on the game server directly, except the config document                                                                                                                                      |        |          | ✓     |
+| Raw RCON           | any /v1 route on the game server directly, except the config document and the chat                                                                                                                         |        |          | ✓     |
+
+_Read chat_ is the one capability no built-in role starts with, `admin` included, and the one an
+API key can never hold: what players type is shown to the people an organisation's owners choose,
+under the game's own chat terms (see [In-game chat](#in-game-chat)).
 
 View is what is happening on the server and nothing about how it is run. The config document, the
 triggers, staff notes on players and the game's RCON log each need the capability that manages
@@ -368,7 +396,8 @@ to change the value. A copied or downloaded document carries the placeholder too
 backup of those lines. Raw RCON does not serve `/v1/config`;
 the `config`, `configValidate` and `configApply` actions are the way to the document. Nor does it
 serve `/v1/audit`: the `serverLog` action does, with the peers' addresses blank for everyone but
-the site owner, API keys included.
+the site owner, API keys included. Nor `/v1/chat` and its terms: the server's Chat tab is the way
+to those, for those who hold _Read chat_.
 
 Beyond server roles, an **org owner** adds, edits and removes the org's servers, manages members,
 roles, per-server grants and invite links and Discord webhooks, writes the
@@ -416,10 +445,11 @@ things up again. New accounts start with a passkey or a provider (the password f
 link). Existing accounts keep working: a banner asks for the missing pieces. How hard the panel
 pushes is the site owner's **Settings → Sign-in rules** choice: _Advise only_ (the default: the
 banner and nothing more), _Require for privileged accounts_ (site owners, organisation owners and
-anyone whose server role can ban, change config, run automation or use raw RCON must comply;
-guests and viewers are left alone), or _Require for everyone_. Where required, an account that
-still falls short after its grace period (14 days for owners, 30 for members, both editable,
-counted from the first sign-in after this release) is limited to its account page until it does.
+anyone whose server role can ban, change config, run automation, use raw RCON or read the in-game
+chat must comply; guests and viewers are left alone), or _Require for everyone_. Where required,
+an account that still falls short after its grace period (14 days for owners, 30 for members,
+both editable, counted from the first sign-in after this release) is limited to its account page
+until it does.
 
 When every method is gone, whoever runs the box resets the account from a shell (the container
 image has it too):
@@ -486,6 +516,83 @@ tab's document editing does, and it is there on builds that edit the rotation th
 document (every live build so far). Whoever holds _Config & settings_ on a server sees the sets
 there, API keys with it included; only an owner saves, renames or deletes one, never a key, and
 each change is in the organisation's audit trail with the set's name and size.
+
+### Welcome popup
+
+From Season 3 (12 November 2026) the game has a welcome popup of its own: a server shows each
+player its text in a popup, once, when they first deploy. It is not the
+[Welcome whisper](#automation-triggers) rule, which is the panel's and whispers a line of chat; a
+server can have both.
+
+The popup is four keys of the config document, beside the team balance ones
+(`[/Script/WDGame.WDGameStateSession]`), which the game reads when a match starts, so a change
+shows from the next match. The **Config** tab's form has them under **Welcome popup**:
+
+- **Show the popup** (`bServerWelcomeMessageEnabled`), **Close countdown**
+  (`ServerWelcomeMessageCloseDelaySeconds`: seconds the popup's Close button stays locked, 0 to
+  60, so players read it first) and **Skip for streamers**
+  (`bServerWelcomeMessageSkipForStreamers`: players with streamer mode on do not get it);
+- **Text** (`ServerWelcomeMessageLines`): a text box with one line for each line of the popup,
+  beside the popup as players will read it. An empty line leaves a gap, a long line wraps inside
+  the popup, and the popup scrolls when the text is taller than it.
+
+The text is written in the game's own markup:
+
+| Write                                                      | For                                                                                                       |
+| ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `<Header>Welcome to Dogpile</>`                            | the popup's title style                                                                                   |
+| `<Bold>No cheating</>`, `<Italic>Have fun</>`              | bold, italic                                                                                              |
+| `<text color="#FF4D4D" size="20" fontface="Bold">RULES</>` | a look of one's own: any mix of a colour as `#RRGGBB`, a size from 8 to 24 and a face, `Bold` or `Italic` |
+| `&lt;` `&gt;` `&amp;` `&quot;`                             | the characters `<` `>` `&` `"` themselves                                                                 |
+
+Every tag is closed by `</>`, whatever its name, and several can stand on one line
+(`Keep chat in <text color="#7FD6FF">English</> and be respectful`). A tag does not go inside
+another, and a Header takes no colour or size: a coloured title is
+`<text size="20" fontface="Bold" color="#FF4D4D">SERVER RULES</>`. Nothing in the popup can be
+clicked: a link, like any other tag, shows as typed.
+
+**Header**, **Bold**, **Italic**, **Colour**, **Size** and **Plain** write the tags around the
+selection, or around the whole line the caret is on, and keep to those rules: a tag the selection
+cuts through is closed before it and opened again after it, bold on coloured text keeps the
+colour, and a colour on a Header makes it that coloured title. Ctrl+B and Ctrl+I do bold and
+italic, and undo steps back over a style as over anything typed. The preview draws plain text at
+14 and a Header at 20, as the official console does; the game has its own font, so it shows sizes
+and colours against each other, not the popup to the pixel.
+
+Sent over RCON, a document is refused by the game when its popup has more than 128 lines, a line
+with more than 128 visible characters (tags do not count, and `&lt;` counts as one), a tag with
+attributes that is not `<text>` (a link, an image, a Header with a colour), a `<text>` attribute
+other than `color`, `size` and `fontface`, or a size that is not a whole number from 8 to 24. (In
+a file edited on the host nothing is refused: the game cuts a line at the limit and shows such a
+tag as typed.) The editor marks such a line as it is typed and says what is wrong with it, and
+**Apply to server** names it and asks before sending text that has been changed with one in it:
+the game has the last word on its own rules, and its refusal is shown line by line.
+**Keep as typed** rewrites a refused tag with `&lt;` and `&gt;`, so that it reads as it was typed
+and the game takes it. Where a server's status reports limits of its own, those are the ones
+checked against.
+
+The editor also notes what the game takes and then shows as typed, which is seldom what was
+meant: a tag closed by name as in HTML (`</Bold>`), one left open, one inside another, one whose
+quotes turned curly on the way through a chat message, a style the popup does not have, a colour
+that is not `#RRGGBB`. **Close with </>** and **Straighten quotes** put the first and the fourth
+right. A `<` that was never a tag (`<3`, `a < b`) shows as typed too, as it was meant to.
+
+In the file, each line of the popup is one `.ServerWelcomeMessageLines=` line under a
+`!ServerWelcomeMessageLines=ClearArray`, so a blank line, or the same line twice, stays as it was
+written. A line the game's reader would not read back whole (one that starts with a quote, has a
+space at either end, ends in a backslash, or holds `//`, a brace or a bar) goes in quotes, with
+its own quotes and backslashes escaped by a backslash, as the official console writes it; the
+**Raw file** view shows the lines that way.
+
+The popup needs _Config & settings_, like the rest of the document, and nothing more. An API key
+with it sets the popup the same way, through the `config` and `configApply`
+[game actions](#game-actions): read the document, change those keys, send it back with its
+revision. The limits a server reports are in the answer of `status` asked with `raw=1`, under
+`raw.welcomeMessage`, which is for _Config & settings_ too.
+
+A server not yet on Season 3 has no popup, and drops these keys when a file with them is applied.
+The form says so above the fields when a server shows no sign of one: no limits in its status,
+none of the keys in its config.
 
 ### Announcements
 
@@ -782,7 +889,7 @@ opens the rule it has.
 | AFK protection         | While the server seeds (someone on, fewer than the rule's count, 20 by default, and no side has scored), kills everyone on every N minutes (3 by default, 2 to 10), so the game's idle kick, which also runs while a server waits for its players, does not remove the seeders. The panel cannot tell who is idle, so players are killed too. Set the count no higher than the players the server's match starts at. A side scoring or the count being reached turns it off until the server has sat empty for 10 minutes or the game restarts, so a dip below the count mid-match, or the empty list of a map change, never starts it again; switched off and on, it starts from what the server shows then, so switching it on during a match nobody has scored in yet takes that match for seeding until the first score. Switching it off drops a round not yet sent. Its row says whether it is active or paused, and why. Optional broadcasts after each round and once when the match it kept the seeders for goes live (`{goal}` is the count it turns off at). A round is one action in the trail, kept off Discord unless it fails; it goes only within 30 seconds of being decided, while the last look still showed the server seeding, and players who left since are passed over. One rule per server.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | Bounty                 | Puts a bounty on a player who gets N kills in a row without dying in one match (15 by default) while at least M players are on (20 by default), and announces it to the server. A run is the match page's Best streak: a kill of another player adds to it, a team kill or a suicide does not, and any death ends it. One bounty is open at a time; once it ends, the next goes to whoever is on a run of N or more, at their next kill. The first enemy to kill the marked player claims it: the claim can be announced and the claimer whispered, and they get a reserved slot for D days on this server or on every server in the organisation, or nothing but the announcement. A team kill, a suicide or the environment never ends a bounty, nor a kill between players whose sides the panel has not seen, so nobody clears their own or has a friend do it. It lapses when the marked player leaves (gone past the minute's leave grace, so the empty list of a map change is no leave), when the match ends, or when the panel has lost sight of the server for a few looks (its daily restart is one such time), and runs start over when the panel sees the match end. A claimer who already holds a slot on that list keeps whichever lasts longer. The open bounty shows on the rule's row and outlives a worker restart, which forgets the runs (one from a match that ended meanwhile lapses at the next kill of its player); saving the rule or switching it off calls it off. A **Bounties** box on a [Discord webhook](#discord-webhooks) posts a card when one is set, claimed or lapses, with names and never a SteamID, for a players' channel. Needs the [kill feed](#kill-feed), acted on as each kill arrives; like every feed rule it believes the feed, and a friend on the other side can claim a bounty. The dry run replays the day's kills against the player counts of the server's samples. One rule per server.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | Rotation shuffle       | Puts the rotation in a new order once a day. An Ordered rotation of every map, time of day and control zone starts from the top after each restart, so the server plays the same entries every day; a Random one can put a map on several times in a row. The maps take turns in the order the rule sets, every match a different map (Ozeti, Bakurani, Zestafona, Ozeti…); among each map's own entries its control zones take turns and its times of day come in a new order. Whole rounds of the maps run for as long as the rest can still be kept apart, so a map with fewer entries drops out only near the end of the list, and a map with more than half the entries plays in runs as even as they can be. The rule writes the rotation in the config document (its entries, and the mode set to Ordered; against the revision read, once more after a conflict) once when it is saved, then once a run: in the last round before the server's [game restart](#game-restart) (timed from the uptime the header shows), so the server comes back up on the new order starting with the map that follows the one on, or straight after a restart it could not see coming (a set restart time, a crash, one from the host's panel). Where a live server goes next when its rotation is rewritten mid-match has not been seen, so the new order is turned, by less than a round, to put the map that follows the one on wherever the server may take its next entry from; the server's rotation is then read back, and turned once more if it does not have that map next. The result names the maps and the next one, and a refusal is told in the panel's own words. A rotation that is switched off, or has fewer than two entries, is left alone, and a shuffle the server refuses is not sent again before the next one is due. Its preview shows when the next shuffle is due. One rule per server.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| Weather cycle          | Changes the time of day and weather of the match being played every N minutes (30 by default, 5 to 1440) while at least M players are on (1 by default), with no map change or restart: the game's own lighting route, `PUT /v1/world/lighting`, which the `setWeather` action sends. It goes through the lightings it is given in its order, round and round, or picks one of them at random; either way never the one already on, so every change shows. The first change comes as soon as it is switched on. A new map comes up on its rotation entry's own lighting, and the rule changes that at its next turn. The editor lists the lightings the server reports (rain is there only where the server allows it), and the server's list is read again just before each change: a lighting it does not list is not sent, and stays under Recent actions as skipped, with the reason. Every change is under Recent actions and in the audit trail, with the lighting it left and the one it set, and a refusal is told in the panel's own words; Discord hears only of the ones that fail. Switching the rule off, or editing it, drops a change it has not sent. Its dry run replays the last 24 hours of samples. One rule per server.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| Weather cycle          | Changes the time of day and weather of the match being played every N minutes (30 by default, 5 to 1440) while at least M players are on (1 by default), with no map change or restart: the game's own lighting route, `PUT /v1/world/lighting`, which the `setWeather` action sends. It goes through the lightings it is given in its order, round and round, or picks one of them at random; either way never the one already on, so every change shows. The first change comes as soon as it is switched on. A new map comes up on its rotation entry's own lighting, and the rule changes that at its next turn. The editor lists the lightings the server reports (rain is there only where the server allows it), and the server's list is read again just before each change: a lighting it does not list is not sent, and stays under Recent actions as skipped, with the reason. While the server is on a map that takes only some of the lightings (Sabatulo takes Day Clear, Day Late Clear, Day Late Gray and Day Late Rain), the rule passes over the others, and makes no change there if it has none of them; a change decided just before the server moved to such a map is held back, and stays under Recent actions as skipped. Every change is under Recent actions and in the audit trail, with the lighting it left and the one it set, and a refusal is told in the panel's own words; Discord hears only of the ones that fail. Switching the rule off, or editing it, drops a change it has not sent. Its dry run replays the last 24 hours of samples. One rule per server.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | Live server name       | Appends a short live part to the server's name in the browser: `Demo Clan #1 \| Infantry Only` with `\| {scoreline}` appended reads `Demo Clan #1 \| Infantry Only \| 34-27-30`. `{scoreline}` is each faction's score in the order the game lists them, joined by dashes (0-0-0 as a new match starts); `{map}`, `{players}` and `{max}` are the map, the player count and the limit. Nothing a player types goes in, and the name is written on one line. Whenever the name the server shows differs, the worker changes that one line of the config document (ServerName, against the revision read; a conflict waits for the next try), which the game applies at once: at most once a minute, and the same name again at most every ten minutes. The writes are not actions: none shows under Recent actions, in the audit trail or on Discord. The rule's line shows the name it last wrote and when, or why it could not, in the panel's own words (a name pinned by `-RCON_FixedServerName` on the server's command line cannot be changed from the panel; that, a read-only document or a build without the route is tried again every ten minutes). Switched off or deleted, the rule puts the name back without the appended part, within a minute, as long as the config document still holds the name it last wrote: a name someone set since stands (a worker restarted in between has forgotten it: set the name on the Config tab). While it is on, the Config tab shows the name read-only, and an Apply that meets only the rule's change of the name goes through over it. The editor shows what the name reads as now. One rule per server.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
 **Dry run** replays the last 24 hours of the server's own history (joins, player counts, empty
@@ -821,6 +928,41 @@ goes with `…` in their place. What became of a rule's whisper or kick is told 
 words under Recent actions, in the audit trail and on Discord (`Whispered [ABC] Night Owl.`,
 `Refused: the player is not on the server.`), never the game's, so what it tells a player reaches
 that player alone. A dry run shows `…` for the stats and for whatever else it does not replay.
+
+### In-game chat
+
+Season 3 servers (build CL-533689 on) serve the in-game chat over RCON, and Warcon shows it on the
+server's **Chat** tab: each line as it is typed, newest first, with its time, its channel (Team,
+Global, Squad, Proximity, Vehicle), the side and the name the other players saw. A player in the
+game's anonymous mode shows under their hidden name with an _anon_ mark; a line the game's chat
+filter changed is marked _filtered_; a ping callout ("Attack here") is marked _ping_. Click a line
+for the rest: the player's own name with a link to their page, their hidden name, their SteamID
+where the game gives one, and what they typed beside what was shown. The lines can be filtered by
+channel, and by name, text or SteamID.
+
+**The game's chat terms come first.** A server shows its chat only once its chat terms have been
+accepted for it, and until then it holds back its event feed as well: no kills reach the panel, so
+the [kill feed](#kill-feed) and the rules that go by it stand still (the Config tab's Kill feed
+card says so). The Chat tab shows the terms as the server sends them, and an owner of the
+organisation accepts them there, for the version shown. That is the organisation's own agreement,
+so it is for its owners, in person (and for the site owner, who can do anything on any server): no
+role can be given it and no API key can do it. The audit trail records who accepted which version,
+and each refused attempt by a person or key that can see the server. Whether a server keeps an
+acceptance across a restart has not been seen yet.
+
+**Who reads it.** _Read chat_ is a capability of its own. An organisation's owners hold it, as
+they hold every capability (so does the site owner, on every server), and give it to a role on the
+**Roles** tab; no built-in role starts with it, `admin` included, and an API key cannot hold it.
+The Chat tab is there for those who hold it, on servers whose build serves the chat. Taken from a
+role again, it closes that role's open Chat tabs at their next read. Where the site's sign-in
+rules are _Require for privileged accounts_, an account that reads chat is one of those.
+
+**Nothing is kept.** The lines are read from the game through the panel every four seconds while
+a Chat tab is open and showing (a request to the game per tab each time, a few when many lines are
+waiting; they take their turn behind commands and rules, and the tab waits longer between tries
+while reads fail) and live in that browser tab alone. The panel writes them to no table, puts
+nothing of them in the audit trail or on Discord, and they are gone when the tab closes. The game
+itself keeps only the last lines of the map being played. Raw RCON does not serve the chat routes.
 
 ### Kill feed
 
@@ -876,6 +1018,13 @@ the site alone), 404 a wrong path under `/api/ingest/`, 403 a wrong path elsewhe
 warning then names that fault instead of the general checks, as it does when the feed is off in
 the file, lists no endpoint, lists only other services, gets no answer at all, or is taken in under
 another server's token (the panel accepts the posts while nothing comes in for this server).
+
+From Season 3 the report also says when the game itself is holding the feed back: a server sends
+no events at all, kills included, until its chat terms have been accepted, which an owner of the
+organisation does on the server's Chat tab (see [In-game chat](#in-game-chat)). A silent feed's
+warning then says so rather
+than faulting the lines in the file (a feed switched off in the file is still told first), and
+**What the game reports** shows the feed as held back whatever the panel's own verdict is.
 
 Season 2 also posts the match's state as it changes, the match's result when it ends, and players
 joining and leaving. The state shows on the server's Overview as **Match** (loading the map,
@@ -1058,13 +1207,13 @@ A board shows one season at a time, or a range: the **Showing** menu above it li
 WARDOGS seasons, the organisation's own, and the 7, 30 and 90-day and all-time ranges. A season
 is a name and a start, and runs until the next season of its kind starts. The official ones ship
 with Warcon, each from the moment it launched: Season 1 from the early-access release on
-10 September 2026, Season 2 from 15 October 2026 at 16:00 UTC. A new one is added when Bulkhead
-announces it, and starts on its real date even when it is added late. An org owner adds the
-organisation's own on its **Seasons** tab, each from midnight UTC on a day still to come; a
-season that has started can be renamed but not moved or deleted, so its standings stay put, and
-to end one early you start the next. Nothing is reset or deleted: a season's board is a window
-over the history Warcon keeps anyway, so a past season's board is still there and read-only by
-nature.
+10 September 2026, Season 2 from 15 October 2026 at 16:00 UTC, Season 3 from 12 November 2026 at
+08:00 UTC. A new one is added when Bulkhead announces it, and starts on its real date even when it
+is added late. An org owner adds the organisation's own on its **Seasons** tab, each from midnight
+UTC on a day still to come; a season that has started can be renamed but not moved or deleted, so
+its standings stay put, and to end one early you start the next. Nothing is reset or deleted: a
+season's board is a window over the history Warcon keeps anyway, so a past season's board is still
+there and read-only by nature.
 
 The Seasons tab also sets what the organisation's boards **open on**, in the panel and on the
 public pages: the current official season (the default), the organisation's current season (the
@@ -1213,8 +1362,9 @@ organisation; they are allowed for every organisation unless closed there.
 
 A Discord bot or a script talks to the same `/api` routes as the panel, with an organisation
 **API key** instead of a session. An org owner mints one on the org page under **API keys**: a
-label, the capabilities it carries (the same list roles use, see [Roles](#roles)), which servers it
-may touch (or every server the org has, now and later), and an optional expiry. The token is shown
+label, the capabilities it carries (the same list roles use, see [Roles](#roles), but for _Read
+chat_, which is for people), which servers it may touch (or every server the org has, now and
+later), and an optional expiry. The token is shown
 once; only its hash is stored. Everything a key changes is audited under `<label> (API key)`, and
 so is every game action it is refused (game reads too, where `AUDIT_LOG_READS` is on). Revoking a
 key on the org page ends it at once; a suspended organisation's keys stop working with it.
@@ -1876,7 +2026,8 @@ src/lib/server/analytics.ts    analytics queries per server and range
 src/lib/server/audit.ts        audit writer/query with secret redaction
 src/lib/server/mockgame.ts     in-process imitation of the WDRCON API for demo/testing
 src/lib/config-doc.ts / config-fields.ts   ServerSettings.ini parser and line-level setter (pure, tested) / the keys the config form manages
-src/lib/components/            Modal, MapPicker, PopulationChart, CashChart, ConfigForm, Toasts, badges…
+src/lib/welcome-text.ts / welcome-doc.ts   the game's welcome popup: its markup, limits and preview (pure, tested) / its lines in the config document
+src/lib/components/            Modal, MapPicker, PopulationChart, CashChart, ConfigForm, WelcomeEditor, Toasts, badges…
 src/routes/(auth)/             /sign-in (+ /verify), /setup, /join/[token], /recover (form actions)     src/routes/sign-out
 src/routes/api/passkeys/       WebAuthn ceremonies relayed to Better Auth; src/routes/auth/steam/ the Steam callback
 src/routes/(app)/              dashboard, /players, /server/[id]/{,players,players/[steamId],bans,rotation,config,automation,analytics,leaderboard,log,settings}, /audit, /orgs, /orgs/[id]/{,bans,reserved,seasons}, /admin/{,users,settings}, /servers, /account
@@ -1950,7 +2101,10 @@ experiences alternators catalog rotation bans reserved sponsor` (View) ·
 changeMap setWeather setNextMap` (Match control) · `rotationAdd rotationRemove rotationMove
 rotationReorder` (Live rotation) · `ban unban` (Bans) · `reservedAdd reservedRemove` (Reserved
 slots) · `rotationSave rotationSettings` (Save rotation) · `config feed settings configValidate configApply` (Config &
-settings) · `serverLog` (Audit trail) · `raw` (Raw RCON).
+settings) · `serverLog` (Audit trail) · `raw` (Raw RCON). `chatTerms` and `chat` need _Read chat_,
+which a key cannot hold, and `chatTermsAccept` is for an owner of the organisation, in person
+(`owner: true` in `GET /api/actions`): the three serve the panel's Chat tab (see
+[In-game chat](#in-game-chat)) and answer a key 403.
 
 ## Notes and limits
 
