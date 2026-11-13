@@ -25,11 +25,37 @@ interface Player {
 	name: string;
 	steamId: string;
 	faction: string;
+	/** Season 3: the name the game made up for the player, which the others see while `anonymous` */
+	hiddenName: string;
+	anonymous: boolean;
 	kills: number;
 	deaths: number;
 	cash: number;
 	pingMs: number;
 }
+
+// Season 3's anonymous mode, as a live server's player list had it on 2026-11-12: every player
+// with a hidden name of one short word, the same one for more than one player now and then, and
+// about one player in a hundred with the mode on. The demo turns it on for more of them, among
+// the players who drift in (never a seeded regular, whom tests name), so the panel has some to show.
+const HIDDEN_NAMES = [
+	'Falcon',
+	'Badger',
+	'Heron',
+	'Otter',
+	'Weasel',
+	'Lynx',
+	'Marten',
+	'Raven',
+	'Ibex',
+	'Osprey',
+	'Jackal'
+];
+/** A player's hidden name, the same each time they join: from their SteamID. */
+const hiddenNameFor = (steamId: string): string =>
+	HIDDEN_NAMES[Number(BigInt(steamId) % BigInt(HIDDEN_NAMES.length))];
+/** Every third player to drift in has anonymous mode on. */
+const joinsAnonymous = (joiner: number): boolean => joiner % 3 === 2;
 interface Ban {
 	steamId: string;
 	bannedAtUtc: string;
@@ -313,9 +339,17 @@ const CHAT_SCRIPT: [string, string, string, boolean][] = [
 	['Global', 'gg that was close', 'gg that was close', false],
 	['Proximity', 'over here, behind the wall', 'over here, behind the wall', false],
 	['Vehicle', 'hold on, taking the hill', 'hold on, taking the hill', false],
-	['Team', 'Attack here', 'Attack here', true]
+	['Team', 'Attack here', 'Attack here', true],
+	// what players type to the server: a Chat command and a Staff call rule answer these two, and
+	// on a server with neither they are chat like any other line
+	['Team', '!rules', '!rules', false],
+	[
+		'Global',
+		'!admin the tank at the north point is team killing',
+		'!admin the tank at the north point is team killing',
+		false
+	]
 ];
-const HIDDEN_NAMES = ['Amber Falcon', 'Quiet Badger', 'Copper Heron', 'Jade Otter', 'Dusty Weasel'];
 const FACTION_LABELS = ['RED', 'BLU', 'GRN'];
 
 /** Adds the demo lines that fell due since the last one: nothing before the terms are accepted. */
@@ -339,15 +373,48 @@ function chatUpTo(s: State, now: number): void {
 			faction: FACTION_LABELS[side] ?? null,
 			steamId: who.steamId || null,
 			realName: who.name,
-			hiddenName: HIDDEN_NAMES[c.seq % HIDDEN_NAMES.length],
-			// every third speaker is in anonymous mode: the others see the hidden name only
-			anonymous: c.seq % 3 === 0,
+			// as the player list has them: the others see the hidden name of a speaker in anonymous mode
+			hiddenName: who.hiddenName,
+			anonymous: who.anonymous,
 			text,
 			rawText,
 			ping
 		});
 	}
 	if (c.lines.length > CHAT_KEEP) c.lines.splice(0, c.lines.length - CHAT_KEEP);
+}
+
+/**
+ * One of the demo's players typing a line in its chat, for tests: `steamId` says who (the first on
+ * the list when it names nobody on). Nothing before the chat terms are accepted, as on a real
+ * server. Returns the line's number, 0 when no line was added.
+ */
+export function mockSay(
+	key: string,
+	text: string,
+	opts: { steamId?: string; channel?: string; typed?: string; anonymous?: boolean } = {}
+): number {
+	const s = stateFor(key);
+	const c = s.chat;
+	const who = s.players.find((p) => p.steamId === opts.steamId) ?? s.players[0];
+	if (c.accepted < CHAT_TERMS_VERSION || !who) return 0;
+	const side = s.factions.findIndex((f) => f.name === who.faction);
+	c.seq++;
+	c.lines.push({
+		seq: c.seq,
+		sentUtc: new Date().toISOString(),
+		channel: opts.channel ?? 'Team',
+		faction: FACTION_LABELS[side] ?? null,
+		steamId: who.steamId || null,
+		realName: who.name,
+		hiddenName: HIDDEN_NAMES[c.seq % HIDDEN_NAMES.length],
+		anonymous: !!opts.anonymous,
+		text,
+		rawText: opts.typed ?? text,
+		ping: false
+	});
+	if (c.lines.length > CHAT_KEEP) c.lines.splice(0, c.lines.length - CHAT_KEEP);
+	return c.seq;
 }
 
 // The schema live build CL-501228 reports from GET /v1/config (captured 2026-09-14; CL-499480's
@@ -474,7 +541,17 @@ function seed(name: string): State {
 		d: number,
 		c: number,
 		p: number
-	): Player => ({ name: n, steamId: id, faction: f, kills: k, deaths: d, cash: c, pingMs: p });
+	): Player => ({
+		name: n,
+		steamId: id,
+		faction: f,
+		hiddenName: hiddenNameFor(id),
+		anonymous: false,
+		kills: k,
+		deaths: d,
+		cash: c,
+		pingMs: p
+	});
 	const state: State = {
 		serverName: name,
 		maxPlayers: 32,
@@ -599,6 +676,13 @@ function seed(name: string): State {
 	};
 	state.configText = seedConfig(state);
 	return state;
+}
+
+/** Turns a demo player's anonymous mode on or off (tests); false when nobody on has that SteamID. */
+export function setMockAnonymous(key: string, steamId: string, on: boolean): boolean {
+	const player = stateFor(key).players.find((p) => p.steamId === steamId);
+	if (player) player.anonymous = on;
+	return !!player;
 }
 
 /**
@@ -823,10 +907,14 @@ function tick(s: State): void {
 	// Someone new drifts in now and then; quicker while the server is quiet, so joins (and the
 	// triggers that watch for them) are easy to see on the demo.
 	if (s.players.length < 16 && Math.random() < (s.players.length < 12 ? 0.2 : 0.04)) {
+		const joiner = s.nextJoiner++;
+		const steamId = String(76561198100000401n + BigInt(joiner));
 		const p: Player = {
-			name: JOINERS[s.nextJoiner % JOINERS.length],
-			steamId: String(76561198100000401n + BigInt(s.nextJoiner++)),
+			name: JOINERS[joiner % JOINERS.length],
+			steamId,
 			faction: s.factions[Math.floor(Math.random() * s.factions.length)].name,
+			hiddenName: hiddenNameFor(steamId),
+			anonymous: joinsAnonymous(joiner),
 			kills: 0,
 			deaths: 0,
 			cash: 0,
@@ -1186,7 +1274,12 @@ export function mockHandle(
 		});
 	}
 	if (route === 'GET players') {
-		return ok({ players: s.players });
+		// a build from before Season 3 says nothing of hidden names
+		return ok({
+			players: liveBuild()
+				? s.players.map(({ hiddenName: _h, anonymous: _a, ...before }) => before)
+				: s.players
+		});
 	}
 	if (p[0] === 'players' && p[1]) {
 		const player = s.players.find((x) => x.steamId === p[1]);

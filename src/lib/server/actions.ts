@@ -12,7 +12,8 @@ import { saneScores } from '../format';
 import { MAX_CHAT } from '../chat';
 import { hideSecretValues, redactSecrets, restoreSecrets, SECRET_PLACEHOLDER } from '../config-doc';
 import { feedReportOf } from '../feed-report';
-import { CHAT_MAX_LIMIT, CHAT_PAGE, chatReadOf, chatTermsOf } from '../chat-read';
+import { CHAT_MAX_LIMIT, CHAT_PAGE, chatReadOf, chatTermsOf, type ChatRead } from '../chat-read';
+import { hiddenNameOf } from '../anonymous';
 
 export interface ActionDef {
 	cap: Capability;
@@ -482,15 +483,20 @@ export const ACTIONS: Record<string, ActionDef> = {
 			if (!Array.isArray(d?.players))
 				throw new GameError(502, 'The server did not return a player list.', 'bad_response', d);
 			return {
-				players: d.players.map((p: any) => ({
-					name: p.name,
-					steamId: p.steamId,
-					faction: p.faction ?? null,
-					kills: p.kills ?? 0,
-					deaths: p.deaths ?? 0,
-					cash: p.cash ?? 0,
-					ping: p.pingMs ?? p.ping ?? null
-				}))
+				players: d.players.map((p: any) => {
+					// Season 3: the name the others see, kept only for a player in anonymous mode
+					const hiddenName = hiddenNameOf(p);
+					return {
+						name: p.name,
+						steamId: p.steamId,
+						faction: p.faction ?? null,
+						kills: p.kills ?? 0,
+						deaths: p.deaths ?? 0,
+						cash: p.cash ?? 0,
+						ping: p.pingMs ?? p.ping ?? null,
+						...(hiddenName ? { hiddenName } : {})
+					};
+				})
 			};
 		}
 	},
@@ -677,13 +683,12 @@ export const ACTIONS: Record<string, ActionDef> = {
 		cap: 'chat.read',
 		poll: true,
 		mutating: false,
-		run: async (c, p) => {
-			const after = int(p.after, 0, 0, Number.MAX_SAFE_INTEGER);
-			const limit = int(p.limit, CHAT_PAGE, 1, CHAT_MAX_LIMIT);
-			const read = chatReadOf(await c.json('GET', `/v1/chat?after=${after}&limit=${limit}`));
-			if (!read) throw new GameError(502, 'The server did not return its chat.', 'bad_response');
-			return read;
-		}
+		run: (c, p) =>
+			readChat(
+				c,
+				int(p.after, 0, 0, Number.MAX_SAFE_INTEGER),
+				int(p.limit, CHAT_PAGE, 1, CHAT_MAX_LIMIT)
+			)
 	},
 
 	// ---- operator ----
@@ -1074,6 +1079,25 @@ export const ACTIONS: Record<string, ActionDef> = {
 		}
 	}
 };
+
+/**
+ * The chat lines after `after`, oldest first, `limit` at most: the one request that reads the chat
+ * from the game. Two callers: the action above, for a reader's Chat tab, and the worker's chat
+ * rules (chat-look.ts), which give the read less time than a request usually gets. Players'
+ * messages: handed to the caller, and neither stored nor forwarded here.
+ */
+export async function readChat(
+	c: WardogsClient,
+	after: number,
+	limit: number,
+	timeoutMs?: number
+): Promise<ChatRead> {
+	const read = chatReadOf(
+		await c.json('GET', `/v1/chat?after=${after}&limit=${limit}`, undefined, timeoutMs)
+	);
+	if (!read) throw new GameError(502, 'The server did not return its chat.', 'bad_response');
+	return read;
+}
 
 const RAW_HEADERS = ['content-type', 'etag', 'retry-after'];
 

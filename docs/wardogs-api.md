@@ -269,6 +269,19 @@ routes:
   that numbers from the start again is told as the console tells it, by a `latestSeq` below the
   last line read, and also by its start time moving on. The demo server serves the three routes,
   with its own stand-in terms and a scripted chat.
+  The worker reads `GET /v1/chat` too, for the rules that answer what players type
+  (`src/lib/server/chat-look.ts`; a Chat command and a Staff call): only on a server with such a
+  rule switched on and players on it, after its look, every two seconds, with three seconds for the
+  answer. It finds its place before it acts on anything: a read of `after=0&limit=1`, for
+  `latestSeq` alone, then `after=<latestSeq>&limit=200`, which must bring nothing (a read that
+  does bring lines moves the place on and is made again). From then on it acts on the lines after
+  the place, 200 at a time; a full page, or a `latestSeq` below the place, sends it back to
+  finding. It depends on `latestSeq` being the server's newest line, as the console's own client
+  does: an answer without one, or with one below a line it carries, counts as a failed read, and
+  the rules' rows say the chat cannot be read. Seeing one real answer would settle this. A 409
+  `chat_terms_not_accepted` is asked again once a minute; a 429 holds the server, as at any
+  request. What it reads is answered in the same look and kept nowhere. The demo's scripted chat
+  has a `!rules` and an `!admin` line for these rules.
 - **The event feed waits on those terms.** `GET /v1/feed` gains `pausedForTerms`, which the console
   shows as "Paused: the event feed sends nothing until the chat terms are accepted." Whether an
   acceptance outlasts a restart is not known. This one Warcon reads (`feedReportOf` and the `terms`
@@ -276,7 +289,31 @@ routes:
   holding the feed back, before any fault of the file's lines (a feed switched off in the file
   comes first).
 - **Players** gain `hiddenName` (the name other players see) and `anonymous` (anonymous mode: other
-  players see only the hidden name) in `GET /v1/players`.
+  players see only the hidden name) in `GET /v1/players`. Seen on a live server on 2026-11-12
+  (100 players): each row is `{ name, steamId, faction, hiddenName, anonymous, kills, deaths,
+  cash, pingMs }`; every player has a hidden name, one word of 3 to 9 letters, 96 different ones
+  among the hundred (they are not unique); one player was anonymous, with their own `name` and a
+  SteamID like anyone's. The event feed gives no sign of it: on five other servers each of the
+  422 players named in the last kills carried the same name as on the list, which points to the
+  feed naming a player by their own name whatever their mode (nobody anonymous was picked out
+  among them, so it is not proof).
+  What Warcon does with them (`src/lib/anonymous.ts`): the `players` action keeps `hiddenName` on
+  a row only while `anonymous` is true; staff see both names (the player lists, the past-players
+  search, the player page, a match's page) and each session and each player's line of a match
+  keep the hidden name they were played under (`player_sessions.hidden_name`,
+  `match_players.hidden_name`: the last one seen, kept when the player leaves the mode;
+  `player_sessions.anonymous` says whether the session's last look still saw them in it); what is
+  said to anyone else names the player by the hidden name, looked up by SteamID and never taken
+  from the feed: a rule's message about another player, the Discord status card and bounty
+  cards, the public status page, and the public page of a match they played any of hidden
+  (`publicMatch`: its lines, awards and kills, with a stand-in where their SteamID was). A public
+  career leaves such a match out of its last matches (`loadCareer`'s `publicView`) and such a
+  player out of its most killed and nemeses (`publicCombat`). The public leaderboards and a
+  career's totals count and name by SteamID as before, and that undoes the rest where
+  leaderboards are public: the board's rows seen in the last minute, less the roster's, are the
+  hidden players. A worker that has just started names hidden players from the live view the one
+  before it stored until its own first look (`killerVars().prime`). The demo server gives every
+  player a hidden name and puts every third player who drifts in into anonymous mode.
 - **Status** gains, beside the welcome popup's limits (above), `afk: { timeoutSeconds,
   minTimeoutSeconds, maxTimeoutSeconds }` (600, 300 and 1800 in the demo and on CL-533689).
 - **Config.** Beside the welcome popup's four keys (above), a new section
